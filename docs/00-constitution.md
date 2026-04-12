@@ -6,11 +6,13 @@ This document defines the non-negotiable principles of the system.
 
 ## 1. No Monolithic Runtime
 
-Weaver does not rely on a single embedded runtime (e.g. a Lisp machine).
+Weaver does not rely on a single embedded runtime as the universal medium of extension.
 
 - Capabilities are distributed across services.
 - Failures are isolated.
-- The system remains responsive under partial failure.
+- The core remains responsive under partial failure.
+
+The system must not require all extensibility to exist inside one privileged language image or process.
 
 ---
 
@@ -21,108 +23,195 @@ At all times, the user must be able to answer:
 - What is happening?
 - Why is it happening?
 - What can I do here?
+- Which service, behavior, or fact made this possible?
 
-All system elements expose:
+All meaningful system elements must expose:
+
 - metadata
 - provenance
-- capabilities
 - relationships
+- applicability
+- traceability
+
+Opacity is a defect.
 
 ---
 
-## 3. Facts Over Objects
+## 3. Entities Are Untyped
 
-The system is modeled as:
+Entities are opaque, addressable references only.
+
+Entities do not carry intrinsic type, class, or method identity.
+
+Interpretation arises from:
+
+- facts
+- tags
+- derived views
+- behavior preconditions
+
+No behavior may depend on privileged object essence.
+
+---
+
+## 4. Facts Over Objects
+
+The system is modeled in terms of:
 
 - entities
-- tags
 - facts about entities
 - events
 - behaviors
+- authorities
 
-There are no authoritative “objects with methods”.
+There are no authoritative objects with owned methods.
 
-Capabilities emerge from:
-- facts
-- behaviors reacting to those facts
+Capabilities are not properties of objects. They emerge from current context.
 
 ---
 
-## 4. Behavior Over Invocation
+## 5. Behavior Over Invocation
 
-Function calls are not the primary abstraction.
+Direct function invocation is not the primary model of composition.
 
 Instead:
-- behaviors react to events and fact patterns
-- actions emerge from context
-- composition is declarative and reactive
+
+- events occur
+- facts hold
+- behaviors react
+- actions become applicable in context
+
+Composition is reactive, contextual, and explainable.
 
 ---
 
-## 5. Distribution Is First-Class
+## 6. Distribution Is First-Class
 
-The system is inherently distributed:
+Weaver is inherently distributed.
 
-- services run independently
-- communication is explicit (message bus)
-- latency and partial knowledge are acknowledged realities
+- Services run independently.
+- Communication is explicit.
+- Knowledge may be partial.
+- Latency is real.
+- Failure is expected.
 
-The system must:
-- degrade gracefully
-- remain explainable under distribution
+The system must remain usable and explainable under these conditions.
+
+Distribution must not be hidden behind misleading assumptions of local immediacy.
 
 ---
 
-## 6. Context Defines Capability
+## 7. Context Defines Capability
 
-Available actions are not static.
+Available actions are not fixed by nominal type.
 
 They are derived from:
+
 - current facts
-- active entities
+- current events
+- current workspace context
 - available services
+- applicable behaviors
 
-The system answers:
-> “What can I do here?” dynamically.
+The primary interaction question is:
 
----
-
-## 7. Workspaces Are Lenses, Not Containers
-
-Workspaces:
-- shape visibility and context
-- do not isolate entities
-
-All entities remain globally addressable.
+> What can I do here now?
 
 ---
 
-## 8. UI Is a Projection, Not an Authority
+## 8. Workspaces Are Lenses, Not Containers
 
-No service owns UI.
+Workspaces shape visibility, focus, and interpretation.
 
-- Services provide data and intent
-- Core renders UI consistently
+They do not own or imprison entities.
+
+- entities remain globally addressable
+- buffers may be compared across workspaces
+- projects may be referenced across workspace boundaries
+
+A workspace is a contextual lens, not an isolated box.
 
 ---
 
-## 9. Composition Is a First-Class Capability
+## 9. UI Is Not Authoritative
+
+Weaver does not have a canonical UI.
+
+User interfaces are independent clients that:
+
+- subscribe to facts and events
+- derive local views
+- render state
+- invoke actions
+
+The core does not own rendering.
+
+---
+
+## 10. UI as Materialized View
+
+A UI is an eventually consistent materialized view over system state.
+
+- It may cache and derive local projections
+- It may present state differently from other clients
+- It may compute additional presentation-specific structures
+
+UI state must not masquerade as shared semantic truth.
+
+---
+
+## 11. Shared State vs Local View
+
+Weaver distinguishes between:
+
+- shared semantic state (facts, events, relations)
+- client-local view state (layout, visualization, transient projections)
+
+Only shared semantic state participates in system-wide behavior.
+
+Client-local view state remains outside the core model.
+
+---
+
+## 12. Composition Is First-Class
 
 Users must be able to:
 
-- define new behaviors
-- compose existing capabilities
-- introspect and debug compositions
+- define behaviors
+- compose capabilities
+- inspect compositions
+- debug compositions
+- understand why compositions fired or did not fire
+
+Weaver must preserve user agency over system behavior.
 
 ---
 
-## 10. The System Must Remain Explainable
+## 13. Provenance Is Mandatory
 
-Every action must be traceable:
+Every fact, event, and derived action must be attributable.
 
-- which facts triggered it
-- which behavior executed
-- which service participated
+The system must preserve:
 
-Opacity is a bug.
+- source
+- authority
+- causal chain
+- freshness
+- derivation
 
+The user must be able to inspect why a fact exists and why an action is available.
+
+---
+
+## 14. Explainability Over Cleverness
+
+Convenience, automation, and reactivity are valuable only if they remain inspectable and understandable.
+
+When there is tension between:
+
+- opaque convenience
+- explainable behavior
+
+Weaver prefers explainable behavior.
+
+The system must remain legible to the user.

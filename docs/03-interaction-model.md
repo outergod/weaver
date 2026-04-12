@@ -1,46 +1,96 @@
 # Interaction Model
 
-## Principle
+Weaver is an interactive system centered on contextual applicability and discoverability.
 
-Interaction is context-driven.
+## 1. Primary Question
 
-The system answers:
-> What can I do here?
+The central interaction question is:
+
+> What can I do here now?
+
+This is answered from shared semantic state, not from UI structure.
 
 ---
 
-## Leader Key System
+## 2. Leader-Key Navigation
 
 Leader menus are derived from:
-- current context (facts)
+
+- current entity context
+- available facts
 - applicable behaviors
+- available services
+
+Leader menus are semantic projections.
+
+Each UI may render them differently.
 
 ---
 
-## Navigation
+## 6. Actions and Availability
 
-Primary modes:
-- search (fuzzy/global)
-- structural (facts)
-- contextual (current entity)
+Actions do not belong to entities.
 
----
+They become available when:
 
-## Workspaces
+- context satisfies behavior conditions
+- required services are available
+- relevant facts are present
 
-Workspaces:
-- define context
-- do not isolate entities
-
-Users can:
-- access buffers across workspaces
-- compare across projects
+This applicability is part of shared semantic state.
 
 ---
 
-## UI
+## 7. Explainability in Interaction
 
-UI elements:
-- are projections of state
-- are consistent across services
+Users must be able to inspect:
 
+- why an action is available
+- which facts contributed
+- which behaviors matched
+- which services participated
+
+This inspection is independent of how the UI presents it.
+
+---
+
+## 8. UI Independence
+
+Different UIs may:
+
+- render the same context differently
+- derive additional views
+- emphasize different aspects of state
+
+The system does not require a canonical presentation.
+
+---
+
+## 9. Local Interaction State
+
+Some interaction state may be client-local, including:
+
+- layout
+- focus within panes
+- transient selections
+- visual filters
+
+This state:
+
+- does not participate in global behavior
+- does not alter shared semantic truth
+
+---
+
+## 10. Shared Interaction State
+
+Some interaction state is shared because it affects system semantics.
+
+Examples:
+
+- compare targets
+- active tasks
+- selected entities (optional, policy-dependent)
+- workspace context (optional, policy-dependent)
+
+This state is represented as facts and participates in behavior.
