@@ -22,3 +22,4 @@ This repository is a monorepo. It separates concerns by project/workspace, not b
 - `protocol/` — shared protocol/schema definitions
 - `services/` — remote daemons and host-side services
 - `tools/` — developer tooling and scripts
+- `tui/` — minimal TUI (terminal UI) for testing
