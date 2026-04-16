@@ -12,15 +12,13 @@ It replaces monolithic extensibility with a distributed, introspectable model bu
 
 In Weaver, workflows do not arise from objects with methods or a single embedded runtime. They emerge from behaviors reacting to contextual fact patterns across a system of cooperating services.
 
-## Status
+## Repository layout
 
-This repository currently defines the conceptual foundations of Weaver:
+This repository is a monorepo. It separates concerns by project/workspace, not by repository.
 
-- constitutional principles
-- system model
-- architecture
-- interaction model
-- composition model
-- protocols
-- reference workflows
-- open questions
+- `docs/` — architecture, protocol, workflow, and open-question documents
+- `core/` — Weaver core runtime and foundational services
+- `ui/` — user interface(s)
+- `protocol/` — shared protocol/schema definitions
+- `services/` — remote daemons and host-side services
+- `tools/` — developer tooling and scripts
