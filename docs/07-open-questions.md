@@ -120,7 +120,17 @@ See composition-model §11.1.
 
 ---
 
-## 15. Dynamic Service Discovery
+## 15. Service-Author Abstractions for Self-Cause Discipline
+
+The protocol (§2.1) requires authorities to suppress events causally attributable to their own just-handled requests. Enforcement is currently service-side discipline.
+
+Follow-up: provide first-class abstractions for this — correlation tokens, request-scope guards, service-framework helpers that suppress self-caused emissions by default. Service authors should get this right by construction, not by vigilance.
+
+Shape of the abstractions, how they compose with async request handlers, and whether they live in the bus SDK layer or in a higher-level framework — all open.
+
+---
+
+## 16. Dynamic Service Discovery
 
 MVP and early iterations use **static service registration** (architecture §2.1). Services are listed in a config file or compiled in.
 
@@ -131,3 +141,127 @@ Open: when and how does Weaver introduce dynamic discovery?
 - authority claims interact with dynamic arrival (can a later-arriving service claim authority over an existing family? Can two instances of the same service compete?)
 
 Becomes relevant alongside distribution and the failure model. Deferred, not rejected.
+
+---
+
+## 17. Trace Log Retention and Compaction
+
+The trace log (architecture §10) is append-only; memory grows linearly with session duration. A retention policy is required for sustained use.
+
+Options:
+
+- (a) **Time-based truncation** — entries older than T discarded
+- (b) **Size-based truncation** — oldest entries discarded once the log exceeds S
+- (c) **Causal-graph pruning** — entries no longer referenced by any live fact, action entity, or derived view are garbage collected
+- (d) **Snapshot-and-truncate** — periodic fact-space snapshots allow older entries to be discarded; `why?` walks back to the snapshot rather than to origin
+- (e) **Tiered storage** — recent log in memory; older entries paged to persistent storage
+
+Consequences:
+
+- (a)/(b) sever long causal chains; `why?` breaks for anything crossing the horizon
+- (c) preserves `why?` by construction but expensive — per-entry reference tracking as facts assert/retract
+- (d) bounds memory and keeps `why?` honest up to the current snapshot horizon, which becomes a declared system property
+- (e) orthogonal to correctness; addresses scale
+
+Lean: (d) snapshot-and-truncate as the retention model, with `why?` declaring its horizon. (e) as a scale optimization on top when persistence becomes a concern.
+
+---
+
+## 18. Undo Model
+
+No undo model is committed. Without one, users lose work within the first minute of real use.
+
+Shape questions:
+
+- buffer-scoped, session-scoped, or cross-entity?
+- can behavior effects (facts asserted in response to edits) be undone, or only buffer content?
+- does redo exist?
+- how does undo interact with concurrent behavior edits (auto-format firing after a user edit)?
+
+Options:
+
+- (a) **Undo as composed behavior** — a behavior maintains edit history per buffer, reacts to an `undo` action by computing the inverse edit
+- (b) **Undo as a core primitive** — the core maintains per-buffer edit history intrinsically, not surfaced through the fact space
+- (c) **Undo as a service** — an "undo service" authoritatively owns history facts; undo is a request to that service
+- (d) **Undo as versioned content** — the `:content` component tracks versions natively; undo reverts to version N
+
+Consequences:
+
+- (a) ideologically pure and composable; fragile as user-scratch; core cannot guarantee undo works
+- (b) reliable and simple; breaks the principle that the core doesn't own behavior logic beyond ontology
+- (c) clean authority story; introduces a mandatory service; history-as-facts is expensive if fine-grained
+- (d) elegant if content components version anyway; composes well with the component model
+
+Lean: (c) + (d) combined — content components carry lightweight version tags as part of their update model; a governed history service reads them to implement undo/redo. Behavior effects that are pure derivations (e.g., `dirty`) re-derive naturally on revert; effects authored elsewhere become explicit concerns of the history service.
+
+Alternative defensible lean: (a) — if undo-as-composed-behavior compellingly demonstrates the composition model's power. Risk: undo is load-bearing for user trust; fragility is worse than simplicity.
+
+---
+
+## 19. Cursor, Selection, Point/Mark as Shared vs Local
+
+Cursor and selection are client-local view state by default (constitution §11). But many useful behaviors depend on cursor position (completion triggers, contextual actions). When does cursor promote to shared?
+
+Options:
+
+- (a) **Always local** — cursor never enters the fact space; cursor-dependent behaviors are impossible
+- (b) **Local by default, shared on explicit opt-in** — the client declares "my cursor is shared" as a fact; collaboration, cross-client visibility, and cursor-aware behaviors subscribe
+- (c) **Shared by construction** — cursor is always a fact; single-client is a degenerate case
+
+Consequences:
+
+- (a) simplest; forecloses a large class of useful behaviors
+- (b) clean principle; requires a promotion API; most real systems need this eventually
+- (c) maximum flexibility; every cursor move is fact churn at keystroke rate
+
+Lean: (b) local by default, opt-in for sharing. Cursor-aware behaviors subscribe to whatever cursor facts are published when the client opts in. Keeps single-client cursor fast; enables cursor-aware composition when requested.
+
+---
+
+## 20. Content-Addressable Projections for Large Buffers
+
+With `:content` as a component (system-model §2.4), fetching whole content for every query is inefficient when behaviors want "just this range" or "just this symbol."
+
+Options:
+
+- (a) **Range fetches** — component query accepts a range, returns just that range
+- (b) **Named projections** — components declare named projections (`:symbol-at-point`, `:first-line`, `:function-containing-point`); behaviors request by name
+- (c) **Virtual sub-entities** — each meaningful projection materializes as its own entity with facts
+- (d) **Range subscriptions** — behaviors subscribe to a content range; receive updates only when that range changes
+
+Consequences:
+
+- (a) simplest; inefficient for repeated same-range queries; no incrementality
+- (b) cleaner composition; fixed vocabulary; must be declared ahead
+- (c) uniform (everything is an entity) but massively multiplies entity count
+- (d) efficient for continuous observation; complex to implement
+
+Lean: (a) + (d) — range fetches as the basic primitive, range subscriptions as the optimization for repeat observers. (b) as sugar over (a) once patterns emerge. Avoid (c); projection-as-entity fragments the ontology.
+
+---
+
+## 21. Ephemeral / In-Memory-Only Buffers
+
+Path-less buffers (scratch, draft, compilation output, REPL) exist conceptually; MVP begins with "browse files" and excludes them (non-goal).
+
+Policy (largely implied by existing architecture; no real tension):
+
+- Path-less buffers are first-class buffer entities; no filesystem facts until a path is assigned
+- `save` action's applicability requires a path; when absent, `save` is not applicable
+- A `save-as` action takes a path argument; it is applicable to any unsaved buffer and asserts `buffer/path` as part of its execution
+- Closing an unpathed buffer is entity retraction; content is lost unless the user saved-as first
+
+Applied directly when path-less buffers land post-MVP. No further design tension.
+
+---
+
+## 22. Bus Back-Pressure Beyond MVP
+
+Per-subscriber bounded queue + drop-oldest (architecture §3.1) works for in-memory MVP. At scale with real transports, new concerns surface:
+
+- Network partitions — what happens to queued messages when a subscriber disappears entirely?
+- Retracted facts during subscriber absence — does the reconnecting subscriber see the retraction, or only the current state?
+- Critical state transitions missed due to drop-oldest — when is "lossy OK" not OK?
+- Authoritative replay — does a reconnecting subscriber receive a state snapshot plus deltas, or just a snapshot?
+
+No committed alternatives; resurfaces when the distribution story is concrete (paired with §16).

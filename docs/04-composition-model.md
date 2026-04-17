@@ -216,7 +216,18 @@ Authors who need state to outlive the behavior's current source version mark the
 
 This rule keeps the reflective loop legible: after reload, the fact space's author-sourced content matches the current behavior source, with no ghosts from earlier versions.
 
-The reflective loop is the runtime validation of the composition model. If live redefinition breaks, composition is not truly first-class.
+### 11.2 Reload as Two-Phase Commit
+
+Reload is **atomic**: parse → validate → load-into-staging → swap. A failure at any stage is fully contained:
+
+- **Parse failure** — surfaces as a structured error with file and location; no swap occurs; the prior definition continues running; authoritative state is untouched.
+- **Validation failure** (type, schema, or referential issues) — same as parse failure; the prior definition stays live.
+- **Staging failure** (load-side errors inside the composition runtime) — same as validation failure.
+- **Post-swap runtime error** — the new definition is live and may error on subsequent invocation; errors surface via the structured error channel; the reflective loop remains usable.
+
+A reload never leaves the system with a half-loaded behavior, a silently dropped behavior, or a state split between old and new definitions. The "success" mode preserves authoritative state (§11); the "failure" mode additionally preserves the prior behavior.
+
+The reflective loop is the runtime validation of the composition model. If live redefinition breaks, composition is not truly first-class. If a syntax error in a reloaded behavior can silently disable editing, neither is.
 
 ---
 

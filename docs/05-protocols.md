@@ -31,6 +31,16 @@ An event should include:
 
 Events are transient and may trigger behavior.
 
+### 2.1 Self-Caused Events
+
+An authority **must not** emit an event for a state transition that is causally attributable to its own just-handled request, unless the event semantically represents something distinct from the request's effect.
+
+Example: the filesystem service handling a `write` request must not emit `fs/changed` for the file it just wrote on behalf of that request. Doing so causes clients (or the core) to react as if an external change occurred, producing silent reactive loops and incorrect buffer reloads.
+
+Enforcement is service-side discipline — the protocol does not police it. The implementation pattern is causal-parent correlation: services track their in-flight request handlers and suppress self-caused emissions within that scope. Weaver commits to providing reusable abstractions (correlation tokens, request-scope guards, service-framework helpers) in a later iteration so that service authors get this right by default rather than by attention.
+
+Until those abstractions exist, service authors bear the discipline directly, and violations are detectable in traces (a causal chain that loops back to the authority that started it).
+
 ---
 
 ## 3. Facts

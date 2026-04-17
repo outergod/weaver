@@ -31,7 +31,9 @@ The MVP is successful if:
 
 ### Behavior Engine (minimal)
 
-* At least one wired behavior with the shape: `on <event> when <fact-predicate> → assert/retract/emit`
+* **Two wired behaviors**, exercising distinct parts of the interface:
+  1. **Dirty-tracking** — `on buffer/edited → assert (dirty $buffer)`. Exercises event-to-fact; does not read content.
+  2. **Line-count derivation** — `on buffer/opened, on buffer/edited → query (get-component $b :content), count newlines, assert (buffer/line-count $b N)`. Exercises the component-access interface (system-model §2.4); demonstrates content-derived facts participating in the fact space; its derived fact is visible in the TUI and changes with every edit.
 * Behaviors are authored in **Steel** (see composition-model §7). MVP behaviors are shipped-in-source but loaded through the same path that user-scratch behaviors will use post-MVP.
 * Behavior matches are logged with: triggering event, matched facts, produced outputs
 * For each event under inspection, behaviors that were evaluated against it but did not fire retain a minimal near-match record (which predicate failed). Retention is scoped to the entity, action, or event being inspected — no global rule-engine trace.
@@ -86,6 +88,7 @@ The MVP is successful if:
 * Responds to read and write requests
 * Emits events on external change (`fs/changed`)
 * Fact assertions, not opaque notifications: change is represented as updated facts + an event
+* **Does not emit `fs/changed` for writes it performed in response to its own request handlers** (protocols §2.1). Self-caused change events produce silent reactive loops and break save→reload workflows.
 
 #### Action Execution (cross-authority coordination)
 
@@ -109,7 +112,7 @@ A minimal **TUI** that:
   * entities and facts currently holding on them
   * the event stream
   * the set of **currently applicable actions** (derived from fact + behavior state, not hard-coded menus)
-  * a **command-vocabulary view** — the action-entity space queryable by name or target (the `M-x` analog; see interaction-model §11)
+  * a **command-vocabulary view** — the action-entity space queryable by name or target (the `M-x` analog; see interaction-model §11). Supports prefix match and basic fuzzy ranking over `action/name`; results order by match quality.
   * service lifecycle status
 * Allows:
 
@@ -158,6 +161,10 @@ A user must be able to:
 * Runtime-authored user-scratch behaviors (the architectural lane exists; MVP only exercises shipped behaviors via the same load path)
 * Service scaffolding tooling (the eventual "defun-cheap service" — post-MVP)
 * Shell execution, task runners, or any service not required by the vertical slice
+* **Undo/redo** — no edit history, no reverse-operation model. Users will hit this in minute one; honest admission is better than half-implementation.
+* **Cursor and selection as shared state** — cursor is client-local view state for the MVP. Shared cursor facts (for collaboration or cross-client visibility) are deferred.
+* **Ephemeral / unsaved buffers** — the vertical slice begins with "browse files"; path-less scratch buffers and new-file creation are out of scope.
+* **Command-vocabulary polish beyond basic fuzzy ranking** — recency weighting, action arguments, chord prefixes, and visual refinement are deferred. Prefix match and basic fuzzy ranking are in.
 
 ---
 
@@ -170,8 +177,9 @@ A user must be able to:
 * At least one behavior is exercised end-to-end, and its firing is inspectable (inputs, match, outputs)
 * Behaviors are authored in Steel and loaded through the composition runtime
 * **The reflective loop works**: editing a behavior's source and triggering reload changes applicability on the next matching event, without restart and without losing authoritative fact state
+* **Reload failure is contained**: a syntax or validation error in a reloaded behavior surfaces as a structured error with file and location; the prior definition remains live; authoritative fact state is untouched (two-phase commit per composition-model §11.2)
 * **The TUI derives visible state and applicability from fact subscriptions**, not from local knowledge of service APIs
-* The command-vocabulary view lists action entities derived from the fact space — the same query that powers contextual menus
+* The command-vocabulary view lists action entities derived from the fact space — the same query that powers contextual menus — and supports prefix match + fuzzy ranking on `action/name`
 * The `why?` channel answers, for any visible entity or applicable action, which facts and which behaviors produced it
 * Every request schema declares its latency class (immediate / interactive / asynchronous), even if not enforced
 * The full workflow (open → edit → dirty → save → clean → reload behavior → observe change) works reliably

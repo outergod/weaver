@@ -96,6 +96,29 @@ User-scratch facts:
 
 Behaviors that predicate on user-scratch facts must be legible as such in traces — the `why?` channel surfaces non-authoritative provenance explicitly.
 
+### 2.4 Components vs Facts
+
+Some entity-attached state is not proposition-shaped — buffer content, rope structures, image bytes, parsed ASTs, tokenized streams. These are large, continuously mutating, and accessed by point-query rather than pattern-match. Representing them as facts bloats the fact space, multiplies provenance, and floods the trace log.
+
+The system distinguishes:
+
+- **Facts** — small propositions, pattern-matchable, provenance-heavy, assertion/retraction-driven. Participate in behavior preconditions.
+- **Components** — typed data records attached to entities, point-query-accessed, updated in place, not pattern-matched. Carry their own update cadence (see protocols §3.2).
+
+Components do **not** give entities intrinsic type. An entity remains an opaque, addressable reference (§1). The typed element is the **component kind** (`:content`, `:rope`, `:ast`), not the entity. An entity has components the way it has facts — **laterally**, not essentially. An entity may gain, lose, or combine component kinds without becoming a different *kind* of entity.
+
+Components follow the same authority rules as facts (architecture §5): each component kind is owned by one authority, which is responsible for its integrity and lifecycle. The authority may emit **facts derived from** a component for behaviors to predicate on (e.g., `(buffer/language $b :rust)` is a fact derived from the `:content` component).
+
+Behaviors:
+
+- cannot pattern-match on component values (values are opaque to the pattern engine)
+- can query a component directly via host primitive (`(get-component $e :content)`)
+- can predicate on facts derived from component state
+
+This framing preserves constitution §3 (entities untyped) and §4 (facts over objects) while providing a home for large, mutable, non-propositional state.
+
+The composition-language interface is independent of how the core represents components internally; it exposes typed accessors over opaque entity references regardless of whether the underlying implementation uses ECS archetypes, fact-space point-queries, or direct attribute storage.
+
 ---
 
 ## 3. Events
@@ -116,6 +139,17 @@ Events are transient.
 They may trigger behaviors, but they are not themselves persistent world state.
 
 Events must carry provenance and causal metadata where possible.
+
+### 3.1 Event Payload Discipline
+
+Events carry structured, typed payloads — not opaque signals. For mutation events, payloads describe *what changed*, not merely *that something changed*.
+
+The canonical example is the buffer edit event:
+
+- `buffer/edited` carries `(offset, length-replaced, inserted-text)` — a structured delta sufficient for incremental parsers, diff-tracking, and content-aware behaviors.
+- Multi-region edits (find-replace, multi-cursor) emit a sequence of edit events, not a single composite.
+
+This rule generalizes: events representing state transitions carry the information needed to reproduce or reason about the transition without round-tripping to the authority.
 
 ---
 

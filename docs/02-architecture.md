@@ -47,7 +47,7 @@ No service is entitled to become a replacement monolith.
 
 Services register with the core at startup. For the MVP and early iterations, registration is **static configuration** — services are listed in a config file or compiled in.
 
-**Dynamic discovery** — services advertising themselves over the bus and attaching at runtime — is deferred. It becomes relevant alongside the distribution story (§6 failure model) and remains an open follow-up; see 07-open-questions §15.
+**Dynamic discovery** — services advertising themselves over the bus and attaching at runtime — is deferred. It becomes relevant alongside the distribution story (§6 failure model) and remains an open follow-up; see 07-open-questions §16.
 
 ---
 
@@ -70,6 +70,18 @@ The bus must support:
 - structured errors
 - streaming where appropriate
 - provenance preservation
+
+### 3.1 Back-Pressure
+
+Each subscriber has a **bounded queue** on the bus. When the queue fills, the default policy is **drop-oldest** — the subscriber loses history it couldn't keep up with, but never blocks producers and never holds unbounded memory.
+
+Subscribers may declare alternative policies at subscription time:
+
+- **drop-newest** — keep the oldest queued events, drop incoming ones (rare; for strict-history consumers)
+- **block-with-timeout** — back-pressure producers until the consumer catches up or the timeout expires (for strict-delivery consumers willing to pay the coupling cost)
+- **larger bound** — a larger queue size, up to a configured ceiling
+
+No policy allows unbounded memory growth; no policy allows a single slow subscriber to block the bus indefinitely. These constraints hold across all transports (in-memory MVP and later distributed).
 
 ---
 
@@ -235,6 +247,18 @@ Performance-critical primitives live in services (Rust). Composition is glue. Wh
 
 The composition runtime supports live redefinition of behaviors and user-scratch fact families without core restart. Authoritative fact state is preserved across redefinitions. This is the runtime validation of constitution §13.
 
+### 9.4 Execution Model
+
+The composition runtime is **single-VM, single-threaded for fact-space semantics**, with **async continuations** for slow host primitives.
+
+- Behaviors see a consistent snapshot of the fact space. Writes serialize. There is no MVCC, no interleaving, no lock discipline for behavior authors to learn.
+- A behavior that calls a slow host primitive (bus request, service I/O, long-running query) **suspends** via continuation; the host event loop drives other behaviors in the meantime.
+- A behavior that runs pure computation for a long time **does** block other behaviors. Behavior authors are responsible for yielding through host primitives when they have long-running work. This is a footgun and a documentation responsibility.
+
+This matches Emacs's feel (single-threaded logical semantics with async-looking I/O), Steel's native capabilities (continuations are first-class in Scheme), and the existing PoC's thread-and-channel shape. It avoids the consistency burden that multi-threaded execution would impose on fact-space operations and on reflective-loop atomicity.
+
+Multi-threaded execution of behaviors (worker pools, parallel matching) remains possible as a future optimization for stateless derived-view computations, but is not the composition execution model.
+
 ---
 
 ## 10. Trace Model
@@ -251,6 +275,14 @@ The trace:
 - is not an analytics product; aggregation and summarization live in derived views, not the core
 
 Structured trace views (span trees, causal DAG visualizations, timing charts) are UI-side derived views over the raw log. The core does not define them.
+
+### 10.1 Traversal Complexity
+
+`why?` walks the causal chain from a fact, action entity, or behavior firing back to its originating event. The architecture commits to **O(path length)** traversal — not O(log length).
+
+This implies a **reverse causal index**: from each fact, action entity, and behavior firing, a reverse pointer to the trace entries that produced it. The index is maintained incrementally as the trace appends; query time stays stable as the trace grows.
+
+Implementations may choose the index structure (hash map, persistent tree, database index) — the architectural commitment is on the complexity class, not the representation. Without this commitment, `why?` degrades silently over long-lived sessions and the introspectability promise (constitution §2, §15) becomes aspirational.
 
 ---
 
