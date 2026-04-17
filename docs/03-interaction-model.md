@@ -94,3 +94,21 @@ Examples:
 - workspace context (optional, policy-dependent)
 
 This state is represented as facts and participates in behavior.
+
+---
+
+## 11. Command Vocabulary
+
+The set of all action entities (system-model §7.1) constitutes Weaver's command vocabulary — the canonical namespace for "what can be done in this system."
+
+A command-vocabulary view (analogous to Emacs's `M-x`) is a query over the action-entity space, optionally filtered by target or by applicability.
+
+Command discovery and contextual applicability are structurally identical: both are queries over the same fact space, differing only in their predicates.
+
+---
+
+## 12. Reflective Loop in Interaction
+
+Users may redefine composed behaviors and user-scratch fact families while the system is running. The interaction surface must expose this capability — editing a behavior, re-evaluating it, observing its effect on applicability and action entities — as a first-class workflow, not a recovery operation after restart.
+
+See constitution §13 and composition-model §11.

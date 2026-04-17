@@ -187,7 +187,37 @@ Weaver must preserve user agency over system behavior.
 
 ---
 
-## 13. Provenance Is Mandatory
+## 13. Live Reflection
+
+Users must be able to modify running behavior and observe the effect without restarting the system.
+
+This applies to:
+
+- behavior definitions
+- composed actions
+- applicability rules
+- user-authored facts and fact families
+
+Redefinition preserves session context. State authored by services and the core survives edits to composition.
+
+The reflective loop is the runtime validation of §2 — a system that is introspectable but not live-modifiable is only half-introspectable.
+
+---
+
+## 14. Two Lanes of Extension
+
+Extension flows through two lanes:
+
+- **Governed citizenship.** Services declare fact families, claim authority, publish under versioned schemas. Governed facts are load-bearing for the shared semantic world.
+- **User-scratch.** Composed behaviors observe, react, invoke actions, and may declare user-scratch fact families. User-scratch assertions carry non-authoritative provenance, cannot shadow governed facts, and are scoped by default.
+
+A promotion path connects the lanes. Scratch that proves its value may be refactored into a governed service.
+
+Both lanes are first-class. The ungoverned lane preserves user agency and velocity; the governed lane preserves the integrity of the shared semantic world.
+
+---
+
+## 15. Provenance Is Mandatory
 
 Every fact, event, and derived action must be attributable.
 
@@ -203,7 +233,7 @@ The user must be able to inspect why a fact exists and why an action is availabl
 
 ---
 
-## 14. Explainability Over Cleverness
+## 16. Explainability Over Cleverness
 
 Convenience, automation, and reactivity are valuable only if they remain inspectable and understandable.
 
