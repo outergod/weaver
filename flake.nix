@@ -24,10 +24,16 @@
           python314
           jq
           envsubst
-          multimarkdown
+          stdenv.cc.cc
         ];
 
         RUST_SRC_PATH = "${pkgs.rustPlatform.rustLibSrc}";
+
+        shellHook = ''
+          export UV_PYTHON_DOWNLOADS=never
+          export UV_PYTHON=$(command -v python)
+          export LD_LIBRARY_PATH=${pkgs.stdenv.cc.cc.lib}/lib:$LD_LIBRARY_PATH
+        '';
       };
     };
 }
