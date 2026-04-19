@@ -76,3 +76,38 @@ A service becomes unavailable while the core remains active.
 - graceful degradation
 - explicit lifecycle representation
 - trustworthy interaction model
+
+---
+
+## 5. Hunk Staging to Commit
+
+### Scenario
+The user has uncommitted changes in a Git-backed project. They want to stage some hunks, split a multi-purpose hunk, discard one, and commit only the staged work — entirely within Weaver, at editor speed.
+
+This workflow is the diagnostic for the *core orchestrates multi-authority actions* rule (architecture §11) under a real, daily-use multi-authority load. It is also a Gate of the Editor MVP (`mvp-editor.md` Gate 4).
+
+### Expected progression
+1. Git service publishes facts about the working tree: per-file modification status, per-hunk diff content, staged vs. unstaged status. Hunk entities have stable IDs derived from `(file-path, hunk-anchor)` so they survive re-derivation.
+2. Behaviors derive applicability of `stage-hunk`, `unstage-hunk`, `split-hunk`, `discard-hunk`, and `commit-staged` actions on the relevant entities.
+3. The user invokes `stage-hunk` on hunk H1. The action request flows to the **core**, which orchestrates: validates applicability against current facts, issues a `git/stage-hunk` request to the git service, observes the resulting fact updates (`hunk/staged: true`), and publishes the action's completion in the trace.
+4. The user invokes `split-hunk` on hunk H2. The git service performs the split (an internal mutation of its own fact family); new hunk entities materialize with stable IDs derived from the split anchors. The user stages one of the resulting sub-hunks; the other remains unstaged.
+5. The user invokes `discard-hunk` on hunk H3. Same orchestration shape; the git service retracts the hunk's facts; the action entity ceases.
+6. The user invokes `commit-staged`, providing a message. The core orchestrates: validates that at least one hunk is staged, issues `git/commit` to the git service, observes commit-id facts in response, and publishes the action's completion.
+7. `why?` on any action invocation in the chain returns: triggering event, contributing behaviors, fact predicates that matched, the request issued, the response received, and the resulting fact deltas.
+8. Throughout, no UI calls reach the git service directly — every state-changing operation flows through the core (architecture §11).
+
+### Properties tested
+- multi-authority action orchestration through the core
+- stable entity identity for hunks across split/stage/discard re-derivation
+- action provenance under a real workload (not a toy "open file" scenario)
+- interactive latency class (`docs/02-architecture.md §7.1`) under realistic Git operations
+- the rejection of UI-to-service shortcuts (architecture §11 last line)
+- the bus delivery class boundary: hunk-fact updates are authoritative; per-character output streams (e.g., from a long `git log`) are lossy
+
+### Failure modes worth surfacing
+- Git service slow to respond on a large repository — does the action remain interruptible? Does its applicability fact go stale visibly?
+- Concurrent edit to the working tree during staging — do hunk entity IDs survive? If anchors shift, what's the user-visible behavior?
+- Core crash mid-orchestration — on restart, does the trace recover the in-flight action's state, or does the action entity reappear as not-yet-invoked?
+
+### Why this workflow exists
+Workflow 3 (Git-Related Action Projection) proves that git actions can be *exposed* contextually. This workflow proves they can be *executed* — through the core, under real load, with the orchestration rule intact. If this workflow cannot be made to feel like Magit, the core-orchestrates-always rule must be revisited (Vidvik triage AC1).
