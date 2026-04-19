@@ -4,16 +4,20 @@ This document describes the conceptual protocol requirements for communication b
 
 ## 1. Message Categories
 
-Weaver communication consists of messages in at least these categories:
+Weaver communication consists of messages in at least these categories. Each category has a default **delivery class** (architecture §3.1) that governs sequence guarantees, gap detection, and reconnect/replay behavior:
 
-- event
-- fact-assert
-- fact-retract
-- request
-- response
-- stream-item
-- lifecycle
-- error
+| Category | Default delivery class |
+|---|---|
+| `event` | lossy |
+| `fact-assert` | authoritative |
+| `fact-retract` | authoritative |
+| `request` | request/response correlation; loss detected by requester timeout |
+| `response` | paired with request |
+| `stream-item` | lossy (loss is acceptable within a stream; stream boundaries are authoritative) |
+| `lifecycle` | authoritative |
+| `error` | authoritative |
+
+Authoritative messages carry per-publisher monotonic sequence numbers; subscribers detect gaps and may request snapshot-plus-deltas on reconnect. Lossy messages may be dropped under back-pressure (per-subscriber `drop-oldest` queue). See architecture §3.1 for the full delivery contract and §3.2 for permissible subscriber overrides.
 
 ---
 

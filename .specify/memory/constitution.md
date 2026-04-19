@@ -69,6 +69,46 @@ convention; not backward-incompatible (existing commits are not rewritten).
 Out of scope (deferred):
   - commitlint or git-hook enforcement of the convention.
   - Historical commit-message rewriting.
+
+----------------------------------------------------------------------
+AMENDMENT 2 — 2026-04-19 — version 0.2.0 → 0.3.0
+
+Origin: docs/mvp-review-hacker-triage.md Batch 1 (Vidvik review findings
+DB2, DB3, UQ3).
+
+Modified principles:
+  - P3 (Defensive Host, Fault-Tolerant Guest) — strengthened with explicit
+    requirement for host-enforced resource limits (CPU budget, recursion
+    depth, per-firing fact-write quota) such that no Steel computation can
+    hang the composition lane indefinitely. Cooperation by authors is
+    preferred but not relied upon for safety. Closes the L2/L1 spirit gap
+    identified in the Vidvik review (DB2).
+
+L1 / architecture documents updated in lockstep:
+  - ✅ docs/02-architecture.md §3.1 — restructured as Delivery Classes
+        (lossy vs authoritative); §3.2 retains subscriber-level overrides.
+        Resolves DB3 / SA2 / AC2.
+  - ✅ docs/02-architecture.md §9.4 — host-enforced budget/cancellation
+        added via new §9.4.1 (Resource Limits and Cooperative Cancellation).
+        Aligns with strengthened P3.
+  - ✅ docs/02-architecture.md §10.2 (new) — promoted snapshot-and-truncate
+        retention from open question to architectural commitment; declared
+        `why?` horizon as a system property. Resolves UQ3.
+  - ✅ docs/05-protocols.md §1 — annotated message categories with default
+        delivery class; cross-references architecture §3.1.
+  - ✅ docs/07-open-questions.md §17 — marked RESOLVED with pointer to §10.2.
+  - ✅ docs/07-open-questions.md §22 — marked RESOLVED with pointer to §3.1.
+
+Bump rationale: MINOR — materially expanded guidance via strengthened P3
+and three new architectural commitments. Not backward-incompatible since
+no implementation exists to break.
+
+Out of scope (deferred to later batches or sessions):
+  - DB1 (undo) — Batch 2: milestone split (Ontology Prototype + Editor MVP).
+  - SA4 (hunk-staging workflow) — Batch 3.
+  - AC1 (core as semantic bottleneck) — re-evaluate after Batch 3.
+  - AC3 (service-promotion ergonomics) — post-MVP engineering work.
+  - UQ2 (cursor promotion API) — post-Editor-MVP.
 -->
 
 # Weaver Constitution (Engineering — L2)
@@ -94,9 +134,9 @@ Predicates, projections, and derivations MUST be pure functions of fact-space st
 
 ### 3. Defensive Host, Fault-Tolerant Guest
 
-Host primitives exposed to Steel MUST validate inputs at the boundary, MUST NOT panic on guest input, and MUST recover from behavior errors without corrupting fact-space or trace integrity. The host MUST survive at minimum: Steel infinite loop, malformed fact assertion, bus timeout, mid-request service crash.
+Host primitives exposed to Steel MUST validate inputs at the boundary, MUST NOT panic on guest input, and MUST recover from behavior errors without corrupting fact-space or trace integrity. The host MUST enforce composition resource limits — per-firing CPU budget, recursion depth, and per-firing fact-write quota — such that no Steel computation can hang the composition lane indefinitely. The host MUST survive at minimum: Steel infinite loop, malformed fact assertion, bus timeout, mid-request service crash. Behavior authors SHOULD cooperate with these limits via host primitives that yield (continuations, async I/O); cooperation is preferred but not relied upon for safety.
 
-**Rationale:** Steel is dynamically typed and user-editable; the Reflective Loop's promise of "safe to experiment" depends on a host that cannot be killed by guest mistakes. See `docs/04-composition-model.md §12` (Event-Loop Stability).
+**Rationale:** Steel is dynamically typed and user-editable; the Reflective Loop's promise of "safe to experiment" depends on a host that cannot be killed by guest mistakes *and* a composition lane that cannot be hung by them. Host survival without lane responsiveness is Emacs's old wound with better nouns. See `docs/02-architecture.md §9.4.1` (Resource Limits and Cooperative Cancellation) and `docs/04-composition-model.md §12` (Event-Loop Stability).
 
 ### 4. Simplicity in Implementation, Not in Architecture
 
@@ -248,4 +288,4 @@ AI contributions bind to this constitution: fact-style commits, doc updates as p
 - SemVer applies to L2 itself: MAJOR for backward-incompatible principle changes, MINOR for added principles, PATCH for clarifications.
 - All PRs MUST verify compliance with relevant L2 principles. Violations MUST be justified in the plan's Complexity Tracking section.
 
-**Version**: 0.2.0 | **Ratified**: 2026-04-19 | **Last Amended**: 2026-04-19
+**Version**: 0.3.0 | **Ratified**: 2026-04-19 | **Last Amended**: 2026-04-19

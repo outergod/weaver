@@ -71,17 +71,37 @@ The bus must support:
 - streaming where appropriate
 - provenance preservation
 
-### 3.1 Back-Pressure
+### 3.1 Delivery Classes
 
-Each subscriber has a **bounded queue** on the bus. When the queue fills, the default policy is **drop-oldest** — the subscriber loses history it couldn't keep up with, but never blocks producers and never holds unbounded memory.
+Each message on the bus carries a **delivery class** that determines the guarantees the bus must uphold for it. Two classes:
 
-Subscribers may declare alternative policies at subscription time:
+**Lossy** (default for: `event`, `stream-item`)
 
-- **drop-newest** — keep the oldest queued events, drop incoming ones (rare; for strict-history consumers)
-- **block-with-timeout** — back-pressure producers until the consumer catches up or the timeout expires (for strict-delivery consumers willing to pay the coupling cost)
-- **larger bound** — a larger queue size, up to a configured ceiling
+- Bounded per-subscriber queue with **drop-oldest** policy.
+- No sequence guarantees; subscribers receive what fits.
+- No replay on reconnect; recovery is by re-subscription.
+- Suitable for: progress notifications, telemetry, derived-view ticks, intra-stream items.
 
-No policy allows unbounded memory growth; no policy allows a single slow subscriber to block the bus indefinitely. These constraints hold across all transports (in-memory MVP and later distributed).
+**Authoritative** (default for: `fact-assert`, `fact-retract`, `lifecycle`, `error`)
+
+- Per-publisher monotonic sequence numbers; subscribers detect gaps.
+- Bounded queue with **block-with-timeout** as the default policy; configurable to **larger bound**.
+- On reconnect, the subscriber receives a state snapshot of the relevant fact families followed by the deltas missed since the snapshot's sequence — per-publisher streams are resumable.
+- Suitable for: anything load-bearing for the fact space, the trace, or `why?`.
+
+Publishers MAY NOT downgrade an authoritative message to lossy at the wire level. Subscribers MAY upgrade their per-subscription handling within reason (for example, a debugging subscriber may capture `event` traffic with stricter retention), but the bus's correctness contract is fixed by the publisher's class.
+
+Requests and responses are correlated by request ID; loss is detected by the requester's timeout, not by the bus's class machinery.
+
+### 3.2 Back-Pressure Overrides
+
+Within the constraints of the message's delivery class, subscribers may declare alternative policies at subscription time:
+
+- **drop-newest** — keep the oldest queued items, drop incoming ones (rare; for strict-history consumers; legal only on lossy class).
+- **block-with-timeout** — back-pressure producers until the consumer catches up or the timeout expires (default for authoritative; opt-in for lossy when consumer cannot tolerate loss within the lossy budget).
+- **larger bound** — a larger queue size, up to a configured ceiling.
+
+No policy allows unbounded memory growth; no policy allows a single slow subscriber to block the bus indefinitely. The authoritative class's `block-with-timeout` is bounded by the timeout — never `block-forever`. These constraints hold across all transports (in-memory MVP and later distributed).
 
 ---
 
@@ -253,11 +273,29 @@ The composition runtime is **single-VM, single-threaded for fact-space semantics
 
 - Behaviors see a consistent snapshot of the fact space. Writes serialize. There is no MVCC, no interleaving, no lock discipline for behavior authors to learn.
 - A behavior that calls a slow host primitive (bus request, service I/O, long-running query) **suspends** via continuation; the host event loop drives other behaviors in the meantime.
-- A behavior that runs pure computation for a long time **does** block other behaviors. Behavior authors are responsible for yielding through host primitives when they have long-running work. This is a footgun and a documentation responsibility.
+- A behavior that runs pure computation may approach its budget; the host enforces the limit (see §9.4.1). Behavior authors are encouraged to yield through host primitives when they have long-running work. Cooperation is preferred but not relied upon for safety.
 
 This matches Emacs's feel (single-threaded logical semantics with async-looking I/O), Steel's native capabilities (continuations are first-class in Scheme), and the existing PoC's thread-and-channel shape. It avoids the consistency burden that multi-threaded execution would impose on fact-space operations and on reflective-loop atomicity.
 
 Multi-threaded execution of behaviors (worker pools, parallel matching) remains possible as a future optimization for stateless derived-view computations, but is not the composition execution model.
+
+### 9.4.1 Resource Limits and Cooperative Cancellation
+
+The host MUST enforce composition resource limits such that no Steel computation can hang the composition lane indefinitely. Required limits:
+
+- **Per-firing CPU budget.** Each behavior firing receives a wall-clock budget (configurable; sensible default in the interactive latency class per §7.1). On exhaustion, the host interrupts the VM at a safe instruction boundary.
+- **Recursion depth.** Steel call-stack depth is bounded; depth violations interrupt the firing.
+- **Per-firing fact-write quota.** A bound on the number of fact assertions, retractions, and intent emissions per firing; exhaustion interrupts the firing.
+- **Loop-depth guard for reactive cascades.** Already specified in composition-model §12.1; reaffirmed here as a host responsibility.
+
+Interruption semantics:
+
+- Interrupted firings produce a structured trace entry (firing ID, cause, exhausted limit, partial outputs).
+- Tentative writes accumulated during an interrupted firing are rolled back; the fact space is not left in an intermediate state.
+- The lane resumes; subsequent behaviors fire normally.
+- Repeated interruption of the same behavior is itself a fact (`behavior/interrupted-count`); persistent offenders may be quarantined by composed monitoring behaviors or by operator action.
+
+This requirement aligns architecture §9.4 with L2 constitution Principle 3 (Defensive Host, Fault-Tolerant Guest): host survival is necessary but not sufficient — the lane must remain responsive even when guest code misbehaves.
 
 ---
 
@@ -283,6 +321,23 @@ Structured trace views (span trees, causal DAG visualizations, timing charts) ar
 This implies a **reverse causal index**: from each fact, action entity, and behavior firing, a reverse pointer to the trace entries that produced it. The index is maintained incrementally as the trace appends; query time stays stable as the trace grows.
 
 Implementations may choose the index structure (hash map, persistent tree, database index) — the architectural commitment is on the complexity class, not the representation. Without this commitment, `why?` degrades silently over long-lived sessions and the introspectability promise (constitution §2, §15) becomes aspirational.
+
+### 10.2 Retention
+
+The trace grows linearly with session duration; sustained use requires a retention policy. The architecture commits to **snapshot-and-truncate** as the retention model:
+
+- Periodically (cadence configurable; triggered by trace size or age), the core captures a **fact-space snapshot** — the full authoritative fact state — and writes it to the trace as a checkpoint entry.
+- Trace entries older than the snapshot's sequence may be discarded once no live fact, action entity, or derived view references them.
+- `why?` traversal walks back to the most recent snapshot rather than to system origin. The snapshot horizon is a **declared system property**: clients can query the current `why?` horizon and surface it in operator views.
+
+Tiered storage (recent log in memory, older entries paged to persistent storage) is orthogonal to correctness and may be added as a scale optimization without changing the retention contract.
+
+Causal-graph pruning (per-entry reference tracking with retraction-driven garbage collection) and time-based truncation are explicitly rejected:
+
+- Pruning is too expensive for the per-entry write rate.
+- Time-based truncation severs causal chains arbitrarily and breaks `why?` for anything crossing the horizon without a snapshot to anchor against.
+
+The horizon-as-declared-property requirement is non-negotiable: a `why?` answer that silently truncates is worse than one that says "this trail ends at the last snapshot."
 
 ---
 

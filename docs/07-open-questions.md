@@ -144,26 +144,17 @@ Becomes relevant alongside distribution and the failure model. Deferred, not rej
 
 ---
 
-## 17. Trace Log Retention and Compaction
+## 17. Trace Log Retention and Compaction — RESOLVED
 
-The trace log (architecture §10) is append-only; memory grows linearly with session duration. A retention policy is required for sustained use.
+Resolved in architecture §10.2: snapshot-and-truncate is the committed retention model, with the snapshot horizon as a declared system property queryable via `why?`. Tiered storage (option e) remains an orthogonal scale optimization. Time-based truncation (a/b) and causal-graph pruning (c) are explicitly rejected.
 
-Options:
+Original options preserved for context:
 
 - (a) **Time-based truncation** — entries older than T discarded
 - (b) **Size-based truncation** — oldest entries discarded once the log exceeds S
 - (c) **Causal-graph pruning** — entries no longer referenced by any live fact, action entity, or derived view are garbage collected
-- (d) **Snapshot-and-truncate** — periodic fact-space snapshots allow older entries to be discarded; `why?` walks back to the snapshot rather than to origin
-- (e) **Tiered storage** — recent log in memory; older entries paged to persistent storage
-
-Consequences:
-
-- (a)/(b) sever long causal chains; `why?` breaks for anything crossing the horizon
-- (c) preserves `why?` by construction but expensive — per-entry reference tracking as facts assert/retract
-- (d) bounds memory and keeps `why?` honest up to the current snapshot horizon, which becomes a declared system property
-- (e) orthogonal to correctness; addresses scale
-
-Lean: (d) snapshot-and-truncate as the retention model, with `why?` declaring its horizon. (e) as a scale optimization on top when persistence becomes a concern.
+- (d) **Snapshot-and-truncate** — periodic fact-space snapshots allow older entries to be discarded; `why?` walks back to the snapshot rather than to origin **[ADOPTED]**
+- (e) **Tiered storage** — recent log in memory; older entries paged to persistent storage **[ADOPTED as orthogonal optimization]**
 
 ---
 
@@ -255,13 +246,15 @@ Applied directly when path-less buffers land post-MVP. No further design tension
 
 ---
 
-## 22. Bus Back-Pressure Beyond MVP
+## 22. Bus Back-Pressure Beyond MVP — RESOLVED
 
-Per-subscriber bounded queue + drop-oldest (architecture §3.1) works for in-memory MVP. At scale with real transports, new concerns surface:
+Resolved in architecture §3.1 (Delivery Classes): authoritative messages (`fact-assert`, `fact-retract`, `lifecycle`, `error`) carry per-publisher monotonic sequence numbers; subscribers detect gaps and receive snapshot-plus-deltas on reconnect. Lossy messages (`event`, `stream-item`) keep `drop-oldest` semantics. `block-with-timeout` (bounded, never `block-forever`) is the default back-pressure for authoritative messages; lossy messages drop oldest under back-pressure.
 
-- Network partitions — what happens to queued messages when a subscriber disappears entirely?
-- Retracted facts during subscriber absence — does the reconnecting subscriber see the retraction, or only the current state?
-- Critical state transitions missed due to drop-oldest — when is "lossy OK" not OK?
-- Authoritative replay — does a reconnecting subscriber receive a state snapshot plus deltas, or just a snapshot?
+The original concerns map as follows:
 
-No committed alternatives; resurfaces when the distribution story is concrete (paired with §16).
+- **Network partitions / subscriber disappearance** — authoritative class buffers within transport limits; on reconnect, snapshot-plus-deltas brings the subscriber current.
+- **Retractions missed during absence** — captured in the per-fact-family snapshot taken at reconnect; retractions that occurred between snapshot and reconnect arrive in the delta stream.
+- **Critical state transitions missed due to drop-oldest** — these messages are now in the authoritative class and are not subject to drop-oldest at the wire level.
+- **Snapshot vs. snapshot+deltas on reconnect** — committed to snapshot+deltas; per-publisher sequence numbers make it implementable.
+
+Distribution-specific refinements (cross-network sequence ordering, snapshot transfer cost) become relevant when the distribution story is concrete and pair with §16.
