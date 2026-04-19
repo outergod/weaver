@@ -84,7 +84,7 @@ See architecture §10.
 
 What is the smallest in-memory prototype that can honestly validate the ontology before introducing distribution?
 
-Partially answered by the current MVP scope (`.agent/mvp.md`). Open question: what's the smallest *next* prototype that introduces real distribution without losing the reflective-loop feel?
+Partially answered by the current Ontology Prototype scope ([`mvp-ontology.md`](mvp-ontology.md)) and extended by the Editor MVP scope ([`mvp-editor.md`](mvp-editor.md)). Open question: what's the smallest *next* prototype that introduces real distribution without losing the reflective-loop feel?
 
 ---
 
@@ -158,34 +158,29 @@ Original options preserved for context:
 
 ---
 
-## 18. Undo Model
+## 18. Undo Model — RESOLVED for Editor MVP
 
-No undo model is committed. Without one, users lose work within the first minute of real use.
+The undo model is committed as a gate of the Editor MVP ([`mvp-editor.md`](mvp-editor.md) Gate 1). The Ontology Prototype ([`mvp-ontology.md`](mvp-ontology.md)) does not include undo and is honestly named to reflect that. Editor-shaped use waits for the Editor MVP.
 
-Shape questions:
+**Committed shape: (c) + (d) combined.** Content components carry lightweight version tags as part of their update model; a governed history service reads them to implement undo/redo. Behavior effects that are pure derivations (e.g., `dirty`) re-derive naturally on revert; effects authored elsewhere become explicit concerns of the history service.
 
-- buffer-scoped, session-scoped, or cross-entity?
-- can behavior effects (facts asserted in response to edits) be undone, or only buffer content?
-- does redo exist?
-- how does undo interact with concurrent behavior edits (auto-format firing after a user edit)?
-
-Options:
+Original options preserved for context:
 
 - (a) **Undo as composed behavior** — a behavior maintains edit history per buffer, reacts to an `undo` action by computing the inverse edit
 - (b) **Undo as a core primitive** — the core maintains per-buffer edit history intrinsically, not surfaced through the fact space
-- (c) **Undo as a service** — an "undo service" authoritatively owns history facts; undo is a request to that service
-- (d) **Undo as versioned content** — the `:content` component tracks versions natively; undo reverts to version N
+- (c) **Undo as a service** — an "undo service" authoritatively owns history facts; undo is a request to that service **[ADOPTED]**
+- (d) **Undo as versioned content** — the `:content` component tracks versions natively; undo reverts to version N **[ADOPTED, paired with (c)]**
 
-Consequences:
+Rejection rationale:
 
-- (a) ideologically pure and composable; fragile as user-scratch; core cannot guarantee undo works
-- (b) reliable and simple; breaks the principle that the core doesn't own behavior logic beyond ontology
-- (c) clean authority story; introduces a mandatory service; history-as-facts is expensive if fine-grained
-- (d) elegant if content components version anyway; composes well with the component model
+- (a) — too fragile for user trust; undo is load-bearing.
+- (b) — breaks the principle that the core does not own behavior logic beyond ontology.
 
-Lean: (c) + (d) combined — content components carry lightweight version tags as part of their update model; a governed history service reads them to implement undo/redo. Behavior effects that are pure derivations (e.g., `dirty`) re-derive naturally on revert; effects authored elsewhere become explicit concerns of the history service.
+Shape questions remain partially open and resolve during Editor MVP implementation:
 
-Alternative defensible lean: (a) — if undo-as-composed-behavior compellingly demonstrates the composition model's power. Risk: undo is load-bearing for user trust; fragility is worse than simplicity.
+- buffer-scoped, session-scoped, or cross-entity? — answered case-by-case in the history service's design.
+- redo? — yes, symmetric to undo.
+- undo and concurrent behavior edits (auto-format firing after a user edit)? — Editor MVP Gate 1 acceptance requires explicit semantics; expected resolution is "the history service records both, and undo of the user edit reverts both atomically."
 
 ---
 

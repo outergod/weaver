@@ -1,10 +1,12 @@
-## Weaver MVP — Definition
+## Weaver Ontology Prototype — Definition
+
+> **Milestone naming.** This document defines the **Ontology Prototype** — the first verifiable milestone in Weaver's development. It proves Weaver's ontology works end-to-end. It is **not** an editor MVP: undo/redo, async tasks, runaway-Steel containment in production conditions, and Magit-grade hunk staging are deferred. The next milestone — usable as a real editor for daily work — is the **Editor MVP**, defined in [`mvp-editor.md`](mvp-editor.md). Naming follows the framing decision in [`mvp-review-hacker-triage.md`](mvp-review-hacker-triage.md). Within this document, references to "the MVP" or "post-MVP" denote *this* milestone (Ontology Prototype) and the work that follows it.
 
 ### Goal
 
 Prove that Weaver's ontology — **entities, facts, events, behaviors, and applicability** — works end-to-end, over a shared bus, with every meaningful element introspectable, and that a **reflective loop** (live redefinition of behavior without restart) is real.
 
-The MVP is successful if:
+The Ontology Prototype is successful if:
 
 - user-visible state and applicable actions are **derived from the fact space**, not hard-coded in the UI
 - every fact and action can be explained by walking its provenance
