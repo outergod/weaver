@@ -46,6 +46,29 @@ Runtime guidance docs:
 
 Follow-up TODOs:
   - None deferred. All placeholders resolved with concrete values.
+
+----------------------------------------------------------------------
+AMENDMENT 1 — 2026-04-19 — version 0.1.0 → 0.2.0
+
+Added:
+  - Additional Constraints: Conventional Commits 1.0 with hybrid scope
+    vocabulary (public-surface names from Principle 7 when applicable;
+    workspace/area names otherwise). Breaking public-surface changes
+    require a `BREAKING CHANGE:` footer. Feeds Principle 8.
+
+Templates / dependent files updated:
+  - ✅ AGENTS.md — added "Commit conventions" section with examples.
+  - ✅ .specify/extensions/git/git-config.yml — migrated all 16 hook
+        messages to Conventional Commits style (`docs(specify): …` for
+        documentation-artifact commits; `chore(specify): …` for progress
+        checkpoints and housekeeping).
+
+Bump rationale: MINOR — materially expanded guidance via a new binding
+convention; not backward-incompatible (existing commits are not rewritten).
+
+Out of scope (deferred):
+  - commitlint or git-hook enforcement of the convention.
+  - Historical commit-message rewriting.
 -->
 
 # Weaver Constitution (Engineering — L2)
@@ -207,6 +230,7 @@ AI contributions bind to this constitution: fact-style commits, doc updates as p
 - **Configuration**: follows XDG base directories with environment-variable overrides. Secrets MUST NOT live in the repository or in default configuration.
 - **Serialization frontiers are independent**: fact tuples are the canonical semantic shape. Serializers (CBOR on the bus, JSON / TOON in the outer shell, native Steel values in-core) are per-frontier views. Steel ↔ wire conversion is defined once in the core so SDK consumers receive idiomatic language types.
 - **Constitution sync**: `.specify/memory/constitution.md` (L2) and `docs/00-constitution.md` (L1) MUST stay in sync. CI enforces this per Principle 17.
+- **Commit messages**: follow the [Conventional Commits 1.0](https://www.conventionalcommits.org/) specification — `<type>(<scope>): <description>`. Scope vocabulary is *hybrid*: use Principle 7 public-surface names (`bus`, `steel`, `fact`, `action`, `cli`, `config`) when the change touches a public surface; otherwise use workspace/area names (`core`, `ui`, `tui`, `docs`, `specify`). Conventional Commit types feed automated changelog generation and per-surface SemVer derivation under Principle 8. Breaking public-surface changes MUST include a `BREAKING CHANGE:` footer.
 
 ## Development Workflow
 
@@ -224,4 +248,4 @@ AI contributions bind to this constitution: fact-style commits, doc updates as p
 - SemVer applies to L2 itself: MAJOR for backward-incompatible principle changes, MINOR for added principles, PATCH for clarifications.
 - All PRs MUST verify compliance with relevant L2 principles. Violations MUST be justified in the plan's Complexity Tracking section.
 
-**Version**: 0.1.0 | **Ratified**: 2026-04-19 | **Last Amended**: 2026-04-19
+**Version**: 0.2.0 | **Ratified**: 2026-04-19 | **Last Amended**: 2026-04-19

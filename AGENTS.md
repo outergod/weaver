@@ -28,3 +28,17 @@ Start here before making changes.
   - `/speckit.implement` — execute the task list.
 - For trivial fixes (typos, single-line edits), edit directly but still follow Principle 10 (regression test before fix when applicable).
 
+## Commit conventions
+- Follow [Conventional Commits 1.0](https://www.conventionalcommits.org/): `<type>(<scope>): <description>`.
+- **Type vocabulary**: `feat`, `fix`, `refactor`, `docs`, `chore`, `test`, `build`, `ci`, `perf`, `style`.
+- **Scope vocabulary** (hybrid):
+  - Public surfaces (Principle 7): `bus`, `steel`, `fact`, `action`, `cli`, `config`.
+  - Workspace/area: `core`, `ui`, `tui`, `docs`, `specify`.
+- Breaking public-surface changes MUST include a `BREAKING CHANGE:` footer (drives MAJOR bumps under Principle 8).
+- **Examples**:
+  - `feat(bus): add streaming response message type`
+  - `fix(steel): prevent panic on malformed fact assertion`
+  - `refactor(core): extract trace-store migration helpers`
+  - `docs(specify): clarify retraction-task expectations`
+  - `chore(ci): pin Steel toolchain version`
+
