@@ -18,6 +18,21 @@ description: "Task list template for feature implementation"
 - **[Story]**: Which user story this task belongs to (e.g., US1, US2, US3)
 - Include exact file paths in descriptions
 
+## Weaver-Specific Task Categories
+
+<!--
+  Per the L2 Constitution, certain Weaver work carries additional discipline.
+  Tag tasks with these markers in the description (in addition to [P] and
+  [Story]). They are review notes; they do not affect parallel-execution
+  semantics.
+-->
+
+- **{retraction}** — task exercises a retraction path (Principle 20). REQUIRED whenever a task asserts facts.
+- **{host-primitive}** — task adds or changes a Steel host primitive (Principle 14). Description MUST link to the primitive's rationale, threat model, and resource budget.
+- **{schema-migration}** — task touches a fact-family schema (Principle 15). Additive by default; breaking changes require an explicit migration plan in the spec.
+- **{latency:immediate|interactive|async}** — declares the latency class for the operation per Principle 18 (`docs/02-architecture.md §7.1`).
+- **{surface:bus|steel|fact|action|cli|config}** — task changes a public surface (Principle 7). Pair with a changelog entry per Principle 8.
+
 ## Path Conventions
 
 - **Single project**: `src/`, `tests/` at repository root
@@ -183,6 +198,9 @@ Examples of foundational tasks (adjust based on your project):
 - Services before endpoints
 - Core implementation before integration
 - Story complete before moving to next priority
+- For tasks that assert facts: a `{retraction}` task MUST exist (Principle 20)
+- For tasks tagged `{host-primitive}`: rationale, threat model, and resource budget MUST land in the same PR as the implementation (Principle 14)
+- For tasks tagged `{schema-migration}` with breaking changes: migration task MUST precede consumer updates (Principle 15)
 
 ### Parallel Opportunities
 
