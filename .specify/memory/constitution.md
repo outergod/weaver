@@ -109,6 +109,41 @@ Out of scope (deferred to later batches or sessions):
   - AC1 (core as semantic bottleneck) — re-evaluate after Batch 3.
   - AC3 (service-promotion ergonomics) — post-MVP engineering work.
   - UQ2 (cursor promotion API) — post-Editor-MVP.
+
+----------------------------------------------------------------------
+AMENDMENT 3 — 2026-04-19 — version 0.3.0 → 0.4.0
+
+Origin: spec-review during /speckit.specify for the Hello-fact slice
+(specs/001-hello-fact/spec.md FR-007 / FR-008 framing tension surfaced
+the missing CLI-vs-bus boundary).
+
+Modified principles:
+  - P5 (Serialization and Open Standards) — added an explicit boundary
+    between CLI structured output (one-shot scripting; snapshot interface)
+    and continuous machine integration (bus-subscriber concern delivered
+    via services). Clarifies that agents, monitoring, introspection
+    clients, and language hosts MUST be designed as bus participants —
+    not as CLI parsers — to inherit delivery-class guarantees,
+    provenance, retraction, lifecycle signals, and reconnect semantics.
+
+L1 / architecture documents updated in lockstep:
+  - None this amendment. The boundary is a constitutional articulation
+    of an architectural shape already implied by docs/02-architecture.md
+    §3.1 (delivery classes) and the overall services-on-the-bus model;
+    no architectural document required new commitments.
+
+Bump rationale: MINOR — materially expanded guidance via a new
+positive constraint about where continuous-integration consumers live.
+Not backward-incompatible (no implementation exists; no consumer is
+relying on the old framing).
+
+Forward-looking implication:
+  - A future "introspection / agent service" slice is anticipated. It
+    will participate as a service on the bus, expose introspection
+    requests/responses, and be the primary surface for continuous
+    machine consumers. Hello-fact (specs/001-hello-fact) is being
+    aligned now so its bus-level inspection capability (FR-008) is
+    forward-compatible without rework.
 -->
 
 # Weaver Constitution (Engineering — L2)
@@ -150,11 +185,15 @@ Bus wire format (core ↔ services) is **CBOR** with a Weaver tag scheme (entity
 
 The outer shell (CLI) MUST support `--output=<format>` with **JSON** as the Day-1 minimum, exposed via a pluggable serde-style serializer. **TOON** is a v1.x roadmap aspiration, not a Day-1 gate. Output shape MUST mirror the bus fact/event/intent vocabulary. Tests MUST assert on deserialized structures, not on output strings.
 
+**CLI structured output is for one-shot scripting and human-adjacent tooling.** It is a snapshot interface: it cannot represent streaming state, sequence guarantees, snapshot-plus-deltas reconnect, or causal continuity through the trace. It MUST NOT be treated as the primary integration surface for continuous machine consumers.
+
+**Continuous machine integration — agents, monitoring tools, introspection clients, language hosts — is a bus-subscriber concern.** Such consumers participate as services (or service-like clients) on the bus, where they receive the full delivery-class guarantees of Principle 5 and Principle 7 and can walk the causal chain via the `why?` channel. New continuous-integration use cases MUST be designed as bus participants, not as CLI parsers.
+
 S-expressions belong to Steel source and the REPL only — never on the bus.
 
 Ecosystem standards (LSP, XDG base directories, OS-native file watching) are adopted where applicable. Weaver-original protocols are versioned per Principle 8.
 
-**Rationale:** Serialization frontiers are independent. The fact tuple is the canonical semantic shape; serializers are per-frontier views. Pluggable serializers make format evolution a dependency change, not a rewrite.
+**Rationale:** Serialization frontiers are independent. The fact tuple is the canonical semantic shape; serializers are per-frontier views. Pluggable serializers make format evolution a dependency change, not a rewrite. Conflating "structured CLI output" with "agent integration surface" is a category error: STDOUT is a snapshot, the bus is a stream. Designing agents around STDOUT JSON forecloses provenance, retraction, lifecycle signals, and reconnect — exactly the guarantees Weaver exists to provide.
 
 ### 6. Humane Shell
 
@@ -288,4 +327,4 @@ AI contributions bind to this constitution: fact-style commits, doc updates as p
 - SemVer applies to L2 itself: MAJOR for backward-incompatible principle changes, MINOR for added principles, PATCH for clarifications.
 - All PRs MUST verify compliance with relevant L2 principles. Violations MUST be justified in the plan's Complexity Tracking section.
 
-**Version**: 0.3.0 | **Ratified**: 2026-04-19 | **Last Amended**: 2026-04-19
+**Version**: 0.4.0 | **Ratified**: 2026-04-19 | **Last Amended**: 2026-04-19
