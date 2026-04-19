@@ -5,7 +5,7 @@
 branch_numbering: sequential
 
 # Commit message used by `git commit` during repository initialization
-init_commit_message: "[Spec Kit] Initial commit"
+init_commit_message: "chore(specify): initial commit"
 
 # Auto-commit before/after core commands.
 # Set "default" to enable for all commands, then override per-command.
@@ -13,53 +13,57 @@ init_commit_message: "[Spec Kit] Initial commit"
 # NOTE: per-event `enabled: true` is required because the parser in
 # scripts/bash/auto-commit.sh treats "section exists without enabled" as
 # opted-out rather than falling back to `default`.
+#
+# Message style: Conventional Commits 1.0 (per L2 constitution Additional
+# Constraints). `docs(specify): …` for documentation-artifact commits;
+# `chore(specify): …` for progress checkpoints and housekeeping.
 auto_commit:
   default: true
   before_clarify:
     enabled: true
-    message: "[Spec Kit] Save progress before clarification"
+    message: "chore(specify): save progress before clarification"
   before_plan:
     enabled: true
-    message: "[Spec Kit] Save progress before planning"
+    message: "chore(specify): save progress before planning"
   before_tasks:
     enabled: true
-    message: "[Spec Kit] Save progress before task generation"
+    message: "chore(specify): save progress before task generation"
   before_implement:
     enabled: true
-    message: "[Spec Kit] Save progress before implementation"
+    message: "chore(specify): save progress before implementation"
   before_checklist:
     enabled: true
-    message: "[Spec Kit] Save progress before checklist"
+    message: "chore(specify): save progress before checklist"
   before_analyze:
     enabled: true
-    message: "[Spec Kit] Save progress before analysis"
+    message: "chore(specify): save progress before analysis"
   before_taskstoissues:
     enabled: true
-    message: "[Spec Kit] Save progress before issue sync"
+    message: "chore(specify): save progress before issue sync"
   after_constitution:
     enabled: true
-    message: "[Spec Kit] Add project constitution"
+    message: "docs(specify): add project constitution"
   after_specify:
     enabled: true
-    message: "[Spec Kit] Add specification"
+    message: "docs(specify): add specification"
   after_clarify:
     enabled: true
-    message: "[Spec Kit] Clarify specification"
+    message: "docs(specify): clarify specification"
   after_plan:
     enabled: true
-    message: "[Spec Kit] Add implementation plan"
+    message: "docs(specify): add implementation plan"
   after_tasks:
     enabled: true
-    message: "[Spec Kit] Add tasks"
+    message: "docs(specify): add tasks"
   after_implement:
     enabled: true
-    message: "[Spec Kit] Implementation progress"
+    message: "chore(specify): implementation progress"
   after_checklist:
     enabled: true
-    message: "[Spec Kit] Add checklist"
+    message: "docs(specify): add checklist"
   after_analyze:
     enabled: true
-    message: "[Spec Kit] Add analysis report"
+    message: "docs(specify): add analysis report"
   after_taskstoissues:
     enabled: true
-    message: "[Spec Kit] Sync tasks to issues"
+    message: "chore(specify): sync tasks to issues"
