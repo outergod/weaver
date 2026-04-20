@@ -40,16 +40,16 @@ Per the L2 Constitution and the Vidvik review tasks-template additions, certain 
 
 **Purpose**: Workspace skeleton — make `cargo build --workspace` succeed (even with empty `fn main`).
 
-- [ ] T001 Update workspace `Cargo.toml` with `[workspace.package]` (edition = "2024", license, authors) and `[workspace.dependencies]` for shared deps (tokio, serde, serde_json, ciborium, clap, miette, thiserror, tracing, tracing-subscriber, proptest, vergen, crossterm)
-- [ ] T002 [P] Create `rust-toolchain.toml` pinning the stable channel (per L2 P19)
-- [ ] T003 [P] Update `.gitignore` to add `target/`, `**/*.rs.bk`, `*.sock` (Rust + bus socket file). Do **not** add `Cargo.lock` to `.gitignore` — workspace Cargo.lock MUST be tracked per L2 P19 (reproducible builds). Cargo's defaults are correct; this clause is for defensive clarity.
-- [ ] T004 [P] Create `CHANGELOG.md` at workspace root with initial entries: `bus protocol v0.1.0`, `buffer/dirty fact-family schema v0.1.0`, `CLI surface v0.1.0`, `configuration schema v0.1.0` (per L2 P7 / P8)
-- [ ] T005 Create `core/Cargo.toml` with both `[lib]` and `[[bin]]` targets, declaring workspace dependencies it needs and a `[build-dependencies]` entry for `vergen`
-- [ ] T006 Create `core/build.rs` invoking `vergen` to emit `VERGEN_GIT_SHA`, `VERGEN_GIT_DIRTY`, `VERGEN_BUILD_TIMESTAMP`, `VERGEN_CARGO_DEBUG` (per L2 P11)
-- [ ] T007 Create `core/src/lib.rs` with empty module declarations (`pub mod provenance; pub mod types; pub mod fact_space; pub mod bus; pub mod trace; pub mod behavior; pub mod inspect; pub mod cli;`)
-- [ ] T008 Create `core/src/main.rs` with a minimal `fn main()` that calls into `core::cli::run()` (returning `Result<(), miette::Report>`)
-- [ ] T009 [P] Create `tui/Cargo.toml` declaring a dependency on `core` (path = "../core") and workspace deps it needs (crossterm, tokio, ciborium, miette)
-- [ ] T010 [P] Create `tui/src/main.rs` with a minimal `fn main()` that calls into `tui::run()` plus `tui/src/lib.rs` with `pub mod client; pub mod render; pub mod commands;` and empty modules
+- [X] T001 Update workspace `Cargo.toml` with `[workspace.package]` (edition = "2024", license, authors) and `[workspace.dependencies]` for shared deps (tokio, serde, serde_json, ciborium, clap, miette, thiserror, tracing, tracing-subscriber, proptest, vergen, crossterm)
+- [X] T002 [P] Create `rust-toolchain.toml` pinning the stable channel (per L2 P19)
+- [X] T003 [P] Update `.gitignore` to add `target/`, `**/*.rs.bk`, `*.sock` (Rust + bus socket file). Do **not** add `Cargo.lock` to `.gitignore` — workspace Cargo.lock MUST be tracked per L2 P19 (reproducible builds). Cargo's defaults are correct; this clause is for defensive clarity.
+- [X] T004 [P] Create `CHANGELOG.md` at workspace root with initial entries: `bus protocol v0.1.0`, `buffer/dirty fact-family schema v0.1.0`, `CLI surface v0.1.0`, `configuration schema v0.1.0` (per L2 P7 / P8)
+- [X] T005 Create `core/Cargo.toml` with both `[lib]` and `[[bin]]` targets, declaring workspace dependencies it needs and a `[build-dependencies]` entry for `vergen`
+- [X] T006 Create `core/build.rs` invoking `vergen` to emit `VERGEN_GIT_SHA`, `VERGEN_GIT_DIRTY`, `VERGEN_BUILD_TIMESTAMP`, `VERGEN_CARGO_DEBUG` (per L2 P11)
+- [X] T007 Create `core/src/lib.rs` with empty module declarations (`pub mod provenance; pub mod types; pub mod fact_space; pub mod bus; pub mod trace; pub mod behavior; pub mod inspect; pub mod cli;`)
+- [X] T008 Create `core/src/main.rs` with a minimal `fn main()` that calls into `core::cli::run()` (returning `Result<(), miette::Report>`)
+- [X] T009 [P] Create `tui/Cargo.toml` declaring a dependency on `core` (path = "../core") and workspace deps it needs (crossterm, tokio, ciborium, miette)
+- [X] T010 [P] Create `tui/src/main.rs` with a minimal `fn main()` that calls into `tui::run()` plus `tui/src/lib.rs` with `pub mod client; pub mod render; pub mod commands;` and empty modules
 
 **Checkpoint**: `cargo build --workspace` succeeds; both binaries exist (do nothing yet); `weaver --version` does not work yet (Phase 2).
 

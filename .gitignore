@@ -4,3 +4,19 @@
 # MemPalace per-project files (issue #185)
 mempalace.yaml
 entities.json
+
+# Rust build outputs
+/target/
+**/*.rs.bk
+
+# Bus socket files (per Hello-fact slice 001)
+*.sock
+
+# IDEs
+/.idea/
+/.vscode/
+
+# Note: Cargo.lock is intentionally NOT gitignored.
+# Workspace Cargo.lock MUST be tracked per L2 constitution P19
+# (reproducible builds). Cargo's defaults are correct for binary
+# crates; this clause is for defensive clarity (per Hello-fact tasks T003).
