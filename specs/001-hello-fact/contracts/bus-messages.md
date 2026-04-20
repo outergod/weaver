@@ -148,6 +148,25 @@ Lifecycle = enum { Started, Ready, Stopped }
 
 Initial subscription receives the current state immediately after `SubscribeAck` if not already known.
 
+### `StatusRequest` / `StatusResponse` (authoritative delivery class)
+
+**Direction**: client → core (`StatusRequest`); core → client (`StatusResponse`).
+
+```
+StatusRequest                     // unit variant, no payload
+
+StatusResponse {
+    lifecycle: LifecycleSignal,   // Started | Ready | Stopped
+    uptime_ns: u64,               // nanoseconds since dispatcher construction
+    facts: Vec<Fact>              // full snapshot of currently-asserted facts
+}
+```
+
+One-shot snapshot used by `weaver status`. The response is a complete
+point-in-time view — the CLI does not need to subscribe to the live
+stream to populate its output. Added in slice 001 Phase 5 (US3); see
+`CHANGELOG.md` for the CBOR-variant-addition caveat.
+
 ### `Error` (authoritative)
 
 **Direction**: bidirectional.

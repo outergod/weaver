@@ -172,17 +172,17 @@ Per the L2 Constitution and the Vidvik review tasks-template additions, certain 
 
 ### Tests for User Story 3 (write FIRST)
 
-- [ ] T056 [P] [US3] Test: `weaver status --output=json` (and `-o json`) produces JSON parseable by `serde_json::from_str::<StatusResponse>`; round-trip preserves all fields in `core/tests/cli/status_round_trip.rs`
-- [ ] T057 [P] [US3] Test: when core unavailable, `weaver status -o json` returns documented error JSON shape (`{ "lifecycle": "unavailable", "error": "..." }`) and exit code 2 in `core/tests/cli/status_unavailable.rs`
-- [ ] T058 [P] [US3] Test: `weaver status -o human` produces human-formatted output containing lifecycle state and fact count in `core/tests/cli/status_human.rs`
+- [X] T056 [P] [US3] Test: `weaver status --output=json` (and `-o json`) produces JSON parseable by `serde_json::from_str::<StatusResponse>`; round-trip preserves all fields in `core/tests/cli/status_round_trip.rs`
+- [X] T057 [P] [US3] Test: when core unavailable, `weaver status -o json` returns documented error JSON shape (`{ "lifecycle": "unavailable", "error": "..." }`) and exit code 2 in `core/tests/cli/status_unavailable.rs`
+- [X] T058 [P] [US3] Test: `weaver status -o human` produces human-formatted output containing lifecycle state and fact count in `core/tests/cli/status_human.rs`
 
 ### Implementation for User Story 3
 
-- [ ] T059 [US3] {surface:cli} Implement `weaver status` subcommand: connects to bus, sends Subscribe(AllFacts), reads SubscribeAck + immediate snapshot, renders via the format dispatcher in `core/src/cli/status.rs`
-- [ ] T060 [US3] {surface:cli} Implement format dispatcher (json vs human) using the `-o/--output=<format>` global flag in `core/src/cli/output.rs`
-- [ ] T061 [US3] Implement JSON formatter for `StatusResponse` mirroring `contracts/cli-surfaces.md` schema (snake_case fields, fact value type tagging) in `core/src/cli/output.rs`
-- [ ] T062 [US3] Implement human formatter for `StatusResponse` (lifecycle line + facts list with provenance summary) in `core/src/cli/output.rs`
-- [ ] T063 [US3] {surface:cli} Implement miette error rendering with both human (default) and json (`-o json`) modes; populate `fact_key` field for fact-related errors per L2 P6 example in `core/src/cli/errors.rs`
+- [X] T059 [US3] {surface:cli} Implement `weaver status` subcommand in `core/src/cli/status.rs`. **Design deviation (documented in CHANGELOG):** instead of `Subscribe(AllFacts)` + snapshot drain, the slice adds a dedicated `BusMessage::StatusRequest` / `BusMessage::StatusResponse { lifecycle, uptime_ns, facts }` pair. Cleaner one-shot semantics, exposes uptime natively, avoids timeout-based snapshot termination.
+- [X] T060 [US3] {surface:cli} Format dispatcher `render_status(response, format)` in `core/src/cli/output.rs` switches on `OutputFormat::{Human, Json}`.
+- [X] T061 [US3] JSON formatter via `serde_json::to_string_pretty(StatusResponse)`. `StatusResponse` omits `uptime_ns`, `facts`, and `error` fields conditionally so the `ready` and `unavailable` shapes match the contract exactly. Unit tests in `cli::output::tests` verify round-trip and shape conditionals.
+- [X] T062 [US3] Human formatter prints `lifecycle:`, `uptime:` (with unit suffix), `facts (N):` list with per-fact provenance summary.
+- [X] T063 [US3] {surface:cli} `core/src/cli/errors.rs` — `WeaverCliError` enum (`CoreUnavailable`, `FactNotFound`, `ParseError`, `ProtocolError`) with `miette::Diagnostic` derive. JSON envelope exactly matches `cli-surfaces.md` (category, code, message, context, fact_key). Unit tests verify the envelope shape and that `fact_key` is populated for `FactNotFound`. Exit codes centralised in `errors::exit_code` (`OK=0`, `GENERAL=1`, `EXPECTED=2`).
 
 **Checkpoint**: All three user stories are independently functional. The slice's spec acceptance criteria (SC-001 through SC-006) are met; spec FRs are covered.
 

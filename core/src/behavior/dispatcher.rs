@@ -56,6 +56,9 @@ pub struct Dispatcher {
     trace: Arc<Mutex<TraceStore>>,
     sequence: SequenceCounter,
     behaviors: Vec<Box<dyn Behavior>>,
+    /// Wall-clock nanoseconds the dispatcher was constructed at; used
+    /// to compute `uptime_ns` for status responses.
+    started_at_ns: u64,
 }
 
 impl Dispatcher {
@@ -65,6 +68,7 @@ impl Dispatcher {
             trace: Arc::new(Mutex::new(TraceStore::new())),
             sequence: SequenceCounter::new(),
             behaviors: Vec::new(),
+            started_at_ns: now_ns(),
         }
     }
 
@@ -74,6 +78,12 @@ impl Dispatcher {
 
     pub fn trace(&self) -> Arc<Mutex<TraceStore>> {
         Arc::clone(&self.trace)
+    }
+
+    /// Nanoseconds elapsed since the dispatcher was constructed.
+    /// Saturates to zero if the system clock ran backwards.
+    pub fn uptime_ns(&self) -> u64 {
+        now_ns().saturating_sub(self.started_at_ns)
     }
 
     pub fn register(&mut self, behavior: Box<dyn Behavior>) {

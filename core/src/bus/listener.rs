@@ -215,12 +215,32 @@ async fn handle_client_message(
             write_message(writer, &resp).await?;
             Ok(None)
         }
+        BusMessage::StatusRequest => {
+            let (lifecycle, uptime_ns, facts) = {
+                let fs = dispatcher.fact_store();
+                let fs = fs.lock().await;
+                let snapshot = fs.snapshot();
+                let facts: Vec<_> = snapshot.values().cloned().collect();
+                (LifecycleSignal::Ready, dispatcher.uptime_ns(), facts)
+            };
+            write_message(
+                writer,
+                &BusMessage::StatusResponse {
+                    lifecycle,
+                    uptime_ns,
+                    facts,
+                },
+            )
+            .await?;
+            Ok(None)
+        }
         BusMessage::FactAssert(_)
         | BusMessage::FactRetract { .. }
         | BusMessage::SubscribeAck { .. }
         | BusMessage::InspectResponse { .. }
         | BusMessage::Lifecycle(_)
-        | BusMessage::Error(_) => {
+        | BusMessage::Error(_)
+        | BusMessage::StatusResponse { .. } => {
             // These are server-originated; client should not send them.
             let err = BusMessage::Error(ErrorMsg {
                 category: "protocol".into(),

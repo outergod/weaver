@@ -50,6 +50,16 @@ pub enum BusMessage {
     },
     Lifecycle(LifecycleSignal),
     Error(ErrorMsg),
+    /// One-shot snapshot request used by `weaver status`. Client →
+    /// core. No payload — the response carries the current lifecycle
+    /// signal, process uptime, and the fact-space snapshot.
+    StatusRequest,
+    /// Response to [`BusMessage::StatusRequest`]. Core → client.
+    StatusResponse {
+        lifecycle: LifecycleSignal,
+        uptime_ns: u64,
+        facts: Vec<Fact>,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -164,6 +174,12 @@ mod tests {
                 detail: "expected Hello".into(),
                 context: None,
             }),
+            BusMessage::StatusRequest,
+            BusMessage::StatusResponse {
+                lifecycle: LifecycleSignal::Ready,
+                uptime_ns: 1_234_567_890,
+                facts: vec![sample_fact()],
+            },
         ]
     }
 

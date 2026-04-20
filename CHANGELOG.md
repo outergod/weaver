@@ -51,3 +51,16 @@ Entries land per phase of `specs/001-hello-fact/tasks.md`. They will be promoted
 - **TUI**: `i` keystroke triggers inspection of the first displayed fact. Waiting state rendered explicitly (`(waiting for response…)`) between request send and response; correlation via `request_id` so out-of-order InspectResponses are handled safely.
 - **`core/src/inspect/handler.rs`** (new): pure routine `inspect_fact(snapshot, trace, key) -> Result<InspectionDetail, InspectionError>`. Uses `FactSpaceSnapshot` for the current-assertion check (fast `Arc` clone) and `TraceStore::fact_inspection` for the asserting behavior/event lookup.
 - **New test coverage**: `inspect_inspection_found`, `inspect_inspection_not_found`, `property_inspection_invariant`, plus fact-key-parser unit tests in `cli::inspect::tests`.
+
+#### Phase 5 — User Story 3 (structured machine output)
+
+- **Bus protocol (v0.1.0 — additive)**: two new `BusMessage` variants — `StatusRequest` (client → core, unit) and `StatusResponse { lifecycle, uptime_ns, facts }` (core → client). Additive surface change per L2 P7. A future slice with a deployed v0.1 client will bump `Hello.protocol_version` if a wire-incompatible change ships; the protocol-level CBOR deserializer does NOT yet handle unknown variants gracefully, so adding variants *today* is only safe because all clients are co-developed in this repo. This caveat is a known gap in the contract — to be tightened in a future slice.
+- **CLI surface (v0.1.0)**:
+  - `weaver status [-o human|json]` is now live (was a warn-log stub). Connects to the bus, sends `StatusRequest`, renders the response per `contracts/cli-surfaces.md`.
+  - On `core-unavailable`: renders the documented `{"lifecycle": "unavailable", "error": "..."}` shape and exits `2`.
+  - Exit-code policy centralised in `cli::errors::exit_code` (`OK=0`, `GENERAL=1`, `EXPECTED=2`).
+- **Error surface (new)**: `WeaverCliError` in `core/src/cli/errors.rs` with `miette::Diagnostic` derive. Four codes wired up (`WEAVER-002` core-unavailable, `WEAVER-101` parse-error, `WEAVER-201` fact-not-found, `WEAVER-301` protocol-error). JSON envelope matches contract: `{ "error": { "category", "code", "message", "context", "fact_key" } }`. `fact_key` populated for fact-scoped errors per L2 P6.
+- **Dispatcher**: tracks `started_at_ns`; exposes `Dispatcher::uptime_ns()` for the status handler.
+- **Listener**: handles `StatusRequest` by snapshotting the fact-store, reading dispatcher uptime, and replying with `StatusResponse`.
+- **`core/src/cli/output.rs`** (new): `StatusResponse` struct with serde round-trip, `render_status` dispatcher, human and JSON formatters. Unit tests verify (a) round-trip preservation, (b) ready shape omits `error`, (c) unavailable shape omits `uptime_ns` and `facts`.
+- **New test coverage**: `cli_status_round_trip`, `cli_status_unavailable` (exit-code 2), `cli_status_human`, plus `cli::output::tests` (4) and `cli::errors::tests` (3).

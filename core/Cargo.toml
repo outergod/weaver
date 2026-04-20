@@ -65,3 +65,16 @@ path = "tests/inspect/inspection_not_found.rs"
 [[test]]
 name = "property_inspection_invariant"
 path = "tests/property/inspection_invariant.rs"
+
+# Phase 5 (US3) status CLI tests — spawn `weaver` via CARGO_BIN_EXE.
+[[test]]
+name = "cli_status_round_trip"
+path = "tests/cli/status_round_trip.rs"
+
+[[test]]
+name = "cli_status_unavailable"
+path = "tests/cli/status_unavailable.rs"
+
+[[test]]
+name = "cli_status_human"
+path = "tests/cli/status_human.rs"
