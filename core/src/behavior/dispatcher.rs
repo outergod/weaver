@@ -100,7 +100,12 @@ impl Dispatcher {
             );
         }
 
-        // Run behaviors. (Phase 2: empty list.)
+        // Run behaviors. Outputs are committed atomically: when a
+        // behavior reports `error: Some(_)`, none of its assertions or
+        // retractions are applied. The `BehaviorFired` trace entry is
+        // always recorded, with empty `asserted`/`retracted` lists on
+        // the error path (P10 — regressions as scenario tests drives
+        // this discipline; T074 is the scenario test).
         for behavior in &self.behaviors {
             let ctx = BehaviorContext { now_ns: now };
             let outputs = behavior.fire(&event, ctx);
@@ -108,25 +113,30 @@ impl Dispatcher {
             let mut fact_store = self.fact_store.lock().await;
             let mut trace = self.trace.lock().await;
 
-            let asserted_keys: Vec<FactKey> =
-                outputs.assertions.iter().map(|f| f.key.clone()).collect();
-            for fact in outputs.assertions {
-                trace.append(now_ns(), TracePayload::FactAsserted { fact: fact.clone() });
-                fact_store.assert(fact);
-            }
+            let (asserted_keys, retracted_keys) = if outputs.error.is_some() {
+                (Vec::new(), Vec::new())
+            } else {
+                let asserted_keys: Vec<FactKey> =
+                    outputs.assertions.iter().map(|f| f.key.clone()).collect();
+                for fact in outputs.assertions {
+                    trace.append(now_ns(), TracePayload::FactAsserted { fact: fact.clone() });
+                    fact_store.assert(fact);
+                }
 
-            let retracted_keys: Vec<FactKey> =
-                outputs.retractions.iter().map(|(k, _)| k.clone()).collect();
-            for (key, prov) in outputs.retractions {
-                trace.append(
-                    now_ns(),
-                    TracePayload::FactRetracted {
-                        key: key.clone(),
-                        provenance: prov.clone(),
-                    },
-                );
-                fact_store.retract(&key, prov);
-            }
+                let retracted_keys: Vec<FactKey> =
+                    outputs.retractions.iter().map(|(k, _)| k.clone()).collect();
+                for (key, prov) in outputs.retractions {
+                    trace.append(
+                        now_ns(),
+                        TracePayload::FactRetracted {
+                            key: key.clone(),
+                            provenance: prov.clone(),
+                        },
+                    );
+                    fact_store.retract(&key, prov);
+                }
+                (asserted_keys, retracted_keys)
+            };
 
             trace.append(
                 now_ns(),

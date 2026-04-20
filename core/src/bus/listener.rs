@@ -1,20 +1,29 @@
 //! Bus listener — Unix-domain-socket accept loop + per-connection task.
 //!
 //! See `specs/001-hello-fact/contracts/bus-messages.md` for the wire
-//! contract. Slice 001 Phase 2 ships the handshake + simple message
-//! dispatch; richer subscription forwarding and inspection lands with
-//! the dispatcher integration in Phase 3 / Phase 4.
+//! contract. Per-connection flow:
+//!
+//! 1. Handshake: expect `Hello`, validate protocol version, reply with
+//!    `Lifecycle(Ready)`.
+//! 2. Multiplex `tokio::select!` between inbound client messages and
+//!    outbound fact events delivered by the dispatcher's fact-store
+//!    subscription.
+//!
+//! Phase 3 extension: subscriptions are wired to the dispatcher's
+//! `FactStore`, so `FactAssert` and `FactRetract` messages are forwarded
+//! back to subscribers in real time (T047 + T048 depend on this).
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use miette::IntoDiagnostic;
 use thiserror::Error;
-use tokio::io::{AsyncWriteExt, split};
+use tokio::io::AsyncWriteExt;
 use tokio::net::{UnixListener, UnixStream};
 
 use crate::behavior::dispatcher::Dispatcher;
 use crate::bus::codec::{CodecError, read_message, write_message};
+use crate::fact_space::{FactEvent, FactStore, SubscriptionHandle};
 use crate::types::message::{
     BUS_PROTOCOL_VERSION, BusMessage, ErrorMsg, HelloMsg, InspectionError, LifecycleSignal,
 };
@@ -65,73 +74,104 @@ pub async fn run(socket_path: PathBuf, dispatcher: Arc<Dispatcher>) -> miette::R
     }
 }
 
-/// Per-connection task: handshake, then loop on inbound messages until
-/// the stream closes.
+/// Per-connection task: handshake, then loop multiplexing inbound
+/// client messages and outbound fact-space events until the stream
+/// closes on either side.
 async fn handle_connection(
-    stream: UnixStream,
+    mut stream: UnixStream,
     dispatcher: Arc<Dispatcher>,
 ) -> Result<(), ListenerError> {
-    let (reader, writer) = split(stream);
-    let mut reader = reader;
-    let mut writer = writer;
-
     // 1. Handshake: expect Hello.
-    let first = read_message(&mut reader).await?;
-    let BusMessage::Hello(HelloMsg {
-        protocol_version,
-        client_kind,
-    }) = first
-    else {
-        let err = BusMessage::Error(ErrorMsg {
-            category: "protocol".into(),
-            detail: "expected Hello as first message".into(),
-            context: None,
-        });
-        let _ = write_message(&mut writer, &err).await;
-        let _ = writer.shutdown().await;
-        return Err(ListenerError::HandshakeNotHello);
+    let client_kind = match read_message(&mut stream).await? {
+        BusMessage::Hello(HelloMsg {
+            protocol_version,
+            client_kind,
+        }) => {
+            if protocol_version != BUS_PROTOCOL_VERSION {
+                let err = BusMessage::Error(ErrorMsg {
+                    category: "version-mismatch".into(),
+                    detail: format!(
+                        "client protocol v{protocol_version:#x}, core supports v{BUS_PROTOCOL_VERSION:#x}"
+                    ),
+                    context: None,
+                });
+                let _ = write_message(&mut stream, &err).await;
+                let _ = stream.shutdown().await;
+                return Err(ListenerError::VersionMismatch {
+                    client: protocol_version,
+                    core: BUS_PROTOCOL_VERSION,
+                });
+            }
+            client_kind
+        }
+        _ => {
+            let err = BusMessage::Error(ErrorMsg {
+                category: "protocol".into(),
+                detail: "expected Hello as first message".into(),
+                context: None,
+            });
+            let _ = write_message(&mut stream, &err).await;
+            let _ = stream.shutdown().await;
+            return Err(ListenerError::HandshakeNotHello);
+        }
     };
-    if protocol_version != BUS_PROTOCOL_VERSION {
-        let err = BusMessage::Error(ErrorMsg {
-            category: "version-mismatch".into(),
-            detail: format!(
-                "client protocol v{protocol_version:#x}, core supports v{BUS_PROTOCOL_VERSION:#x}"
-            ),
-            context: None,
-        });
-        let _ = write_message(&mut writer, &err).await;
-        let _ = writer.shutdown().await;
-        return Err(ListenerError::VersionMismatch {
-            client: protocol_version,
-            core: BUS_PROTOCOL_VERSION,
-        });
-    }
 
     tracing::info!(target: "weaver::bus", client_kind = %client_kind, "client connected");
-    write_message(&mut writer, &BusMessage::Lifecycle(LifecycleSignal::Ready)).await?;
+    write_message(&mut stream, &BusMessage::Lifecycle(LifecycleSignal::Ready)).await?;
 
-    // 2. Message loop.
+    // 2. Multiplexed message loop.
+    let mut subscription: Option<SubscriptionHandle> = None;
     loop {
-        let msg = match read_message(&mut reader).await {
-            Ok(m) => m,
-            Err(CodecError::Io(e)) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
+        // If the client is not subscribed yet, just read from the
+        // stream. Once subscribed, select between reading a client
+        // frame and a fact-space event.
+        let next = match subscription.as_mut() {
+            Some(sub) => {
+                tokio::select! {
+                    msg = read_message(&mut stream) => Incoming::Client(msg),
+                    evt = sub.rx.recv() => Incoming::FactEvent(evt),
+                }
+            }
+            None => Incoming::Client(read_message(&mut stream).await),
+        };
+
+        match next {
+            Incoming::Client(Ok(msg)) => {
+                if let Some(new_sub) = handle_client_message(msg, &dispatcher, &mut stream).await? {
+                    subscription = Some(new_sub);
+                }
+            }
+            Incoming::Client(Err(CodecError::Io(e)))
+                if e.kind() == std::io::ErrorKind::UnexpectedEof =>
+            {
                 tracing::info!(target: "weaver::bus", client_kind = %client_kind, "client disconnected");
                 return Ok(());
             }
-            Err(e) => return Err(e.into()),
-        };
-        handle_message(msg, &dispatcher, &mut writer).await?;
+            Incoming::Client(Err(e)) => return Err(e.into()),
+            Incoming::FactEvent(Some(evt)) => {
+                forward_fact_event(evt, &mut stream).await?;
+            }
+            Incoming::FactEvent(None) => {
+                // Subscription channel closed (should not happen in
+                // slice 001 — the fact store lives as long as the
+                // dispatcher). Drop the subscription and keep reading.
+                subscription = None;
+            }
+        }
     }
 }
 
-async fn handle_message<W>(
+enum Incoming {
+    Client(Result<BusMessage, CodecError>),
+    FactEvent(Option<FactEvent>),
+}
+
+/// Returns `Some(handle)` when a new subscription was established.
+async fn handle_client_message(
     msg: BusMessage,
     dispatcher: &Arc<Dispatcher>,
-    writer: &mut W,
-) -> Result<(), ListenerError>
-where
-    W: tokio::io::AsyncWrite + Unpin,
-{
+    writer: &mut UnixStream,
+) -> Result<Option<SubscriptionHandle>, ListenerError> {
     match msg {
         BusMessage::Hello(_) => {
             let err = BusMessage::Error(ErrorMsg {
@@ -140,28 +180,37 @@ where
                 context: None,
             });
             write_message(writer, &err).await?;
+            Ok(None)
         }
         BusMessage::Event(event) => {
             dispatcher.process_event(event).await;
+            Ok(None)
         }
-        BusMessage::Subscribe(_pattern) => {
-            // Slice 001 Phase 2: ack the subscription but don't forward
-            // fact events back yet. Real subscription forwarding lands
-            // with the dispatcher integration (Phase 3) once behaviors
-            // produce facts to forward.
+        BusMessage::Subscribe(pattern) => {
+            let fs = dispatcher.fact_store();
+            let handle = {
+                let mut fs = fs.lock().await;
+                fs.subscribe(pattern)
+            };
+            // Starting sequence is always `0` in slice 001 — the
+            // delivery layer doesn't yet stamp FactAssert/FactRetract
+            // with per-publisher numbers; gap detection lands with a
+            // later slice (contracts/bus-messages.md §Versioning).
             write_message(writer, &BusMessage::SubscribeAck { sequence: 0 }).await?;
+            Ok(Some(handle))
         }
         BusMessage::InspectRequest {
             request_id,
             fact: _,
         } => {
-            // Slice 001 Phase 2: no facts asserted yet, so inspection
-            // always returns FactNotFound. The real handler lands in T052.
+            // Phase 3 placeholder — Phase 4 (T052) replaces this with
+            // the real inspection handler.
             let resp = BusMessage::InspectResponse {
                 request_id,
                 result: Err(InspectionError::FactNotFound),
             };
             write_message(writer, &resp).await?;
+            Ok(None)
         }
         BusMessage::FactAssert(_)
         | BusMessage::FactRetract { .. }
@@ -176,8 +225,17 @@ where
                 context: None,
             });
             write_message(writer, &err).await?;
+            Ok(None)
         }
     }
+}
+
+async fn forward_fact_event(evt: FactEvent, writer: &mut UnixStream) -> Result<(), ListenerError> {
+    let msg = match evt {
+        FactEvent::Asserted(fact) => BusMessage::FactAssert(fact),
+        FactEvent::Retracted { key, provenance } => BusMessage::FactRetract { key, provenance },
+    };
+    write_message(writer, &msg).await?;
     Ok(())
 }
 

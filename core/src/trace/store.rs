@@ -130,6 +130,13 @@ impl TraceStore {
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
+
+    /// Read-only view of all trace entries in append order. Intended for
+    /// tests and for the inspection handler's fall-back scans — the
+    /// reverse indexes are the primary access path.
+    pub fn entries(&self) -> &[TraceEntry] {
+        &self.entries
+    }
 }
 
 impl Default for TraceStore {

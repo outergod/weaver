@@ -1325,6 +1325,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "weaver-e2e"
+version = "0.1.0"
+dependencies = [
+ "ciborium",
+ "libc",
+ "tokio",
+ "weaver_core",
+]
+
+[[package]]
 name = "weaver-tui"
 version = "0.1.0"
 dependencies = [

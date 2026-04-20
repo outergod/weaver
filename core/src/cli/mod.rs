@@ -5,6 +5,7 @@
 
 pub mod args;
 pub mod config;
+pub mod simulate;
 pub mod tracing_setup;
 pub mod version;
 
@@ -29,9 +30,11 @@ pub fn run() -> miette::Result<()> {
         Some(Command::Run) => run_core(socket),
         Some(Command::Status) => stub_status(output, socket),
         Some(Command::Inspect { fact_key }) => stub_inspect(output, socket, &fact_key),
-        Some(Command::SimulateEdit { buffer_id }) => stub_simulate_edit(output, socket, buffer_id),
+        Some(Command::SimulateEdit { buffer_id }) => {
+            simulate::run(simulate::SimulationKind::Edit, buffer_id, output, socket)
+        }
         Some(Command::SimulateClean { buffer_id }) => {
-            stub_simulate_clean(output, socket, buffer_id)
+            simulate::run(simulate::SimulationKind::Clean, buffer_id, output, socket)
         }
         None => {
             print_help();
@@ -55,7 +58,12 @@ fn run_core(socket_override: Option<std::path::PathBuf>) -> miette::Result<()> {
         .into_diagnostic()?;
     runtime.block_on(async move {
         let cfg = config::Config::from_cli(socket_override);
-        let dispatcher = Arc::new(crate::behavior::dispatcher::Dispatcher::new());
+        let mut dispatcher = crate::behavior::dispatcher::Dispatcher::new();
+        // Embedded behaviors (slice 001).
+        dispatcher.register(Box::new(
+            crate::behavior::dirty_tracking::DirtyTrackingBehavior::new(),
+        ));
+        let dispatcher = Arc::new(dispatcher);
 
         tracing::info!(
             target: "weaver::lifecycle",
@@ -103,29 +111,5 @@ fn stub_inspect(
     _fact_key: &str,
 ) -> miette::Result<()> {
     tracing::warn!("inspect subcommand: stub (real impl lands in T054, slice 001 Phase 4)");
-    Ok(())
-}
-
-fn stub_simulate_edit(
-    _output: OutputFormat,
-    _socket: Option<std::path::PathBuf>,
-    buffer_id: u64,
-) -> miette::Result<()> {
-    tracing::warn!(
-        buffer_id,
-        "simulate-edit subcommand: stub (real impl lands in T044, slice 001 Phase 3)"
-    );
-    Ok(())
-}
-
-fn stub_simulate_clean(
-    _output: OutputFormat,
-    _socket: Option<std::path::PathBuf>,
-    buffer_id: u64,
-) -> miette::Result<()> {
-    tracing::warn!(
-        buffer_id,
-        "simulate-clean subcommand: stub (real impl lands in T045, slice 001 Phase 3)"
-    );
     Ok(())
 }

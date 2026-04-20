@@ -1,83 +1,83 @@
-//! TUI bus client — connect, handshake, subscribe, receive messages.
+//! TUI bus-client helpers — a thin layer over [`weaver_core::bus::client`]
+//! that adds a background reader task + disconnect detection (T071).
 //!
-//! Slice 001 Phase 2 implements the connection + Hello + Subscribe
-//! sequence. Disconnect detection (FR-010) and fact rendering land
-//! in Phase 3 (T071, T047).
+//! The reader task forwards each inbound [`BusMessage`] to an mpsc
+//! channel, and an `Err`/channel-close is the disconnect signal the
+//! render layer consumes (T072).
 
 use std::path::Path;
 
 use miette::miette;
-use thiserror::Error;
-use tokio::net::UnixStream;
+use tokio::io::AsyncRead;
+use tokio::net::unix::OwnedWriteHalf;
+use tokio::sync::mpsc;
+use tokio::task::JoinHandle;
 
-use weaver_core::bus::codec::{CodecError, read_message, write_message};
-use weaver_core::types::message::{
-    BUS_PROTOCOL_VERSION, BusMessage, HelloMsg, LifecycleSignal, SubscribePattern,
-};
+use weaver_core::bus::client::{Client, ClientError};
+use weaver_core::bus::codec::{CodecError, read_message};
+use weaver_core::types::message::{BusMessage, SubscribePattern};
 
-#[derive(Debug, Error)]
-pub enum ClientError {
-    #[error("failed to connect to bus socket: {0}")]
-    Connect(#[source] std::io::Error),
+/// Result type for the reader-task outputs. `Ok(msg)` is a live bus
+/// message; `Err` is the disconnect signal (stream-level I/O error or
+/// codec failure).
+pub type BusStreamItem = Result<BusMessage, CodecError>;
 
-    #[error("codec error: {0}")]
-    Codec(#[from] CodecError),
-
-    #[error("handshake: expected Lifecycle(Ready), got {got:?}")]
-    HandshakeUnexpected { got: BusMessage },
-
-    #[error("handshake: expected SubscribeAck, got {got:?}")]
-    SubscribeAckUnexpected { got: BusMessage },
+/// A connected TUI client — the writer half plus a receiver of inbound
+/// bus messages. The reader task is detached and shuts down when the
+/// underlying stream closes.
+pub struct TuiClient {
+    pub writer: OwnedWriteHalf,
+    pub inbound: mpsc::UnboundedReceiver<BusStreamItem>,
+    pub reader_task: JoinHandle<()>,
 }
 
-/// A connected, subscribed bus client.
-pub struct Client {
-    pub stream: UnixStream,
-    pub starting_sequence: u64,
-}
-
-/// Connect, handshake, and subscribe to the given pattern.
-///
-/// Returns the stream with the connection past the handshake, ready
-/// for the caller to read messages from. Slice 001 Phase 2 subscribes
-/// to `buffer/` by default.
-pub async fn connect(socket: &Path, pattern: SubscribePattern) -> Result<Client, ClientError> {
-    let mut stream = UnixStream::connect(socket)
+/// Connect, handshake, subscribe to `buffer/*`, and spawn the background
+/// reader task.
+pub async fn connect(socket: &Path) -> miette::Result<TuiClient> {
+    let mut client = Client::connect(socket, "tui").await.map_err(map_err)?;
+    let _starting_sequence = client
+        .subscribe(SubscribePattern::FamilyPrefix("buffer/".into()))
         .await
-        .map_err(ClientError::Connect)?;
+        .map_err(map_err)?;
 
-    // Send Hello.
-    let hello = BusMessage::Hello(HelloMsg {
-        protocol_version: BUS_PROTOCOL_VERSION,
-        client_kind: "tui".into(),
-    });
-    write_message(&mut stream, &hello).await?;
+    let (reader, writer) = client.stream.into_split();
+    let (tx, rx) = mpsc::unbounded_channel::<BusStreamItem>();
+    let reader_task = tokio::spawn(reader_loop(reader, tx));
 
-    // Expect Lifecycle(Ready).
-    let first = read_message(&mut stream).await?;
-    match first {
-        BusMessage::Lifecycle(LifecycleSignal::Ready) => {}
-        other => return Err(ClientError::HandshakeUnexpected { got: other }),
-    }
-
-    // Subscribe.
-    write_message(&mut stream, &BusMessage::Subscribe(pattern)).await?;
-    let ack = read_message(&mut stream).await?;
-    let starting_sequence = match ack {
-        BusMessage::SubscribeAck { sequence } => sequence,
-        other => return Err(ClientError::SubscribeAckUnexpected { got: other }),
-    };
-
-    Ok(Client {
-        stream,
-        starting_sequence,
+    Ok(TuiClient {
+        writer,
+        inbound: rx,
+        reader_task,
     })
 }
 
-/// Convenience: connect with the default `buffer/*` subscription
-/// pattern and surface any error as a miette diagnostic.
-pub async fn connect_default(socket: &Path) -> miette::Result<Client> {
-    connect(socket, SubscribePattern::FamilyPrefix("buffer/".into()))
-        .await
-        .map_err(|e| miette!("{e}"))
+async fn reader_loop<R>(mut reader: R, tx: mpsc::UnboundedSender<BusStreamItem>)
+where
+    R: AsyncRead + Unpin,
+{
+    loop {
+        match read_message(&mut reader).await {
+            Ok(msg) => {
+                if tx.send(Ok(msg)).is_err() {
+                    return;
+                }
+            }
+            Err(e) => {
+                // Single error forwarded; subsequent iterations would
+                // just loop on the same error. The channel close is
+                // itself the disconnect signal for the render layer.
+                let _ = tx.send(Err(e));
+                return;
+            }
+        }
+    }
+}
+
+fn map_err(e: ClientError) -> miette::Report {
+    miette!("{e}").context("while connecting to the weaver bus")
+}
+
+/// Deprecated shim: earlier callers expect `connect_default`.
+pub async fn connect_default(socket: &Path) -> miette::Result<TuiClient> {
+    connect(socket).await
 }

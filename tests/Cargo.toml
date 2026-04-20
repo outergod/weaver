@@ -1,0 +1,27 @@
+[package]
+name = "weaver-e2e"
+description = "Weaver end-to-end tests — spawn the `weaver` binary and drive it over the bus."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+
+# Dev-dependencies only; a lib/bin is neither needed nor provided. Cargo
+# accepts a package whose sole targets are `[[test]]` entries.
+
+[dev-dependencies]
+weaver_core = { path = "../core" }
+tokio.workspace = true
+ciborium.workspace = true
+libc = "0.2"
+
+[[test]]
+name = "hello_fact"
+path = "e2e/hello_fact.rs"
+
+[[test]]
+name = "disconnect"
+path = "e2e/disconnect.rs"
