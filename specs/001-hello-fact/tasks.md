@@ -192,14 +192,14 @@ Per the L2 Constitution and the Vidvik review tasks-template additions, certain 
 
 **Purpose**: Documentation, CHANGELOG completeness, CI scaffolding, final verification.
 
-- [ ] T064 [P] Update `CHANGELOG.md` with the actually-shipped initial-version entries for each public surface from P7 (bus protocol, CLI, fact-family schema, configuration) — confirm entries match what was implemented
-- [ ] T065 [P] Add `core/README.md` briefly describing the crate's role (core runtime: bus, fact space, behaviors, trace) and link to the slice spec
-- [ ] T066 [P] Add `tui/README.md` briefly describing the TUI's role (subscribe, render, simulate commands) and link to the slice spec
-- [ ] T067 [P] Add `.github/workflows/ci.yml` running `cargo build --workspace`, `cargo test --workspace`, `cargo clippy --all-targets --workspace -- -D warnings`, and `cargo fmt --all -- --check` (per L2 P19 reproducibility + L2 P10 test-as-gate + L2 Amendment 6 code-quality gates). Equivalent to `scripts/ci.sh` but pinned to specific toolchain/cache configuration in GitHub Actions.
-- [ ] T075 [P] Benchmark test: built `weaver --version` binary completes within 50 ms (warm-cache, debug profile) per spec SC-006; uses `std::time::Instant` around `Command::new("./target/debug/weaver").arg("--version").output()` in `core/tests/cli/version_timing.rs`
-- [ ] T068 [P] Property test: every `BusMessage` published over the wire carries non-empty Provenance (P11 invariant) in `tests/property/provenance_wire.rs`
-- [ ] T069 Run the `quickstart.md` walkthrough end-to-end manually; record any gaps as follow-up tasks in `CHANGELOG.md` notes
-- [ ] T070 Verify `git log --oneline` for this branch shows commits in Conventional Commits style (per L2 Additional Constraints / Amendment 1)
+- [X] T064 [P] Update `CHANGELOG.md` with the actually-shipped initial-version entries for each public surface from P7 (bus protocol, CLI, fact-family schema, configuration) — confirm entries match what was implemented. `[Unreleased]` promoted to `[0.1.0] — 2026-04-20`. Every phase (1–6) plus the Phase 5.5 wire-tagging alignment is documented per-surface.
+- [X] T065 [P] Add `core/README.md` briefly describing the crate's role (core runtime: bus, fact space, behaviors, trace) and link to the slice spec. Includes module map and usage snippets.
+- [X] T066 [P] Add `tui/README.md` briefly describing the TUI's role (subscribe, render, simulate commands) and link to the slice spec. Render-shape example included for both reachable and UNAVAILABLE modes.
+- [X] T067 [P] Add `.github/workflows/ci.yml` running the same gate chain as `scripts/ci.sh` (clippy → fmt-check → build → test), with cargo registry + target caching, per-PR concurrency cancellation, and `RUSTFLAGS: -D warnings` for belt-and-braces lint enforcement. Toolchain is taken from `rust-toolchain.toml` (not hard-coded) per L2 P19.
+- [X] T075 [P] Benchmark test: median wall time of `weaver --version` across 5 warm-cache runs is ≤ 50 ms per SC-006. Uses `std::time::Instant` brackets around `Command::new(env!("CARGO_BIN_EXE_weaver")).arg("--version").output()`. Measurement: 1 warm-up + 5 samples + median; prints min/median/max to stderr for diagnostic visibility. Landed in `core/tests/cli/version_timing.rs`.
+- [X] T068 [P] Property test: every `BusMessage` variant that carries `Provenance` (`Event`, `FactAssert`, `FactRetract`) round-trips through both CBOR and JSON with a non-empty `source`. Landed in `core/tests/property/provenance_wire.rs` (placed alongside other property tests for consistency rather than at the workspace-level `tests/property/` path noted in the task).
+- [X] T069 Ran the `quickstart.md` walkthrough end-to-end. SC-001..SC-003, SC-006 verified by direct command invocation; SC-004 by the `disconnect` e2e test; SC-005 by the full `cargo test --workspace` chain. One doc bug surfaced and fixed: SC-003 example used repeated edits on the same buffer, which doesn't grow `facts` — updated to use distinct buffer ids with an explanatory note on the fact-space semantics.
+- [X] T070 `git log --oneline` on the `001-hello-fact` branch shows 100% Conventional Commits compliance (all subjects match `type(scope): description`). Non-CC commits in history are pre-branch (predate Amendment 1).
 
 ---
 

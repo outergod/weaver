@@ -14,11 +14,20 @@ Per L2 Principle 7, each public surface carries its own version. Surfaces introd
 - **CLI surface** v0.1.0 — `weaver run`, `weaver --version`, `weaver status`, `weaver inspect`, `weaver simulate-edit`, `weaver simulate-clean`; `weaver-tui` binary; global flags `-v`, `-o`/`--output=<format>`, `--socket=<path>`. See `specs/001-hello-fact/contracts/cli-surfaces.md`.
 - **Configuration schema** v0.1.0 — XDG-based config file with `socket_path`, `log_level` keys; env vars `WEAVER_SOCKET`, `RUST_LOG`.
 
-## [Unreleased]
+## [0.1.0] — 2026-04-20 — slice 001 "Hello, fact"
 
-### Added — slice 001 "Hello, fact" (in progress)
+Initial public release. Ships the end-to-end skeleton: core + TUI +
+one embedded behavior + bus + fact space + trace + inspection + CLI,
+together validating L2 P1/P2/P4/P5/P6/P9/P10/P11/P12/P13/P19/P20.
 
-Entries land per phase of `specs/001-hello-fact/tasks.md`. They will be promoted into a dated, versioned section once the slice is complete.
+All four public surfaces (bus protocol, `buffer/dirty` fact schema,
+CLI, configuration) debut at their initial versions. Spec success
+criteria SC-001 through SC-006 are met and covered by automated
+tests (54 unit + 13 integration + 2 e2e).
+
+### Added — slice 001 "Hello, fact"
+
+Entries are organised by phase of `specs/001-hello-fact/tasks.md`.
 
 #### Phase 1 — Setup
 
@@ -95,3 +104,29 @@ runs as part of `cargo test`.
 
 `contracts/bus-messages.md` now documents the tagging convention as a
 first-class principle.
+
+#### Phase 6 — Polish & cross-cutting concerns
+
+- **`core/README.md`** and **`tui/README.md`** (new): per-crate orientation with module maps, usage snippets, and pointers to the spec.
+- **`.github/workflows/ci.yml`** (new): GitHub Actions workflow running `cargo fmt --all -- --check`, `cargo clippy --all-targets --workspace -- -D warnings`, `cargo build --workspace`, `cargo test --workspace` — mirrors `scripts/ci.sh` but cached + pinned. Enforces L2 P19 + L2 P10 + L2 Amendment 6.
+- **`core/tests/property/provenance_wire.rs`** (new, T068): proptest that every `BusMessage` variant carrying `Provenance` round-trips through both CBOR and JSON with a non-empty `source`. Two generators per pass.
+- **`core/tests/cli/version_timing.rs`** (new, T075): benchmark asserting median wall time of `weaver --version` is ≤ 50 ms (SC-006). Runs a warm-up iteration + 5 samples + median-of-5. Prints min/median/max to stderr for diagnostic visibility.
+- **`quickstart.md`**: SC-003 example corrected. The original "edit one buffer repeatedly → `facts.length` grows" claim contradicts the data model (facts are keyed by `(entity, attribute)`; re-assertion refreshes provenance but does not add entries). The walkthrough now uses distinct buffer ids to demonstrate array growth, with a note explaining the fact-space semantics.
+- **`tasks.md`**: all T064–T070 + T075 marked `[X]`. CHANGELOG `[Unreleased]` promoted to `[0.1.0] — 2026-04-20`.
+
+#### Fix — `weaver --version` build timestamp stuck at 1980
+
+- **Symptom**: `weaver --version` displayed `built: 1980-01-01T00:00:00.000000000Z` in every `cargo build` run from a nix dev shell.
+- **Root cause**: `nixpkgs`' stdenv pre-sets `SOURCE_DATE_EPOCH=315532800` (1980-01-01T00:00:00Z) in every `mkShell` environment as a reproducible-build floor for ZIP-format compatibility (nix issue [#20716](https://github.com/NixOS/nixpkgs/issues/20716)). `vergen` honors `SOURCE_DATE_EPOCH` unconditionally, so the misleading placeholder flowed into the binary.
+- **Fix (two-pronged)**:
+  - `core/build.rs` — removes `SOURCE_DATE_EPOCH` if and only if it equals the exact nix-stdenv sentinel `315532800`. Any intentional value (e.g., a CI release build setting it to the commit timestamp for bit-reproducibility) is preserved. See [reproducible-builds.org](https://reproducible-builds.org/docs/source-date-epoch/) — `315532800` is documented as a ZIP-compat floor via `max(315532800, real_time)`, not a semantic timestamp; clearing it matches the upstream spec's "fall back to system time when unset" expectation.
+  - `flake.nix` — `unset SOURCE_DATE_EPOCH` in `shellHook`, eliminating the sentinel at its source for users of the Weaver flake. The `build.rs` filter is the safety net for devenv/mise/direnv/plain shells that might inherit it from elsewhere.
+- **L2 tension**: P11 (informative timestamp) vs P19 (reproducible builds). The resolution preserves both: P11 for dev/CI builds (no SOURCE_DATE_EPOCH, real wall time); P19 for release builds (caller sets SOURCE_DATE_EPOCH to the commit timestamp, which is neither unset nor `315532800`, so it's respected).
+
+### Test summary for v0.1.0
+
+- **54 weaver_core unit tests** — domain types, fact space, bus codec + delivery, trace store, behaviors, CLI parsers.
+- **13 integration tests** — `core/tests/{behavior,inspect,property,cli}/*.rs` covering US1, US2, US3 scenario + property + timing.
+- **2 workspace-level e2e tests** — `tests/e2e/{hello_fact,disconnect}.rs` spawning the `weaver` binary and driving it over the bus.
+
+Total: 69 tests. `scripts/ci.sh` green end-to-end.

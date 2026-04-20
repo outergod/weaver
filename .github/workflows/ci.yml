@@ -1,0 +1,63 @@
+# GitHub Actions CI for Weaver (slice 001, T067).
+#
+# Mirrors `scripts/ci.sh` locally — clippy → fmt-check → build → test —
+# but pins the toolchain and uses a cache to keep wall time under
+# ~3 minutes. Enforces L2 P19 (reproducible builds), L2 P10
+# (tests-as-gate), and L2 Amendment 6 (code-quality gates).
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  # Fail on any warning (matches `-D warnings` in `scripts/ci.sh`).
+  RUSTFLAGS: -D warnings
+  # Tighter backtraces in test output.
+  RUST_BACKTRACE: short
+
+jobs:
+  ci:
+    name: ci
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        # Respect `rust-toolchain.toml` — no hard-coded channel here,
+        # per L2 P19. `rustfmt` + `clippy` are needed for the gates.
+        run: |
+          rustup show active-toolchain || rustup toolchain install
+          rustup component add rustfmt clippy
+
+      - name: Cache cargo registry + target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: Format check (cargo fmt --all -- --check)
+        run: cargo fmt --all -- --check
+
+      - name: Lint (cargo clippy --all-targets --workspace -- -D warnings)
+        run: cargo clippy --all-targets --workspace -- -D warnings
+
+      - name: Build (cargo build --workspace)
+        run: cargo build --workspace
+
+      - name: Test (cargo test --workspace)
+        run: cargo test --workspace

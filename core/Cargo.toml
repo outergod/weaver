@@ -78,3 +78,12 @@ path = "tests/cli/status_unavailable.rs"
 [[test]]
 name = "cli_status_human"
 path = "tests/cli/status_human.rs"
+
+# Phase 6 (polish) additional tests.
+[[test]]
+name = "property_provenance_wire"
+path = "tests/property/provenance_wire.rs"
+
+[[test]]
+name = "cli_version_timing"
+path = "tests/cli/version_timing.rs"
