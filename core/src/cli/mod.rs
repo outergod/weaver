@@ -75,14 +75,16 @@ fn run_core(socket_override: Option<std::path::PathBuf>) -> miette::Result<()> {
             "started"
         );
 
-        // Spawn the listener on the socket.
+        // Bind the listener synchronously so startup errors (missing
+        // parent directory, permission denied, non-socket path) surface
+        // as a non-zero exit before we signal `ready`. A prior
+        // implementation spawned the bind inside a detached task and
+        // only logged on failure; `run_core` would then hang in the
+        // signal loop with no bus, masking the actual error.
+        let listener = crate::bus::listener::bind(&cfg.socket_path)?;
         let listener_dispatcher = Arc::clone(&dispatcher);
-        let listener_socket = cfg.socket_path.clone();
-        let listener_task = tokio::spawn(async move {
-            if let Err(e) = crate::bus::listener::run(listener_socket, listener_dispatcher).await {
-                tracing::error!(target: "weaver::bus", error = %e, "listener exited");
-            }
-        });
+        let listener_task =
+            tokio::spawn(crate::bus::listener::serve(listener, listener_dispatcher));
 
         tracing::info!(target: "weaver::lifecycle", "ready");
 

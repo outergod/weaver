@@ -51,31 +51,41 @@ pub enum ListenerError {
     RefuseToUnlinkNonSocket { path: PathBuf, kind: &'static str },
 }
 
-/// Start the bus listener on the given socket path. Removes a stale
-/// socket file at the path before binding. Accepts connections in a
-/// loop until the process is terminated; each connection runs in its
-/// own task.
-pub async fn run(socket_path: PathBuf, dispatcher: Arc<Dispatcher>) -> miette::Result<()> {
+/// Bind the listener to `socket_path` synchronously.
+///
+/// Separated from [`serve`] so `run_core` can surface bind failures
+/// (missing parent directory, permission denied, path-type mismatch)
+/// to the caller as documented startup errors *before* signalling
+/// `Lifecycle::Ready`. Prior to this split, bind errors were swallowed
+/// inside the spawned listener task and the core would happily report
+/// `ready` with no bus socket bound.
+pub fn bind(socket_path: &Path) -> miette::Result<UnixListener> {
     // Remove a stale socket file from a previous run, if present — but
     // ONLY if the path actually holds a Unix-domain socket. Blindly
     // unlinking whatever the caller pointed `--socket` at would happily
     // delete a regular file (e.g., if a user typo'd `weaver run
     // --socket /etc/passwd`). Defense in depth against caller error.
-    if let Some(kind) = classify_path_to_unlink(&socket_path).into_diagnostic()? {
+    if let Some(kind) = classify_path_to_unlink(socket_path).into_diagnostic()? {
         if kind == "socket" {
-            std::fs::remove_file(&socket_path).into_diagnostic()?;
+            std::fs::remove_file(socket_path).into_diagnostic()?;
         } else {
             return Err(ListenerError::RefuseToUnlinkNonSocket {
-                path: socket_path.clone(),
+                path: socket_path.to_path_buf(),
                 kind,
             })
             .into_diagnostic();
         }
     }
 
-    let listener = UnixListener::bind(&socket_path).into_diagnostic()?;
+    let listener = UnixListener::bind(socket_path).into_diagnostic()?;
     tracing::info!(target: "weaver::bus", path = %socket_path.display(), "listening");
+    Ok(listener)
+}
 
+/// Run the accept loop against an already-bound listener. Accepts
+/// connections until the task is aborted; each connection runs in its
+/// own sub-task.
+pub async fn serve(listener: UnixListener, dispatcher: Arc<Dispatcher>) {
     loop {
         let (stream, _addr) = match listener.accept().await {
             Ok(pair) => pair,
