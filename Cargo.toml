@@ -43,5 +43,8 @@ proptest = "1"
 # Build-time provenance per L2 P11.
 vergen = { version = "8", features = ["build", "cargo", "git", "gitcl", "rustc"] }
 
+# TOML parsing for the XDG config file per `contracts/cli-surfaces.md`.
+toml = "0.8"
+
 # TUI rendering — minimal; ratatui deferred per research §4.
 crossterm = "0.28"
