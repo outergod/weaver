@@ -158,7 +158,12 @@ mod tests {
             payload: EventPayload::BufferEdited,
             provenance: Provenance::new(SourceId::Tui, 100, None).unwrap(),
         };
-        let seq = store.append(100, TracePayload::Event { event: event.clone() });
+        let seq = store.append(
+            100,
+            TracePayload::Event {
+                event: event.clone(),
+            },
+        );
         assert_eq!(store.find_event(event.id), Some(seq));
         assert_eq!(store.get(seq).unwrap().sequence, seq);
         assert_eq!(store.len(), 1);
@@ -188,12 +193,8 @@ mod tests {
         let fact = Fact {
             key: fact_key.clone(),
             value: FactValue::Bool(true),
-            provenance: Provenance::new(
-                SourceId::Behavior(behavior.clone()),
-                200,
-                Some(event_id),
-            )
-            .unwrap(),
+            provenance: Provenance::new(SourceId::Behavior(behavior.clone()), 200, Some(event_id))
+                .unwrap(),
         };
         let assert_seq = store.append(200, TracePayload::FactAsserted { fact });
         // Behavior firing record
@@ -224,12 +225,8 @@ mod tests {
         let fact = Fact {
             key: fact_key.clone(),
             value: FactValue::Bool(true),
-            provenance: Provenance::new(
-                SourceId::Behavior(behavior.clone()),
-                200,
-                Some(event_id),
-            )
-            .unwrap(),
+            provenance: Provenance::new(SourceId::Behavior(behavior.clone()), 200, Some(event_id))
+                .unwrap(),
         };
         store.append(200, TracePayload::FactAsserted { fact });
         store.append(

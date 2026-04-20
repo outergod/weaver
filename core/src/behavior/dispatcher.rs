@@ -92,7 +92,12 @@ impl Dispatcher {
         // Append the event to the trace.
         {
             let mut trace = self.trace.lock().await;
-            trace.append(now, TracePayload::Event { event: event.clone() });
+            trace.append(
+                now,
+                TracePayload::Event {
+                    event: event.clone(),
+                },
+            );
         }
 
         // Run behaviors. (Phase 2: empty list.)
@@ -103,24 +108,15 @@ impl Dispatcher {
             let mut fact_store = self.fact_store.lock().await;
             let mut trace = self.trace.lock().await;
 
-            let asserted_keys: Vec<FactKey> = outputs
-                .assertions
-                .iter()
-                .map(|f| f.key.clone())
-                .collect();
+            let asserted_keys: Vec<FactKey> =
+                outputs.assertions.iter().map(|f| f.key.clone()).collect();
             for fact in outputs.assertions {
-                trace.append(
-                    now_ns(),
-                    TracePayload::FactAsserted { fact: fact.clone() },
-                );
+                trace.append(now_ns(), TracePayload::FactAsserted { fact: fact.clone() });
                 fact_store.assert(fact);
             }
 
-            let retracted_keys: Vec<FactKey> = outputs
-                .retractions
-                .iter()
-                .map(|(k, _)| k.clone())
-                .collect();
+            let retracted_keys: Vec<FactKey> =
+                outputs.retractions.iter().map(|(k, _)| k.clone()).collect();
             for (key, prov) in outputs.retractions {
                 trace.append(
                     now_ns(),

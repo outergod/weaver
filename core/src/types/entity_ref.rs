@@ -15,9 +15,7 @@ use serde::{Deserialize, Serialize};
 /// An opaque, stable reference to an entity. Entities have no intrinsic
 /// type — interpretation arises from facts asserted about them
 /// (L1 constitution §3–4).
-#[derive(
-    Copy, Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize,
-)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct EntityRef(u64);
 

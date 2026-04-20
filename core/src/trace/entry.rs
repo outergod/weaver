@@ -10,9 +10,7 @@ use crate::types::message::LifecycleSignal;
 use serde::{Deserialize, Serialize};
 
 /// Monotonic sequence number across the trace.
-#[derive(
-    Copy, Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize,
-)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct TraceSequence(u64);
 

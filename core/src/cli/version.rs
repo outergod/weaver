@@ -129,10 +129,7 @@ mod tests {
             "rustc",
             "bus_protocol",
         ] {
-            assert!(
-                parsed.get(field).is_some(),
-                "JSON missing field `{field}`"
-            );
+            assert!(parsed.get(field).is_some(), "JSON missing field `{field}`");
         }
     }
 

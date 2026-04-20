@@ -31,9 +31,7 @@ pub enum ListenerError {
     #[error("client sent non-Hello message as first frame")]
     HandshakeNotHello,
 
-    #[error(
-        "protocol version mismatch: client sent {client}, core supports {core}"
-    )]
+    #[error("protocol version mismatch: client sent {client}, core supports {core}")]
     VersionMismatch { client: u8, core: u8 },
 }
 
@@ -153,7 +151,10 @@ where
             // produce facts to forward.
             write_message(writer, &BusMessage::SubscribeAck { sequence: 0 }).await?;
         }
-        BusMessage::InspectRequest { request_id, fact: _ } => {
+        BusMessage::InspectRequest {
+            request_id,
+            fact: _,
+        } => {
             // Slice 001 Phase 2: no facts asserted yet, so inspection
             // always returns FactNotFound. The real handler lands in T052.
             let resp = BusMessage::InspectResponse {

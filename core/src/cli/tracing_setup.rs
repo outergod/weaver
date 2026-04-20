@@ -14,7 +14,9 @@ pub fn init(verbose_count: u8) {
             1 => "debug",
             _ => "trace",
         };
-        EnvFilter::new(format!("weaver={level},weaver_core={level},weaver_tui={level}"))
+        EnvFilter::new(format!(
+            "weaver={level},weaver_core={level},weaver_tui={level}"
+        ))
     });
 
     let _ = tracing_subscriber::registry()

@@ -37,7 +37,10 @@ pub fn run() -> miette::Result<()> {
 /// --version` shape for consistency).
 fn print_version(_no_color: bool) {
     println!("weaver-tui {}", env!("CARGO_PKG_VERSION"));
-    println!("  bus protocol: v{}", weaver_core::types::message::BUS_PROTOCOL_VERSION_STR);
+    println!(
+        "  bus protocol: v{}",
+        weaver_core::types::message::BUS_PROTOCOL_VERSION_STR
+    );
 }
 
 fn default_socket_path() -> std::path::PathBuf {

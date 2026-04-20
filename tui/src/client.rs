@@ -42,7 +42,9 @@ pub struct Client {
 /// for the caller to read messages from. Slice 001 Phase 2 subscribes
 /// to `buffer/` by default.
 pub async fn connect(socket: &Path, pattern: SubscribePattern) -> Result<Client, ClientError> {
-    let mut stream = UnixStream::connect(socket).await.map_err(ClientError::Connect)?;
+    let mut stream = UnixStream::connect(socket)
+        .await
+        .map_err(ClientError::Connect)?;
 
     // Send Hello.
     let hello = BusMessage::Hello(HelloMsg {

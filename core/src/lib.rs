@@ -21,11 +21,11 @@
 //! Module bodies are populated by tasks T011 onward in
 //! `specs/001-hello-fact/tasks.md`.
 
-pub mod provenance;
-pub mod types;
-pub mod fact_space;
-pub mod bus;
-pub mod trace;
 pub mod behavior;
-pub mod inspect;
+pub mod bus;
 pub mod cli;
+pub mod fact_space;
+pub mod inspect;
+pub mod provenance;
+pub mod trace;
+pub mod types;

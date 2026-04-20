@@ -9,9 +9,7 @@ use serde::{Deserialize, Serialize};
 /// Authoritative bus messages (FactAssert, FactRetract, Lifecycle, Error)
 /// carry sequence numbers per publisher — see
 /// `docs/02-architecture.md` §3.1.
-#[derive(
-    Copy, Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize,
-)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct EventId(u64);
 
