@@ -225,6 +225,56 @@ Forward-looking implication:
     as the behavior ID, not `core::dirty_tracking`.
   - Future agents authoring new fact families, actions, or behaviors
     MUST use kebab-case for all wire-visible names.
+
+----------------------------------------------------------------------
+AMENDMENT 6 — 2026-04-20 — version 0.6.0 → 0.7.0
+
+Origin: mid-implementation observation that T067 (CI) already plans
+`cargo clippy --workspace -- -D warnings` but nothing enforces at
+commit time or even defines a local one-command invocation. Without
+a binding rule, contributors (human or agent) repeatedly push code
+that fails CI; pre-commit hook installation, cargo aliases, and
+rustfmt enforcement are all things each project typically rediscovers.
+The pattern of this slice's prior amendments (4 License, 5 Wire
+vocabulary) — "bind conventions the scaffolding process needs" —
+applies here.
+
+Added to Additional Constraints:
+  - Code quality gates: Rust code MUST pass `cargo clippy
+    --all-targets --workspace -- -D warnings` and
+    `cargo fmt --all -- --check`. CI enforces both as mandatory,
+    unbypassable gate checks. A `.cargo/config.toml` defines
+    `cargo lint`, `cargo fmt-check`, and `cargo ci` aliases matching
+    the CI invocations. A repo-provided pre-commit hook
+    (`scripts/install-git-hooks.sh` installs it) runs both gates at
+    commit time; opt-in but SHOULD be installed. `git commit
+    --no-verify` is the documented escape valve. Agent contributions
+    MUST run `cargo ci` before proposing a commit.
+  - Scope: default clippy lints + `-D warnings` is the binding floor.
+    `clippy::pedantic` and `clippy::nursery` are SUGGESTED for new
+    modules but not globally required (too noisy; too opinionated).
+
+L1 / architecture documents updated in lockstep:
+  - None this amendment. Tooling is orthogonal to architecture;
+    lives at the engineering-discipline layer (L2).
+
+Bump rationale: MINOR — materially expanded guidance. Adds a new
+binding rule about local + CI quality gates. Not
+backward-incompatible since the Phase 2 code already passes both
+(rustfmt run as a prep commit; clippy clean).
+
+Forward-looking implication:
+  - A follow-up commit adds `.cargo/config.toml` with the `lint`,
+    `fmt-check`, and `ci` aliases.
+  - Another follow-up adds `scripts/install-git-hooks.sh` +
+    `scripts/hooks/pre-commit` (shell, POSIX, idempotent) and a
+    mention in AGENTS.md.
+  - T067 task description tightened in the slice's tasks.md to add
+    `--all-targets` to clippy and add the `cargo fmt --all -- --check`
+    step.
+  - Phase 2 formatting baseline established separately in commit
+    f14f5d5 (`style(core,tui): apply rustfmt --all`) so Amendment 6
+    turns on green on first CI run.
 -->
 
 # Weaver Constitution (Engineering — L2)
@@ -393,6 +443,7 @@ AI contributions bind to this constitution: fact-style commits, doc updates as p
 - **Commit messages**: follow the [Conventional Commits 1.0](https://www.conventionalcommits.org/) specification — `<type>(<scope>): <description>`. Scope vocabulary is *hybrid*: use Principle 7 public-surface names (`bus`, `steel`, `fact`, `action`, `cli`, `config`) when the change touches a public surface; otherwise use workspace/area names (`core`, `ui`, `tui`, `docs`, `specify`). Conventional Commit types feed automated changelog generation and per-surface SemVer derivation under Principle 8. Breaking public-surface changes MUST include a `BREAKING CHANGE:` footer.
 - **License**: Weaver is licensed under **AGPL-3.0-or-later** (see `LICENSE`). All workspace member `Cargo.toml` manifests MUST declare `license = "AGPL-3.0-or-later"` (or inherit it via `license.workspace = true`). Inbound dependencies MUST carry licenses compatible with AGPL-3.0-or-later — MIT, Apache-2.0, BSD-*, MPL-2.0, ISC are acceptable; GPL-2.0-only, proprietary-only, and other non-reciprocal-incompatible licenses are not. Dependency additions MUST be reviewed for license compatibility as part of per-PR review. Licensing is treated as a compatibility surface per Principle 7.
 - **Wire vocabulary naming**: identifier *values* on the bus and in CLI structured output follow Lisp/Scheme convention — **kebab-case**. This applies to: event names, fact attributes, action types, behavior identifiers, message-kind discriminators, enum tag values, lifecycle states, error categories, subscription pattern names, output-format names. Behavior identifiers use `/` as the namespace separator (e.g., `core/dirty-tracking`, not `core::dirty_tracking`). Struct *field names* inside structured messages follow the implementing language's idiom (`snake_case` in Rust, `camelCase` in JavaScript clients). The line: protocol-visible identifier *values* are kebab-case; in-language *field names* are language-idiomatic. Per Principle 5, both bus (CBOR) and outer-shell (JSON) representations honor this.
+- **Code quality gates**: All Rust code in the workspace MUST pass `cargo clippy --all-targets --workspace -- -D warnings` and `cargo fmt --all -- --check`. **CI enforces both as mandatory gate checks** — the unbypassable source of truth (per Principle 19). The `.cargo/config.toml` defines `cargo lint`, `cargo fmt-check`, and `cargo ci` aliases so the same invocations run locally with a single command. A repo-provided pre-commit hook (installed via `scripts/install-git-hooks.sh`) runs both gates at commit time; installation is opt-in but SHOULD be completed by contributors for fast local feedback. `git commit --no-verify` remains the documented escape valve for WIP commits on feature branches. Agent contributions (per Principle 21) MUST run `cargo ci` before proposing a commit, regardless of hook installation. Default clippy lints + `-D warnings` is the binding floor; `clippy::pedantic` and `clippy::nursery` are SUGGESTED for new modules but not required globally.
 
 ## Development Workflow
 
@@ -410,4 +461,4 @@ AI contributions bind to this constitution: fact-style commits, doc updates as p
 - SemVer applies to L2 itself: MAJOR for backward-incompatible principle changes, MINOR for added principles, PATCH for clarifications.
 - All PRs MUST verify compliance with relevant L2 principles. Violations MUST be justified in the plan's Complexity Tracking section.
 
-**Version**: 0.6.0 | **Ratified**: 2026-04-19 | **Last Amended**: 2026-04-20
+**Version**: 0.7.0 | **Ratified**: 2026-04-19 | **Last Amended**: 2026-04-20
