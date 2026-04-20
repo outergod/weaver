@@ -243,13 +243,15 @@ Added to Additional Constraints:
   - Code quality gates: Rust code MUST pass `cargo clippy
     --all-targets --workspace -- -D warnings` and
     `cargo fmt --all -- --check`. CI enforces both as mandatory,
-    unbypassable gate checks. A `.cargo/config.toml` defines
-    `cargo lint`, `cargo fmt-check`, and `cargo ci` aliases matching
-    the CI invocations. A repo-provided pre-commit hook
-    (`scripts/install-git-hooks.sh` installs it) runs both gates at
-    commit time; opt-in but SHOULD be installed. `git commit
-    --no-verify` is the documented escape valve. Agent contributions
-    MUST run `cargo ci` before proposing a commit.
+    unbypassable gate checks. `.cargo/config.toml` defines `cargo
+    lint` and `cargo fmt-check` aliases matching the CI invocations;
+    `scripts/ci.sh` chains lint + fmt-check + build + test (cargo
+    aliases cannot chain multiple subcommands natively). A
+    repo-provided pre-commit hook (`scripts/install-git-hooks.sh`
+    installs it) runs both gates at commit time; opt-in but SHOULD
+    be installed. `git commit --no-verify` is the documented escape
+    valve. Agent contributions MUST run `scripts/ci.sh` before
+    proposing a commit.
   - Scope: default clippy lints + `-D warnings` is the binding floor.
     `clippy::pedantic` and `clippy::nursery` are SUGGESTED for new
     modules but not globally required (too noisy; too opinionated).
@@ -443,7 +445,7 @@ AI contributions bind to this constitution: fact-style commits, doc updates as p
 - **Commit messages**: follow the [Conventional Commits 1.0](https://www.conventionalcommits.org/) specification — `<type>(<scope>): <description>`. Scope vocabulary is *hybrid*: use Principle 7 public-surface names (`bus`, `steel`, `fact`, `action`, `cli`, `config`) when the change touches a public surface; otherwise use workspace/area names (`core`, `ui`, `tui`, `docs`, `specify`). Conventional Commit types feed automated changelog generation and per-surface SemVer derivation under Principle 8. Breaking public-surface changes MUST include a `BREAKING CHANGE:` footer.
 - **License**: Weaver is licensed under **AGPL-3.0-or-later** (see `LICENSE`). All workspace member `Cargo.toml` manifests MUST declare `license = "AGPL-3.0-or-later"` (or inherit it via `license.workspace = true`). Inbound dependencies MUST carry licenses compatible with AGPL-3.0-or-later — MIT, Apache-2.0, BSD-*, MPL-2.0, ISC are acceptable; GPL-2.0-only, proprietary-only, and other non-reciprocal-incompatible licenses are not. Dependency additions MUST be reviewed for license compatibility as part of per-PR review. Licensing is treated as a compatibility surface per Principle 7.
 - **Wire vocabulary naming**: identifier *values* on the bus and in CLI structured output follow Lisp/Scheme convention — **kebab-case**. This applies to: event names, fact attributes, action types, behavior identifiers, message-kind discriminators, enum tag values, lifecycle states, error categories, subscription pattern names, output-format names. Behavior identifiers use `/` as the namespace separator (e.g., `core/dirty-tracking`, not `core::dirty_tracking`). Struct *field names* inside structured messages follow the implementing language's idiom (`snake_case` in Rust, `camelCase` in JavaScript clients). The line: protocol-visible identifier *values* are kebab-case; in-language *field names* are language-idiomatic. Per Principle 5, both bus (CBOR) and outer-shell (JSON) representations honor this.
-- **Code quality gates**: All Rust code in the workspace MUST pass `cargo clippy --all-targets --workspace -- -D warnings` and `cargo fmt --all -- --check`. **CI enforces both as mandatory gate checks** — the unbypassable source of truth (per Principle 19). The `.cargo/config.toml` defines `cargo lint`, `cargo fmt-check`, and `cargo ci` aliases so the same invocations run locally with a single command. A repo-provided pre-commit hook (installed via `scripts/install-git-hooks.sh`) runs both gates at commit time; installation is opt-in but SHOULD be completed by contributors for fast local feedback. `git commit --no-verify` remains the documented escape valve for WIP commits on feature branches. Agent contributions (per Principle 21) MUST run `cargo ci` before proposing a commit, regardless of hook installation. Default clippy lints + `-D warnings` is the binding floor; `clippy::pedantic` and `clippy::nursery` are SUGGESTED for new modules but not required globally.
+- **Code quality gates**: All Rust code in the workspace MUST pass `cargo clippy --all-targets --workspace -- -D warnings` and `cargo fmt --all -- --check`. **CI enforces both as mandatory gate checks** — the unbypassable source of truth (per Principle 19). The `.cargo/config.toml` defines `cargo lint` and `cargo fmt-check` aliases matching the CI invocations exactly; `scripts/ci.sh` chains lint + fmt-check + build + test for pre-push validation. A repo-provided pre-commit hook (installed via `scripts/install-git-hooks.sh`) runs both gates at commit time; installation is opt-in but SHOULD be completed by contributors for fast local feedback. `git commit --no-verify` remains the documented escape valve for WIP commits on feature branches. Agent contributions (per Principle 21) MUST run `scripts/ci.sh` before proposing a commit, regardless of hook installation. Default clippy lints + `-D warnings` is the binding floor; `clippy::pedantic` and `clippy::nursery` are SUGGESTED for new modules but not required globally.
 
 ## Development Workflow
 

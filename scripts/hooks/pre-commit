@@ -1,0 +1,16 @@
+#!/usr/bin/env sh
+# Weaver pre-commit hook — per L2 constitution Amendment 6.
+#
+# Runs cargo lint + cargo fmt-check before allowing a commit.
+# Install: scripts/install-git-hooks.sh
+# Bypass:  git commit --no-verify   (documented escape valve for WIP)
+
+set -eu
+
+echo "[pre-commit] cargo lint"
+cargo lint
+
+echo "[pre-commit] cargo fmt-check"
+cargo fmt-check
+
+echo "[pre-commit] OK"
