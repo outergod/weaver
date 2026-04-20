@@ -195,7 +195,7 @@ Per the L2 Constitution and the Vidvik review tasks-template additions, certain 
 - [ ] T064 [P] Update `CHANGELOG.md` with the actually-shipped initial-version entries for each public surface from P7 (bus protocol, CLI, fact-family schema, configuration) — confirm entries match what was implemented
 - [ ] T065 [P] Add `core/README.md` briefly describing the crate's role (core runtime: bus, fact space, behaviors, trace) and link to the slice spec
 - [ ] T066 [P] Add `tui/README.md` briefly describing the TUI's role (subscribe, render, simulate commands) and link to the slice spec
-- [ ] T067 [P] Add `.github/workflows/ci.yml` running `cargo build --workspace`, `cargo test --workspace`, `cargo clippy --workspace -- -D warnings` (per L2 P19 reproducibility + L2 P10 test-as-gate)
+- [ ] T067 [P] Add `.github/workflows/ci.yml` running `cargo build --workspace`, `cargo test --workspace`, `cargo clippy --all-targets --workspace -- -D warnings`, and `cargo fmt --all -- --check` (per L2 P19 reproducibility + L2 P10 test-as-gate + L2 Amendment 6 code-quality gates). Equivalent to `scripts/ci.sh` but pinned to specific toolchain/cache configuration in GitHub Actions.
 - [ ] T075 [P] Benchmark test: built `weaver --version` binary completes within 50 ms (warm-cache, debug profile) per spec SC-006; uses `std::time::Instant` around `Command::new("./target/debug/weaver").arg("--version").output()` in `core/tests/cli/version_timing.rs`
 - [ ] T068 [P] Property test: every `BusMessage` published over the wire carries non-empty Provenance (P11 invariant) in `tests/property/provenance_wire.rs`
 - [ ] T069 Run the `quickstart.md` walkthrough end-to-end manually; record any gaps as follow-up tasks in `CHANGELOG.md` notes
