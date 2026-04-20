@@ -179,6 +179,52 @@ Forward-looking implication:
     this clause. Agent contributions in particular (per P21) MUST
     verify license alignment as part of scaffolding any new crate or
     proposing any new dependency.
+
+----------------------------------------------------------------------
+AMENDMENT 5 — 2026-04-20 — version 0.5.0 → 0.6.0
+
+Origin: noticed during /speckit.implement Phase 2. Serde derive
+produced snake_case variant-tag values (`fact_assert`, `buffer_edited`,
+`fact_not_found`) while fact attribute strings are kebab-ish
+(`buffer/dirty`). The inconsistency grates in a Lisp-heritage project
+whose composition language is Scheme (Steel). Without a constitutional
+commitment, agents default to Rust's snake_case convention and the
+drift spreads.
+
+Added to Additional Constraints:
+  - Wire vocabulary naming: identifier VALUES on the bus and in CLI
+    structured output follow Lisp/Scheme convention (kebab-case).
+    Applies to event names, fact attributes, action types, behavior
+    identifiers, message-kind discriminators, enum tag values,
+    lifecycle states, error categories, subscription pattern names,
+    output-format names. Behavior identifiers use `/` as namespace
+    separator (e.g., `core/dirty-tracking`, not `core::dirty_tracking`).
+    Struct FIELD NAMES inside structured messages follow the
+    implementing language's idiom (snake_case in Rust, camelCase in
+    JavaScript). Line: protocol-visible values are kebab-case;
+    in-language field names are language-idiomatic.
+
+L1 / architecture documents updated in lockstep:
+  - None this amendment. Naming is orthogonal to architecture; lives at
+    the engineering-discipline layer (L2).
+
+Bump rationale: MINOR — materially expanded guidance. Adds a new
+binding rule about wire-identifier casing that agents and reviewers
+MUST apply to every new fact family, event, action, and behavior ID.
+Not backward-incompatible since slice 001 is unshipped; the follow-up
+commit updates the existing types to honor the convention before any
+external consumer exists.
+
+Forward-looking implication:
+  - Phase 2 scaffold (commit f212bdc) used serde defaults (snake_case
+    variant tags). Follow-up commit adds `#[serde(rename_all =
+    "kebab-case")]` to BusMessage, SubscribePattern, EventPayload,
+    InspectionError, SourceId, OutputFormat — plus updates the two
+    contracts/ docs to reflect kebab-case wire-format examples.
+  - Phase 3 behavior registration (T042) uses `core/dirty-tracking`
+    as the behavior ID, not `core::dirty_tracking`.
+  - Future agents authoring new fact families, actions, or behaviors
+    MUST use kebab-case for all wire-visible names.
 -->
 
 # Weaver Constitution (Engineering — L2)
@@ -346,6 +392,7 @@ AI contributions bind to this constitution: fact-style commits, doc updates as p
 - **Constitution sync**: `.specify/memory/constitution.md` (L2) and `docs/00-constitution.md` (L1) MUST stay in sync. CI enforces this per Principle 17.
 - **Commit messages**: follow the [Conventional Commits 1.0](https://www.conventionalcommits.org/) specification — `<type>(<scope>): <description>`. Scope vocabulary is *hybrid*: use Principle 7 public-surface names (`bus`, `steel`, `fact`, `action`, `cli`, `config`) when the change touches a public surface; otherwise use workspace/area names (`core`, `ui`, `tui`, `docs`, `specify`). Conventional Commit types feed automated changelog generation and per-surface SemVer derivation under Principle 8. Breaking public-surface changes MUST include a `BREAKING CHANGE:` footer.
 - **License**: Weaver is licensed under **AGPL-3.0-or-later** (see `LICENSE`). All workspace member `Cargo.toml` manifests MUST declare `license = "AGPL-3.0-or-later"` (or inherit it via `license.workspace = true`). Inbound dependencies MUST carry licenses compatible with AGPL-3.0-or-later — MIT, Apache-2.0, BSD-*, MPL-2.0, ISC are acceptable; GPL-2.0-only, proprietary-only, and other non-reciprocal-incompatible licenses are not. Dependency additions MUST be reviewed for license compatibility as part of per-PR review. Licensing is treated as a compatibility surface per Principle 7.
+- **Wire vocabulary naming**: identifier *values* on the bus and in CLI structured output follow Lisp/Scheme convention — **kebab-case**. This applies to: event names, fact attributes, action types, behavior identifiers, message-kind discriminators, enum tag values, lifecycle states, error categories, subscription pattern names, output-format names. Behavior identifiers use `/` as the namespace separator (e.g., `core/dirty-tracking`, not `core::dirty_tracking`). Struct *field names* inside structured messages follow the implementing language's idiom (`snake_case` in Rust, `camelCase` in JavaScript clients). The line: protocol-visible identifier *values* are kebab-case; in-language *field names* are language-idiomatic. Per Principle 5, both bus (CBOR) and outer-shell (JSON) representations honor this.
 
 ## Development Workflow
 
@@ -363,4 +410,4 @@ AI contributions bind to this constitution: fact-style commits, doc updates as p
 - SemVer applies to L2 itself: MAJOR for backward-incompatible principle changes, MINOR for added principles, PATCH for clarifications.
 - All PRs MUST verify compliance with relevant L2 principles. Violations MUST be justified in the plan's Complexity Tracking section.
 
-**Version**: 0.5.0 | **Ratified**: 2026-04-19 | **Last Amended**: 2026-04-20
+**Version**: 0.6.0 | **Ratified**: 2026-04-19 | **Last Amended**: 2026-04-20
