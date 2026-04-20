@@ -167,7 +167,7 @@ mod tests {
     #[test]
     fn fact_inspection_records_asserting_behavior() {
         let mut store = TraceStore::new();
-        let behavior = BehaviorId::new("core::dirty_tracking");
+        let behavior = BehaviorId::new("core/dirty-tracking");
         let event_id = EventId::new(42);
         let fact_key = FactKey::new(EntityRef::new(1), "buffer/dirty");
 
@@ -217,7 +217,7 @@ mod tests {
     #[test]
     fn retraction_clears_fact_inspection() {
         let mut store = TraceStore::new();
-        let behavior = BehaviorId::new("core::dirty_tracking");
+        let behavior = BehaviorId::new("core/dirty-tracking");
         let event_id = EventId::new(42);
         let fact_key = FactKey::new(EntityRef::new(1), "buffer/dirty");
 

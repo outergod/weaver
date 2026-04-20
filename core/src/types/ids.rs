@@ -37,7 +37,7 @@ impl std::fmt::Display for EventId {
     }
 }
 
-/// Human-readable behavior identifier, e.g., `"core::dirty_tracking"`.
+/// Human-readable behavior identifier, e.g., `"core/dirty-tracking"`.
 ///
 /// Embedded Rust behaviors use Rust-qualified path conventions. Steel
 /// behaviors (later slices) will use namespaced names such as
@@ -73,8 +73,8 @@ mod tests {
 
     #[test]
     fn behavior_id_display() {
-        let b = BehaviorId::new("core::dirty_tracking");
-        assert_eq!(b.to_string(), "core::dirty_tracking");
+        let b = BehaviorId::new("core/dirty-tracking");
+        assert_eq!(b.to_string(), "core/dirty-tracking");
     }
 
     #[test]

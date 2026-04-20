@@ -23,11 +23,11 @@ pub struct Provenance {
 ///
 /// `External` identifies out-of-process producers (future services,
 /// agents). Future slices may split `External` into richer variants.
-/// Serde representation: external tagging with `snake_case` variant names.
-/// `SourceId::Core` serializes as `"core"`, `SourceId::Behavior(id)` as
-/// `{"behavior": "id"}`, etc.
+/// Serde representation: external tagging with `kebab-case` variant names
+/// (per L2 Amendment 5). `SourceId::Core` serializes as `"core"`,
+/// `SourceId::Behavior(id)` as `{"behavior": "id"}`, etc.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[serde(rename_all = "kebab-case")]
 pub enum SourceId {
     Core,
     Behavior(crate::types::ids::BehaviorId),
@@ -80,7 +80,7 @@ mod tests {
         assert!(Provenance::new(SourceId::Tui, 1, None).is_ok());
         assert!(
             Provenance::new(
-                SourceId::Behavior(BehaviorId::new("core::dirty_tracking")),
+                SourceId::Behavior(BehaviorId::new("core/dirty-tracking")),
                 2,
                 Some(EventId::new(7))
             )
@@ -92,7 +92,7 @@ mod tests {
     #[test]
     fn json_round_trip() {
         let p = Provenance::new(
-            SourceId::Behavior(BehaviorId::new("core::dirty_tracking")),
+            SourceId::Behavior(BehaviorId::new("core/dirty-tracking")),
             1000,
             Some(EventId::new(42)),
         )

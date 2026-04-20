@@ -126,7 +126,7 @@ Per the L2 Constitution and the Vidvik review tasks-template additions, certain 
 
 ### Implementation for User Story 1
 
-- [ ] T042 [US1] Define dirty-tracking behavior: registers for `buffer/edited` and `buffer/cleaned` event names; on edited asserts `buffer/dirty=true`; on cleaned retracts `buffer/dirty`; behavior_id `core::dirty_tracking` in `core/src/behavior/dirty_tracking.rs`
+- [ ] T042 [US1] Define dirty-tracking behavior: registers for `buffer/edited` and `buffer/cleaned` event names; on edited asserts `buffer/dirty=true`; on cleaned retracts `buffer/dirty`; behavior_id `core/dirty-tracking` in `core/src/behavior/dirty_tracking.rs`
 - [ ] T043 [US1] Wire dirty-tracking behavior registration into core startup in `core/src/main.rs` (or `core/src/cli/run.rs` if extracted)
 - [ ] T044 [P] [US1] {surface:cli} {latency:interactive} Implement `weaver simulate-edit <buffer-id>` CLI subcommand: connects to bus, publishes `Event::BufferEdited(EntityRef(buffer-id))`, returns submission ack in human or JSON form in `core/src/cli/simulate.rs`
 - [ ] T045 [P] [US1] {surface:cli} {retraction} {latency:interactive} Implement `weaver simulate-clean <buffer-id>` CLI subcommand: connects to bus, publishes `Event::BufferCleaned`, returns submission ack in `core/src/cli/simulate.rs`
@@ -145,11 +145,11 @@ Per the L2 Constitution and the Vidvik review tasks-template additions, certain 
 
 **Goal**: A developer inspects any displayed fact and receives the source event, asserting behavior, and timestamp via a bus request/response (FR-008). The CLI's `inspect` subcommand is a thin wrapper over the same bus call.
 
-**Independent Test**: With a `buffer/dirty` fact asserted, pressing `i` in the TUI returns `core::dirty_tracking, event N, Δns ago`. Same fact-key via `weaver inspect 1:buffer/dirty --output=json` returns the same fields. Validates spec SC-002.
+**Independent Test**: With a `buffer/dirty` fact asserted, pressing `i` in the TUI returns `core/dirty-tracking, event N, Δns ago`. Same fact-key via `weaver inspect 1:buffer/dirty --output=json` returns the same fields. Validates spec SC-002.
 
 ### Tests for User Story 2 (write FIRST)
 
-- [ ] T049 [P] [US2] Scenario test: `(fact-space with buffer/dirty asserted via behavior firing, InspectRequest{1:buffer/dirty}) → InspectResponse{Ok(InspectionDetail{ source_event, asserting_behavior: "core::dirty_tracking", asserted_at_ns, trace_sequence })}` in `core/tests/inspect/inspection_found.rs`
+- [ ] T049 [P] [US2] Scenario test: `(fact-space with buffer/dirty asserted via behavior firing, InspectRequest{1:buffer/dirty}) → InspectResponse{Ok(InspectionDetail{ source_event, asserting_behavior: "core/dirty-tracking", asserted_at_ns, trace_sequence })}` in `core/tests/inspect/inspection_found.rs`
 - [ ] T050 [P] [US2] Scenario test: `(empty fact-space, InspectRequest{1:buffer/dirty}) → InspectResponse{Err(InspectionError::FactNotFound)}` in `core/tests/inspect/inspection_not_found.rs`
 - [ ] T051 [P] [US2] Property test: every InspectionDetail returned for a real fact has non-empty asserting_behavior and a trace_sequence ≥ 0 in `core/tests/property/inspection_invariant.rs`
 

@@ -70,7 +70,7 @@ In the TUI:
 In the TUI:
 
 1. Press `e` to assert the dirty fact.
-2. Press `i` (inspect). Observe a non-empty inspection result naming the source event ID, the asserting behavior (`core::dirty_tracking`), and a recent timestamp.
+2. Press `i` (inspect). Observe a non-empty inspection result naming the source event ID, the asserting behavior (`core/dirty-tracking`), and a recent timestamp.
 
 **Pass criterion**: the inspection response contains all three fields, with no placeholder values.
 

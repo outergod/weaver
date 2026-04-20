@@ -21,12 +21,13 @@ pub const BUS_PROTOCOL_VERSION_STR: &str = "0.1.0";
 
 /// The top-level enum of bus messages.
 ///
-/// Serde representation is external tagging with `snake_case` variant
+/// Serde representation is external tagging with `kebab-case` variant
 /// names — a message serializes as `{"hello": {...}}`,
-/// `{"fact_assert": {...}}`, etc. This handles newtype variants
-/// wrapping non-struct types cleanly (internal tagging cannot).
+/// `{"fact-assert": {...}}`, etc. Kebab-case wire vocabulary per L2
+/// Additional Constraints (Amendment 5); external tagging handles
+/// newtype variants wrapping non-struct types cleanly.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[serde(rename_all = "kebab-case")]
 pub enum BusMessage {
     Hello(HelloMsg),
     Event(Event),
@@ -58,14 +59,14 @@ pub struct HelloMsg {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[serde(rename_all = "kebab-case")]
 pub enum SubscribePattern {
     AllFacts,
     FamilyPrefix(String),
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[serde(rename_all = "kebab-case")]
 pub enum LifecycleSignal {
     Started,
     Ready,
@@ -88,7 +89,7 @@ pub struct InspectionDetail {
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[serde(rename_all = "kebab-case")]
 pub enum InspectionError {
     FactNotFound,
     NoProvenance,
@@ -107,7 +108,7 @@ mod tests {
             key: FactKey::new(EntityRef::new(1), "buffer/dirty"),
             value: FactValue::Bool(true),
             provenance: Provenance::new(
-                SourceId::Behavior(BehaviorId::new("core::dirty_tracking")),
+                SourceId::Behavior(BehaviorId::new("core/dirty-tracking")),
                 1000,
                 Some(EventId::new(42)),
             )
@@ -148,7 +149,7 @@ mod tests {
                 request_id: 7,
                 result: Ok(InspectionDetail {
                     source_event: EventId::new(42),
-                    asserting_behavior: BehaviorId::new("core::dirty_tracking"),
+                    asserting_behavior: BehaviorId::new("core/dirty-tracking"),
                     asserted_at_ns: 1000,
                     trace_sequence: 17,
                 }),

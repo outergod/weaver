@@ -2,6 +2,15 @@
 
 CBOR-encoded messages on the local Unix-domain-socket bus between `weaver` (core) and `weaver-tui` (and any future client). Per L2 P5 and arch §3.1.
 
+## Naming conventions
+
+Per L2 Additional Constraints (Amendment 5):
+
+- **Identifier values** on the wire are **kebab-case**: message-kind discriminators (`fact-assert`, `subscribe-ack`, `inspect-request`), event name values (`buffer-edited`, `buffer-cleaned`), lifecycle states (`started`, `ready`, `stopped`), error categories (`version-mismatch`, `frame-too-large`), inspection error values (`fact-not-found`, `no-provenance`), subscription pattern tags (`all-facts`, `family-prefix`).
+- **Behavior identifiers** use `/` as the namespace separator (e.g., `core/dirty-tracking`).
+- **Fact attribute strings** are kebab-case with `/`-delimited namespaces (e.g., `buffer/dirty`).
+- **Struct field names** inside messages follow the implementing language's idiom: `snake_case` in Rust, `camelCase` in JavaScript clients. The CBOR/JSON on the wire uses the Rust-snake_case form (`protocol_version`, `causal_parent`, `request_id`).
+
 ## Wire framing
 
 ```
@@ -26,7 +35,7 @@ Tag numbers are a public surface per L2 P7. Subsequent additions land via `CHANG
 ## Connection lifecycle
 
 1. **Connect**: client opens a stream connection to the core's socket.
-2. **Handshake**: client sends `Hello { protocol_version: 0x01, client_kind: "..." }`. Core responds with either `Lifecycle(Ready)` or `Error { category: "version_mismatch", ... }` followed by close.
+2. **Handshake**: client sends `Hello { protocol_version: 0x01, client_kind: "..." }`. Core responds with either `Lifecycle(Ready)` or `Error { category: "version-mismatch", ... }` followed by close.
 3. **Subscribe / interact**: client may send `Subscribe(...)`, `Event(...)`, `InspectRequest { ... }`. Core sends `FactAssert`, `FactRetract`, `Lifecycle`, and `InspectResponse` as appropriate.
 4. **Disconnect**: either side may close the stream; core emits a trace entry recording the disconnection.
 
@@ -145,7 +154,7 @@ Initial subscription receives the current state immediately after `SubscribeAck`
 
 ```
 Error {
-    category: String,            // "protocol" | "version_mismatch" | "behavior_failure" | ...
+    category: String,            // "protocol" | "version-mismatch" | "behavior-failure" | ...
     detail: String,
     context: Option<String>      // e.g., the offending message's request_id
 }
@@ -158,8 +167,8 @@ Receiving an `Error` does not by itself close the connection — the sender of t
 | Failure | Wire behavior | Trace consequence |
 |---|---|---|
 | Client sends non-`Hello` first | Core sends `Error { category: "protocol", ... }`, closes | TraceEntry::Lifecycle(Stopped subscription) |
-| Protocol version mismatch | Core sends `Error { category: "version_mismatch", ... }`, closes | TraceEntry: connection rejected |
-| Frame length > 64 KiB | Either side sends `Error { category: "frame_too_large", ... }`, closes | TraceEntry: connection terminated |
+| Protocol version mismatch | Core sends `Error { category: "version-mismatch", ... }`, closes | TraceEntry: connection rejected |
+| Frame length > 64 KiB | Either side sends `Error { category: "frame-too-large", ... }`, closes | TraceEntry: connection terminated |
 | CBOR decode failure | Receiver sends `Error { category: "decode", ... }`, closes | TraceEntry |
 | Behavior firing error during event handling | Core continues; emits `TraceEntry::BehaviorFired { error: Some(...) }`; subscribers are not notified by default in this slice | Trace only |
 | Core process exits | Connection drops; client observes EOF; client surfaces unavailability per FR-009 | (No trace; core is gone) |

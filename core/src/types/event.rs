@@ -24,7 +24,7 @@ pub struct Event {
 /// Future slices extend this enum as new event kinds become part of the
 /// bus protocol.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[serde(rename_all = "kebab-case")]
 pub enum EventPayload {
     BufferEdited,
     BufferCleaned,

@@ -72,7 +72,7 @@ pub enum Command {
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
-#[value(rename_all = "snake_case")]
+#[value(rename_all = "kebab-case")]
 pub enum OutputFormat {
     /// Human-formatted output (default).
     Human,

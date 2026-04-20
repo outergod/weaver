@@ -95,7 +95,7 @@ async fn handle_connection(
     };
     if protocol_version != BUS_PROTOCOL_VERSION {
         let err = BusMessage::Error(ErrorMsg {
-            category: "version_mismatch".into(),
+            category: "version-mismatch".into(),
             detail: format!(
                 "client protocol v{protocol_version:#x}, core supports v{BUS_PROTOCOL_VERSION:#x}"
             ),

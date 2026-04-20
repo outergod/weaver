@@ -64,7 +64,7 @@ All fields per L2 P11.
       "key": { "entity": 1, "attribute": "buffer/dirty" },
       "value": { "type": "bool", "value": true },
       "provenance": {
-        "source": { "type": "behavior", "id": "core::dirty_tracking" },
+        "source": { "type": "behavior", "id": "core/dirty-tracking" },
         "timestamp_ns": 12340000000,
         "causal_parent": 42
       }
@@ -94,7 +94,7 @@ Found:
 {
   "fact": { "entity": 1, "attribute": "buffer/dirty" },
   "source_event": 42,
-  "asserting_behavior": "core::dirty_tracking",
+  "asserting_behavior": "core/dirty-tracking",
   "asserted_at_ns": 12340000000,
   "trace_sequence": 17
 }
@@ -131,7 +131,7 @@ All errors are `miette::Diagnostic` types with `--output=human` rendering by def
 ```json
 {
   "error": {
-    "category": "core_unavailable",
+    "category": "core-unavailable",
     "code": "WEAVER-002",
     "message": "Core not reachable at /run/user/1000/weaver.sock",
     "context": "tried to connect for `weaver status`",
@@ -144,7 +144,7 @@ All errors are `miette::Diagnostic` types with `--output=human` rendering by def
 ```json
 {
   "error": {
-    "category": "fact_not_found",
+    "category": "fact-not-found",
     "code": "WEAVER-201",
     "message": "no fact (entity:1, attribute:buffer/dirty) is asserted by any authority",
     "context": "weaver inspect 1:buffer/dirty",
@@ -186,7 +186,7 @@ All errors are `miette::Diagnostic` types with `--output=human` rendering by def
 │                                                                 │
 │ Facts:                                                          │
 │   buffer/dirty(EntityRef(1)) = true                             │
-│     by core::dirty_tracking, event 42, 0.142s ago               │
+│     by core/dirty-tracking, event 42, 0.142s ago                │
 │                                                                 │
 │ Commands: [e]dit  [c]lean  [i]nspect  [q]uit                    │
 └─────────────────────────────────────────────────────────────────┘

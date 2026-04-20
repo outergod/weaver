@@ -69,7 +69,7 @@ Strongly-typed identifiers, distinct from each other and from `EntityRef`.
 
 ```text
 EventId(u64)       // monotonic per producer; unique across the lifetime of the bus connection
-BehaviorId(String) // human-readable; e.g., "core::dirty_tracking"
+BehaviorId(String) // human-readable; e.g., "core/dirty-tracking"
 ```
 
 ### Event
