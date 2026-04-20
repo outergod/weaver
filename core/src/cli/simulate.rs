@@ -12,9 +12,10 @@ use miette::{IntoDiagnostic, miette};
 use serde::Serialize;
 use tokio::runtime::Builder;
 
-use crate::bus::client::Client;
+use crate::bus::client::{Client, ClientError};
 use crate::cli::args::OutputFormat;
 use crate::cli::config::Config;
+use crate::cli::errors::{WeaverCliError, exit_code, render_error};
 use crate::provenance::{Provenance, SourceId};
 use crate::types::entity_ref::EntityRef;
 use crate::types::event::{Event, EventPayload};
@@ -66,9 +67,28 @@ pub fn run(
         .build()
         .into_diagnostic()?;
     runtime.block_on(async move {
-        let mut client = Client::connect(&cfg.socket_path, "cli")
-            .await
-            .map_err(|e| miette!("{e}"))?;
+        let mut client = match Client::connect(&cfg.socket_path, "cli").await {
+            Ok(c) => c,
+            Err(ClientError::Connect { path, source }) => {
+                // `cli-surfaces.md` documents exit code 2 on
+                // core-unavailable for `simulate-edit`/`simulate-clean`.
+                // Route through the structured error envelope so
+                // `--output=json` still produces a parseable error line.
+                let err = WeaverCliError::CoreUnavailable {
+                    message: format!("core not reachable at {path}: {source}"),
+                    context: Some(format!(
+                        "weaver {} {buffer_id}",
+                        match kind {
+                            SimulationKind::Edit => "simulate-edit",
+                            SimulationKind::Clean => "simulate-clean",
+                        },
+                    )),
+                };
+                render_error(&err, output)?;
+                std::process::exit(exit_code::EXPECTED);
+            }
+            Err(e) => return Err(miette!("{e}")),
+        };
 
         let target = EntityRef::new(buffer_id);
         let submitted_at_ns = now_ns();

@@ -11,12 +11,18 @@ use serde::Serialize;
 use thiserror::Error;
 use tokio::runtime::Builder;
 
-use crate::bus::client::Client;
+use crate::bus::client::{Client, ClientError};
 use crate::cli::args::OutputFormat;
 use crate::cli::config::Config;
 use crate::types::entity_ref::EntityRef;
 use crate::types::fact::FactKey;
 use crate::types::message::{BusMessage, InspectionDetail, InspectionError};
+
+/// Exit code for `weaver inspect` when the core is unreachable.
+/// Distinct from `cli::errors::exit_code::EXPECTED` (=2, used for
+/// `fact-not-found`) so scripts can distinguish the two failure modes
+/// per `contracts/cli-surfaces.md`.
+const EXIT_CORE_UNAVAILABLE: i32 = 3;
 
 #[derive(Debug, Error)]
 pub enum InspectCliError {
@@ -85,6 +91,9 @@ pub fn run(
     output: OutputFormat,
     socket_override: Option<PathBuf>,
 ) -> miette::Result<()> {
+    // Parse errors exit 1 (miette default) — they're caller input
+    // errors, not a fact lookup outcome, so they don't fit either of
+    // the subcommand-specific codes.
     let key = parse_fact_key(fact_key_str).map_err(|e| miette!("{e}"))?;
     let cfg = Config::from_cli(socket_override);
     let runtime = Builder::new_current_thread()
@@ -92,9 +101,17 @@ pub fn run(
         .build()
         .into_diagnostic()?;
     runtime.block_on(async move {
-        let mut client = Client::connect(&cfg.socket_path, "cli")
-            .await
-            .map_err(|e| miette!("{e}"))?;
+        let mut client = match Client::connect(&cfg.socket_path, "cli").await {
+            Ok(c) => c,
+            Err(ClientError::Connect { path, source }) => {
+                // Render the not-found shape with the core-unavailable
+                // error so `--output=json` still produces parseable
+                // output before exit 3.
+                print_core_unavailable(&key, &path, &source, output)?;
+                std::process::exit(EXIT_CORE_UNAVAILABLE);
+            }
+            Err(e) => return Err(miette!("{e}")),
+        };
 
         let request_id = next_request_id();
         client
@@ -107,17 +124,38 @@ pub fn run(
 
         let response = read_inspect_response(&mut client, request_id).await?;
         render(&key, &response, output)?;
-        // Exit code 2 for not-found per `cli-surfaces.md` is signalled
-        // by returning an error from `miette::run`. Since a plain
-        // `miette::Report` is exit code 1, we use `Result` with a
-        // sentinel error carrying the miette diagnostic. Slice 001
-        // keeps the exit-code differentiation coarse — full mapping
-        // lands with the `-o json` formatter in Phase 5 (T063).
+        // `FactNotFound` is a documented outcome, not a crash. The
+        // contract says exit 2; route through `std::process::exit` so
+        // scripts can distinguish it from (a) a generic crash (exit 1)
+        // and (b) core-unavailable (exit 3 above).
         if response.is_err() {
-            return Err(miette!("fact not found"));
+            std::process::exit(crate::cli::errors::exit_code::EXPECTED);
         }
         Ok(())
     })
+}
+
+fn print_core_unavailable(
+    key: &FactKey,
+    path: &str,
+    source: &std::io::Error,
+    output: OutputFormat,
+) -> miette::Result<()> {
+    let message = format!("core not reachable at {path}: {source}");
+    match output {
+        OutputFormat::Human => {
+            eprintln!("fact: ({}, {})", key.entity, key.attribute);
+            eprintln!("  error: {message}");
+        }
+        OutputFormat::Json => {
+            let envelope = crate::cli::errors::WeaverCliError::CoreUnavailable {
+                message,
+                context: Some(format!("weaver inspect {}:{}", key.entity, key.attribute)),
+            };
+            crate::cli::errors::render_error(&envelope, output)?;
+        }
+    }
+    Ok(())
 }
 
 async fn read_inspect_response(
