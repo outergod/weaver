@@ -63,48 +63,48 @@ Per the L2 Constitution and the Vidvik review tasks-template additions, certain 
 
 ### Domain types (parallel — all in different files)
 
-- [ ] T011 [P] Define `EntityRef(u64)` newtype + CBOR tag 1000 serialization in `core/src/types/entity_ref.rs`; add `pub mod entity_ref` to `core/src/types/mod.rs`
-- [ ] T012 [P] Define `Provenance { source, timestamp_ns, causal_parent }` and `SourceId` enum in `core/src/provenance.rs`; constructor enforces non-empty source
-- [ ] T013 [P] Define `EventId(u64)` and `BehaviorId(String)` newtypes in `core/src/types/ids.rs`
-- [ ] T014 [P] Define `FactKey { entity, attribute }`, `FactValue` enum (Bool/String/Int/Null), `Fact { key, value, provenance }` in `core/src/types/fact.rs`; CBOR tag 1001 for keyword serialization
-- [ ] T015 [P] Define `Event { id, name, target, payload, provenance }` and `EventPayload` enum (BufferEdited, BufferCleaned) in `core/src/types/event.rs`
-- [ ] T016 [P] Define `BusMessage` enum (Hello, Event, FactAssert, FactRetract, Subscribe, SubscribeAck, InspectRequest, InspectResponse, Lifecycle, Error) and supporting types (HelloMsg, SubscribePattern, LifecycleSignal, ErrorMsg, InspectionDetail, InspectionError) in `core/src/types/message.rs`
-- [ ] T017 [P] Define `TraceEntry { sequence, timestamp_ns, payload }` and `TracePayload` enum (Event, FactAsserted, FactRetracted, BehaviorFired, Lifecycle) in `core/src/trace/entry.rs`
+- [X] T011 [P] Define `EntityRef(u64)` newtype + CBOR tag 1000 serialization in `core/src/types/entity_ref.rs`; add `pub mod entity_ref` to `core/src/types/mod.rs`
+- [X] T012 [P] Define `Provenance { source, timestamp_ns, causal_parent }` and `SourceId` enum in `core/src/provenance.rs`; constructor enforces non-empty source
+- [X] T013 [P] Define `EventId(u64)` and `BehaviorId(String)` newtypes in `core/src/types/ids.rs`
+- [X] T014 [P] Define `FactKey { entity, attribute }`, `FactValue` enum (Bool/String/Int/Null), `Fact { key, value, provenance }` in `core/src/types/fact.rs`; CBOR tag 1001 for keyword serialization
+- [X] T015 [P] Define `Event { id, name, target, payload, provenance }` and `EventPayload` enum (BufferEdited, BufferCleaned) in `core/src/types/event.rs`
+- [X] T016 [P] Define `BusMessage` enum (Hello, Event, FactAssert, FactRetract, Subscribe, SubscribeAck, InspectRequest, InspectResponse, Lifecycle, Error) and supporting types (HelloMsg, SubscribePattern, LifecycleSignal, ErrorMsg, InspectionDetail, InspectionError) in `core/src/types/message.rs`
+- [X] T017 [P] Define `TraceEntry { sequence, timestamp_ns, payload }` and `TracePayload` enum (Event, FactAsserted, FactRetracted, BehaviorFired, Lifecycle) in `core/src/trace/entry.rs`
 
 ### Foundational invariant tests (parallel — proptest-based)
 
-- [ ] T018 [P] Property test: `Provenance::new` rejects empty `External("")` source; timestamps are monotonic per SourceId in `core/src/provenance.rs` `#[cfg(test)] mod tests`
-- [ ] T019 [P] Property test: `EventId` round-trips through CBOR encode/decode preserving identity in `core/src/types/event.rs` `#[cfg(test)] mod tests`
-- [ ] T020 [P] Property test: `BusMessage` round-trips through CBOR for every variant (smoke-level coverage) in `core/src/types/message.rs` `#[cfg(test)] mod tests`
+- [X] T018 [P] Property test: `Provenance::new` rejects empty `External("")` source; timestamps are monotonic per SourceId in `core/src/provenance.rs` `#[cfg(test)] mod tests`
+- [X] T019 [P] Property test: `EventId` round-trips through CBOR encode/decode preserving identity in `core/src/types/event.rs` `#[cfg(test)] mod tests`
+- [X] T020 [P] Property test: `BusMessage` round-trips through CBOR for every variant (smoke-level coverage) in `core/src/types/message.rs` `#[cfg(test)] mod tests`
 
 ### Storage and codec layers (depend on types above)
 
-- [ ] T021 Define `FactStore` trait (`assert / retract / query / subscribe / snapshot`) AND `FactSpaceSnapshot` type (immutable view of all currently-asserted facts; cheaply-cloneable, e.g., `Arc<HashMap<FactKey, Fact>>`) in `core/src/fact_space/mod.rs`; reference `research.md` §13 in module docs noting the ECS-library decision is deferred
-- [ ] T022 Implement `HashMap`-backed `FactStore` (`InMemoryFactStore`) with subscription channels in `core/src/fact_space/in_memory.rs`; unit tests for assert→query, assert→retract→query, subscription receives event
-- [ ] T023 [P] {retraction} Property test: `assert(f) → retract(f.key) → query(f.key) == None`; `assert(f) → assert(f') → query(key) == Some(f')` (latest wins) in `core/src/fact_space/in_memory.rs` `#[cfg(test)] mod tests`
-- [ ] T024 Implement TraceStore (`append`, reverse causal index by EventId and FactKey, monotonic sequence) in `core/src/trace/store.rs`; unit tests for append + reverse-lookup
-- [ ] T025 Implement bus codec (length-prefixed CBOR framing via `ciborium`) in `core/src/bus/codec.rs`; unit tests for round-trip + frame-too-large rejection (>64 KiB)
+- [X] T021 Define `FactStore` trait (`assert / retract / query / subscribe / snapshot`) AND `FactSpaceSnapshot` type (immutable view of all currently-asserted facts; cheaply-cloneable, e.g., `Arc<HashMap<FactKey, Fact>>`) in `core/src/fact_space/mod.rs`; reference `research.md` §13 in module docs noting the ECS-library decision is deferred
+- [X] T022 Implement `HashMap`-backed `FactStore` (`InMemoryFactStore`) with subscription channels in `core/src/fact_space/in_memory.rs`; unit tests for assert→query, assert→retract→query, subscription receives event
+- [X] T023 [P] {retraction} Property test: `assert(f) → retract(f.key) → query(f.key) == None`; `assert(f) → assert(f') → query(key) == Some(f')` (latest wins) in `core/src/fact_space/in_memory.rs` `#[cfg(test)] mod tests`
+- [X] T024 Implement TraceStore (`append`, reverse causal index by EventId and FactKey, monotonic sequence) in `core/src/trace/store.rs`; unit tests for append + reverse-lookup
+- [X] T025 Implement bus codec (length-prefixed CBOR framing via `ciborium`) in `core/src/bus/codec.rs`; unit tests for round-trip + frame-too-large rejection (>64 KiB)
 
 ### Bus listener and dispatcher (depend on storage + codec)
 
-- [ ] T026 Implement bus listener: Unix domain socket bind, accept loop, per-connection task; handshake validates `Hello { protocol_version: 0x01 }` in `core/src/bus/listener.rs`
-- [ ] T027 {surface:bus} Implement delivery class enforcement: lossy (drop-oldest) channels for `Event`/`stream-item`, authoritative (block-with-timeout, sequence numbers) for `FactAssert`/`FactRetract`/`Lifecycle`/`Error` in `core/src/bus/delivery.rs`
-- [ ] T028 Implement behavior dispatcher: single mpsc consumer over inbound events; calls registered behaviors with `&FactSpaceSnapshot`; commits behavior outputs (asserted/retracted facts + intents) atomically; emits `TraceEntry::BehaviorFired` in `core/src/behavior/dispatcher.rs`
-- [ ] T029 [P] Property test: per-publisher sequence numbers in delivery layer are strictly monotonic in `core/src/bus/delivery.rs` `#[cfg(test)] mod tests`
+- [X] T026 Implement bus listener: Unix domain socket bind, accept loop, per-connection task; handshake validates `Hello { protocol_version: 0x01 }` in `core/src/bus/listener.rs`
+- [X] T027 {surface:bus} Implement delivery class enforcement: lossy (drop-oldest) channels for `Event`/`stream-item`, authoritative (block-with-timeout, sequence numbers) for `FactAssert`/`FactRetract`/`Lifecycle`/`Error` in `core/src/bus/delivery.rs`
+- [X] T028 Implement behavior dispatcher: single mpsc consumer over inbound events; calls registered behaviors with `&FactSpaceSnapshot`; commits behavior outputs (asserted/retracted facts + intents) atomically; emits `TraceEntry::BehaviorFired` in `core/src/behavior/dispatcher.rs`
+- [X] T029 [P] Property test: per-publisher sequence numbers in delivery layer are strictly monotonic in `core/src/bus/delivery.rs` `#[cfg(test)] mod tests`
 
 ### CLI scaffolding and version
 
-- [ ] T030 {surface:cli} Implement CLI scaffolding (clap derive) with subcommands `run`, `status`, `inspect`, `simulate-edit`, `simulate-clean`, and global flags `-v/--verbose`, `-o/--output=<format>`, `--socket=<path>` in `core/src/cli/args.rs`
-- [ ] T031 {surface:cli} Implement `weaver --version` rendering all P11 fields (crate version, git SHA, dirty bit, build timestamp, build profile, bus protocol version) in both human and json forms in `core/src/cli/version.rs`
-- [ ] T032 [P] Test: `weaver --version --output=json` produces valid JSON containing all five P11 fields and the bus protocol version in `core/src/cli/version.rs` `#[cfg(test)] mod tests`
-- [ ] T033 Implement tracing setup (tracing-subscriber with EnvFilter via RUST_LOG; structured spans to stderr) wired into `core/src/main.rs` startup
-- [ ] T034 {surface:config} Implement configuration loading (XDG paths + env vars + CLI flag override precedence per L2 Additional Constraints) in `core/src/cli/config.rs`
+- [X] T030 {surface:cli} Implement CLI scaffolding (clap derive) with subcommands `run`, `status`, `inspect`, `simulate-edit`, `simulate-clean`, and global flags `-v/--verbose`, `-o/--output=<format>`, `--socket=<path>` in `core/src/cli/args.rs`
+- [X] T031 {surface:cli} Implement `weaver --version` rendering all P11 fields (crate version, git SHA, dirty bit, build timestamp, build profile, bus protocol version) in both human and json forms in `core/src/cli/version.rs`
+- [X] T032 [P] Test: `weaver --version --output=json` produces valid JSON containing all five P11 fields and the bus protocol version in `core/src/cli/version.rs` `#[cfg(test)] mod tests`
+- [X] T033 Implement tracing setup (tracing-subscriber with EnvFilter via RUST_LOG; structured spans to stderr) wired into `core/src/main.rs` startup
+- [X] T034 {surface:config} Implement configuration loading (XDG paths + env vars + CLI flag override precedence per L2 Additional Constraints) in `core/src/cli/config.rs`
 
 ### TUI client foundation
 
-- [ ] T035 Implement TUI bus client (connect to socket, send Hello, await Lifecycle::Ready, send Subscribe(FamilyPrefix("buffer/"))) in `tui/src/client.rs`
-- [ ] T036 Implement TUI render skeleton (crossterm raw-mode, event loop, basic frame rendering with connection status + facts list + commands footer) in `tui/src/render.rs`
-- [ ] T037 [P] {surface:cli} Implement TUI CLI args (clap derive) with `--socket=<path>`, `--no-color`, and `--version` in `tui/src/main.rs`
+- [X] T035 Implement TUI bus client (connect to socket, send Hello, await Lifecycle::Ready, send Subscribe(FamilyPrefix("buffer/"))) in `tui/src/client.rs`
+- [X] T036 Implement TUI render skeleton (crossterm raw-mode, event loop, basic frame rendering with connection status + facts list + commands footer) in `tui/src/render.rs`
+- [X] T037 [P] {surface:cli} Implement TUI CLI args (clap derive) with `--socket=<path>`, `--no-color`, and `--version` in `tui/src/main.rs`
 
 **Checkpoint**: `weaver run` listens on the socket; `weaver-tui` connects and renders an empty facts list with "ready" status; `weaver --version` produces the documented output. No behavior is registered yet, so no facts ever appear. User story implementation can now begin.
 
