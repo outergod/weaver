@@ -50,3 +50,11 @@ Start here before making changes.
   - `docs(specify): clarify retraction-task expectations`
   - `chore(ci): pin Steel toolchain version`
 
+## Review policy
+When reviewing code:
+- prioritize correctness, security, regressions, data races, and migration risk
+- flag only issues introduced by the current diff
+- prefer concrete, actionable findings
+- call out missing tests when risk is non-trivial
+
+See `docs/code-review.md` for the full checklist.
