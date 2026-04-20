@@ -5,7 +5,7 @@ members = ["core", "ui", "tui"]
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
-license = "MIT OR Apache-2.0"
+license = "AGPL-3.0-or-later"
 authors = ["Alexander Dorn <ad@not.one>"]
 repository = "https://github.com/outergod/weaver"
 rust-version = "1.85"
