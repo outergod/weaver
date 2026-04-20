@@ -52,3 +52,16 @@ path = "tests/behavior/error_recovery.rs"
 [[test]]
 name = "property_dirty_tracking_invariant"
 path = "tests/property/dirty_tracking_invariant.rs"
+
+# Phase 4 (US2) inspection tests.
+[[test]]
+name = "inspect_inspection_found"
+path = "tests/inspect/inspection_found.rs"
+
+[[test]]
+name = "inspect_inspection_not_found"
+path = "tests/inspect/inspection_not_found.rs"
+
+[[test]]
+name = "property_inspection_invariant"
+path = "tests/property/inspection_invariant.rs"

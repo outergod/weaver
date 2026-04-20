@@ -33,7 +33,9 @@ use weaver_core::provenance::SourceId;
 use weaver_core::types::entity_ref::EntityRef;
 use weaver_core::types::fact::{Fact, FactKey, FactValue};
 use weaver_core::types::ids::EventId;
-use weaver_core::types::message::{BUS_PROTOCOL_VERSION_STR, BusMessage};
+use weaver_core::types::message::{
+    BUS_PROTOCOL_VERSION_STR, BusMessage, InspectionDetail, InspectionError,
+};
 
 use crate::client::{BusStreamItem, connect};
 use crate::commands::{self, SimulateKind};
@@ -53,10 +55,22 @@ enum ConnStatus {
     Unavailable { reason: String },
 }
 
+/// The latest inspection outcome the user has requested, with its
+/// target key for rendering.
+struct InspectionView {
+    fact: FactKey,
+    result: Result<InspectionDetail, InspectionError>,
+}
+
 struct AppState {
     facts: HashMap<FactKey, FactDisplay>,
     status: ConnStatus,
     stale: bool,
+    /// `Some((request_id, fact_key))` when an `InspectRequest` is in
+    /// flight; cleared on matching `InspectResponse`.
+    pending_inspection: Option<(u64, FactKey)>,
+    /// Last completed inspection, for rendering beneath the facts.
+    last_inspection: Option<InspectionView>,
 }
 
 impl AppState {
@@ -65,6 +79,8 @@ impl AppState {
             facts: HashMap::new(),
             status: ConnStatus::Ready,
             stale: false,
+            pending_inspection: None,
+            last_inspection: None,
         }
     }
 
@@ -85,6 +101,20 @@ impl AppState {
             }
             BusMessage::FactRetract { key, .. } => {
                 self.facts.remove(&key);
+            }
+            BusMessage::InspectResponse { request_id, result } => {
+                if let Some((pending_id, pending_key)) = self.pending_inspection.take() {
+                    if pending_id == request_id {
+                        self.last_inspection = Some(InspectionView {
+                            fact: pending_key,
+                            result,
+                        });
+                    } else {
+                        // Not our response — restore the pending slot
+                        // and keep waiting.
+                        self.pending_inspection = Some((pending_id, pending_key));
+                    }
+                }
             }
             // Lifecycle / Error / other server-originated messages are
             // informational only in slice 001; the render layer does
@@ -139,15 +169,33 @@ pub async fn run(socket: PathBuf) -> miette::Result<()> {
                         if should_quit(&key) {
                             break Ok(());
                         }
-                        if state.is_available()
-                            && let Some(kind) = simulate_kind_for(&key) {
+                        if state.is_available() {
+                            if let Some(kind) = simulate_kind_for(&key) {
                                 if let Err(e) =
                                     commands::publish(&mut client.writer, kind, SYNTHETIC_BUFFER)
                                         .await
                                 {
                                     state.mark_unavailable(format!("write failed: {e}"));
                                 }
+                            } else if is_inspect_key(&key) {
+                                // Inspect the first displayed fact, if any.
+                                if let Some(target_key) = state.facts.keys().next().cloned() {
+                                    match commands::inspect(
+                                        &mut client.writer,
+                                        target_key.clone(),
+                                    )
+                                    .await
+                                    {
+                                        Ok(request_id) => {
+                                            state.pending_inspection = Some((request_id, target_key));
+                                        }
+                                        Err(e) => {
+                                            state.mark_unavailable(format!("write failed: {e}"));
+                                        }
+                                    }
+                                }
                             }
+                        }
                     }
                     None => break Ok(()),
                 }
@@ -202,6 +250,13 @@ fn simulate_kind_for(key: &KeyEvent) -> Option<SimulateKind> {
         KeyCode::Char('c') | KeyCode::Char('C') => Some(SimulateKind::Clean),
         _ => None,
     }
+}
+
+fn is_inspect_key(key: &KeyEvent) -> bool {
+    if key.modifiers.contains(KeyModifiers::CONTROL) {
+        return false;
+    }
+    matches!(key.code, KeyCode::Char('i') | KeyCode::Char('I'))
 }
 
 /// Spawn a blocking thread to poll for terminal events. Crossterm's
@@ -300,6 +355,46 @@ fn draw<W: Write>(w: &mut W, state: &AppState) -> std::io::Result<()> {
         }
     }
     emit(w, &mut row, "│".into())?;
+
+    if let Some(view) = &state.last_inspection {
+        emit(w, &mut row, "│ Inspection:".into())?;
+        emit(
+            w,
+            &mut row,
+            format!("│   fact: {}({})", view.fact.attribute, view.fact.entity),
+        )?;
+        match &view.result {
+            Ok(detail) => {
+                emit(
+                    w,
+                    &mut row,
+                    format!("│   source_event:       {}", detail.source_event),
+                )?;
+                emit(
+                    w,
+                    &mut row,
+                    format!("│   asserting_behavior: {}", detail.asserting_behavior),
+                )?;
+                emit(
+                    w,
+                    &mut row,
+                    format!("│   asserted_at_ns:     {}", detail.asserted_at_ns),
+                )?;
+                emit(
+                    w,
+                    &mut row,
+                    format!("│   trace_sequence:     {}", detail.trace_sequence),
+                )?;
+            }
+            Err(e) => {
+                emit(w, &mut row, format!("│   error: {e:?}"))?;
+            }
+        }
+        emit(w, &mut row, "│".into())?;
+    } else if state.pending_inspection.is_some() {
+        emit(w, &mut row, "│ Inspection: (waiting for response…)".into())?;
+        emit(w, &mut row, "│".into())?;
+    }
 
     match &state.status {
         ConnStatus::Ready => emit(

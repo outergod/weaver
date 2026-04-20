@@ -149,16 +149,16 @@ Per the L2 Constitution and the Vidvik review tasks-template additions, certain 
 
 ### Tests for User Story 2 (write FIRST)
 
-- [ ] T049 [P] [US2] Scenario test: `(fact-space with buffer/dirty asserted via behavior firing, InspectRequest{1:buffer/dirty}) → InspectResponse{Ok(InspectionDetail{ source_event, asserting_behavior: "core/dirty-tracking", asserted_at_ns, trace_sequence })}` in `core/tests/inspect/inspection_found.rs`
-- [ ] T050 [P] [US2] Scenario test: `(empty fact-space, InspectRequest{1:buffer/dirty}) → InspectResponse{Err(InspectionError::FactNotFound)}` in `core/tests/inspect/inspection_not_found.rs`
-- [ ] T051 [P] [US2] Property test: every InspectionDetail returned for a real fact has non-empty asserting_behavior and a trace_sequence ≥ 0 in `core/tests/property/inspection_invariant.rs`
+- [X] T049 [P] [US2] Scenario test: `(fact-space with buffer/dirty asserted via behavior firing, InspectRequest{1:buffer/dirty}) → InspectResponse{Ok(InspectionDetail{ source_event, asserting_behavior: "core/dirty-tracking", asserted_at_ns, trace_sequence })}` in `core/tests/inspect/inspection_found.rs`
+- [X] T050 [P] [US2] Scenario test: `(empty fact-space, InspectRequest{1:buffer/dirty}) → InspectResponse{Err(InspectionError::FactNotFound)}` in `core/tests/inspect/inspection_not_found.rs`
+- [X] T051 [P] [US2] Property test: every InspectionDetail returned for a real fact has non-empty asserting_behavior and a trace_sequence ≥ 0 in `core/tests/property/inspection_invariant.rs`
 
 ### Implementation for User Story 2
 
-- [ ] T052 [US2] Implement bus inspection handler: receives `InspectRequest`, looks up fact via FactStore, walks reverse causal index in TraceStore, constructs `InspectionDetail` or returns `InspectionError::FactNotFound` in `core/src/inspect/handler.rs`
-- [ ] T053 [US2] Wire inspection handler into bus listener (route InspectRequest messages to the handler; send InspectResponse back on the same connection) in `core/src/bus/listener.rs`
-- [ ] T054 [P] [US2] {surface:cli} Implement `weaver inspect <fact-key>` CLI subcommand: parses `<entity-id>:<attribute>`, connects to bus, issues InspectRequest, renders response in human or JSON form in `core/src/cli/inspect.rs`
-- [ ] T055 [P] [US2] Implement TUI `i` keystroke handler: issues InspectRequest for the currently-displayed fact, renders the response below the facts list in `tui/src/commands.rs`
+- [X] T052 [US2] Implement bus inspection handler: receives `InspectRequest`, looks up fact via FactStore, walks reverse causal index in TraceStore, constructs `InspectionDetail` or returns `InspectionError::FactNotFound` in `core/src/inspect/handler.rs`. Returns `InspectionError::NoProvenance` defensively when a fact is asserted without a recorded `BehaviorFired` entry (unreachable in slice 001 — guard for future external producers).
+- [X] T053 [US2] Wire inspection handler into bus listener (route InspectRequest messages to the handler; send InspectResponse back on the same connection) in `core/src/bus/listener.rs`
+- [X] T054 [P] [US2] {surface:cli} Implement `weaver inspect <fact-key>` CLI subcommand: parses `<entity-id>:<attribute>`, connects to bus, issues InspectRequest, renders response in human or JSON form in `core/src/cli/inspect.rs`. Unit tests for the fact-key parser live in the same file.
+- [X] T055 [P] [US2] Implement TUI `i` keystroke handler: issues InspectRequest for the first displayed fact, correlates the response by `request_id`, renders `source_event`/`asserting_behavior`/`asserted_at_ns`/`trace_sequence` below the facts list; shows `(waiting for response…)` between request and reply. Keystroke in `tui/src/commands.rs`; state + render in `tui/src/render.rs`.
 
 **Checkpoint**: User Story 2 works independently. Inspection is a bus-level capability — TUI, CLI, and any future agent service use the same request/response (forward-compatible per L2 P5 amended).
 

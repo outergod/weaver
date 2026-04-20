@@ -16,6 +16,7 @@ use weaver_core::bus::codec::{CodecError, write_message};
 use weaver_core::provenance::{Provenance, SourceId};
 use weaver_core::types::entity_ref::EntityRef;
 use weaver_core::types::event::{Event, EventPayload};
+use weaver_core::types::fact::FactKey;
 use weaver_core::types::ids::EventId;
 use weaver_core::types::message::BusMessage;
 
@@ -74,4 +75,16 @@ fn wall_ns() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| u64::try_from(d.as_nanos()).unwrap_or(u64::MAX))
         .unwrap_or(0)
+}
+
+/// Send an `InspectRequest` for `fact` on `writer`. Returns the
+/// request id so the render layer can correlate with a later
+/// `InspectResponse` received through the reader task.
+pub async fn inspect<W>(writer: &mut W, fact: FactKey) -> Result<u64, CodecError>
+where
+    W: AsyncWrite + Unpin,
+{
+    let request_id = wall_ns();
+    write_message(writer, &BusMessage::InspectRequest { request_id, fact }).await?;
+    Ok(request_id)
 }

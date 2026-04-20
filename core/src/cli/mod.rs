@@ -5,6 +5,7 @@
 
 pub mod args;
 pub mod config;
+pub mod inspect;
 pub mod simulate;
 pub mod tracing_setup;
 pub mod version;
@@ -29,7 +30,7 @@ pub fn run() -> miette::Result<()> {
     match cli.command {
         Some(Command::Run) => run_core(socket),
         Some(Command::Status) => stub_status(output, socket),
-        Some(Command::Inspect { fact_key }) => stub_inspect(output, socket, &fact_key),
+        Some(Command::Inspect { fact_key }) => inspect::run(&fact_key, output, socket),
         Some(Command::SimulateEdit { buffer_id }) => {
             simulate::run(simulate::SimulationKind::Edit, buffer_id, output, socket)
         }
@@ -102,14 +103,5 @@ fn run_core(socket_override: Option<std::path::PathBuf>) -> miette::Result<()> {
 
 fn stub_status(_output: OutputFormat, _socket: Option<std::path::PathBuf>) -> miette::Result<()> {
     tracing::warn!("status subcommand: stub (real impl lands in T059, slice 001 Phase 5)");
-    Ok(())
-}
-
-fn stub_inspect(
-    _output: OutputFormat,
-    _socket: Option<std::path::PathBuf>,
-    _fact_key: &str,
-) -> miette::Result<()> {
-    tracing::warn!("inspect subcommand: stub (real impl lands in T054, slice 001 Phase 4)");
     Ok(())
 }

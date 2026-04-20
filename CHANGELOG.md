@@ -41,3 +41,13 @@ Entries land per phase of `specs/001-hello-fact/tasks.md`. They will be promoted
 - **Dispatcher**: commit is now atomic with respect to behavior error — when a behavior firing returns `error: Some(_)`, its assertions and retractions are rolled back and the `BehaviorFired` trace entry records empty `asserted`/`retracted` lists. Tightens the implicit contract that Phase 2's docstring already claimed; covered by the new `error_recovery` scenario test.
 - **Shared bus-client helper (`core/src/bus/client.rs`)**: consolidates the `Hello`/`Lifecycle(Ready)`/`Subscribe` handshake used by the CLI's one-shot subcommands, the TUI, and the e2e harness. Consolidation paves the way for the inspect client in Phase 4.
 - **Workspace member `weaver-e2e`** (`tests/`): workspace-level end-to-end tests spawning the `weaver` binary. Two tests ship with this phase: `hello_fact` (SC-001, happy + retraction round-trip ≤ 100 ms) and `disconnect` (SC-004, SIGKILL survivability within 5 s).
+
+#### Phase 4 — User Story 2 (provenance inspection)
+
+- **Bus protocol (v0.1.0)**: `InspectRequest` now returns a real `InspectionDetail` instead of an always-`FactNotFound` placeholder. The handler walks the trace store's reverse causal index (already built in Phase 2) and is `O(1)` per lookup.
+- **CLI surface (v0.1.0)**:
+  - `weaver inspect <entity-id>:<attribute>` is now live. Parses the colon-delimited fact key, issues `InspectRequest`, renders human or JSON output matching `contracts/cli-surfaces.md`. Exit code 2 on `FactNotFound`.
+  - Input validation — malformed keys (missing colon, empty halves, non-numeric entity id) produce structured errors before touching the bus.
+- **TUI**: `i` keystroke triggers inspection of the first displayed fact. Waiting state rendered explicitly (`(waiting for response…)`) between request send and response; correlation via `request_id` so out-of-order InspectResponses are handled safely.
+- **`core/src/inspect/handler.rs`** (new): pure routine `inspect_fact(snapshot, trace, key) -> Result<InspectionDetail, InspectionError>`. Uses `FactSpaceSnapshot` for the current-assertion check (fast `Arc` clone) and `TraceStore::fact_inspection` for the asserting behavior/event lookup.
+- **New test coverage**: `inspect_inspection_found`, `inspect_inspection_not_found`, `property_inspection_invariant`, plus fact-key-parser unit tests in `cli::inspect::tests`.

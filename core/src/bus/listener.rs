@@ -24,8 +24,9 @@ use tokio::net::{UnixListener, UnixStream};
 use crate::behavior::dispatcher::Dispatcher;
 use crate::bus::codec::{CodecError, read_message, write_message};
 use crate::fact_space::{FactEvent, FactStore, SubscriptionHandle};
+use crate::inspect::inspect_fact;
 use crate::types::message::{
-    BUS_PROTOCOL_VERSION, BusMessage, ErrorMsg, HelloMsg, InspectionError, LifecycleSignal,
+    BUS_PROTOCOL_VERSION, BusMessage, ErrorMsg, HelloMsg, LifecycleSignal,
 };
 
 /// Error type surfaced by the listener.
@@ -199,16 +200,18 @@ async fn handle_client_message(
             write_message(writer, &BusMessage::SubscribeAck { sequence: 0 }).await?;
             Ok(Some(handle))
         }
-        BusMessage::InspectRequest {
-            request_id,
-            fact: _,
-        } => {
-            // Phase 3 placeholder — Phase 4 (T052) replaces this with
-            // the real inspection handler.
-            let resp = BusMessage::InspectResponse {
-                request_id,
-                result: Err(InspectionError::FactNotFound),
+        BusMessage::InspectRequest { request_id, fact } => {
+            let snapshot = {
+                let fs = dispatcher.fact_store();
+                let fs = fs.lock().await;
+                fs.snapshot()
             };
+            let result = {
+                let trace = dispatcher.trace();
+                let trace = trace.lock().await;
+                inspect_fact(&snapshot, &trace, &fact)
+            };
+            let resp = BusMessage::InspectResponse { request_id, result };
             write_message(writer, &resp).await?;
             Ok(None)
         }
