@@ -144,6 +144,41 @@ Forward-looking implication:
     machine consumers. Hello-fact (specs/001-hello-fact) is being
     aligned now so its bus-level inspection capability (FR-008) is
     forward-compatible without rework.
+
+----------------------------------------------------------------------
+AMENDMENT 4 — 2026-04-20 — version 0.4.0 → 0.5.0
+
+Origin: drift caught during /speckit.implement Phase 1. The scaffold's
+Cargo.toml declared `license = "MIT OR Apache-2.0"` (Rust-ecosystem
+default) while LICENSE clearly specifies AGPL-3.0-or-later. No
+constitutional commitment existed to prevent this drift.
+
+Added:
+  - Additional Constraints: License clause. Weaver is AGPL-3.0-or-later;
+    all workspace members MUST declare that license; inbound
+    dependencies MUST carry AGPL-3.0-or-later-compatible licenses
+    (MIT, Apache-2.0, BSD-*, MPL-2.0, ISC acceptable; GPL-2.0-only,
+    proprietary-only, and other non-reciprocal-incompatible licenses
+    are not). Licensing is treated as a compatibility surface per P7.
+
+L1 / architecture documents updated in lockstep:
+  - None this amendment. Licensing is orthogonal to architecture; it
+    lives at the engineering-discipline layer (L2).
+
+Bump rationale: MINOR — materially expanded guidance. Adds a new
+binding rule about inbound-dependency license compatibility that
+agents and reviewers MUST check on every new dependency. Not
+backward-incompatible since no prior license commitment existed in L2
+to override.
+
+Forward-looking implication:
+  - Phase 1 scaffolding (commit 9924d0d) used the wrong license
+    declaration. The correction lands in a follow-up commit that updates
+    Cargo.toml (workspace root) and amends CHANGELOG.md Phase 1 notes.
+  - Future dependency additions and future member crates MUST honor
+    this clause. Agent contributions in particular (per P21) MUST
+    verify license alignment as part of scaffolding any new crate or
+    proposing any new dependency.
 -->
 
 # Weaver Constitution (Engineering — L2)
@@ -310,6 +345,7 @@ AI contributions bind to this constitution: fact-style commits, doc updates as p
 - **Serialization frontiers are independent**: fact tuples are the canonical semantic shape. Serializers (CBOR on the bus, JSON / TOON in the outer shell, native Steel values in-core) are per-frontier views. Steel ↔ wire conversion is defined once in the core so SDK consumers receive idiomatic language types.
 - **Constitution sync**: `.specify/memory/constitution.md` (L2) and `docs/00-constitution.md` (L1) MUST stay in sync. CI enforces this per Principle 17.
 - **Commit messages**: follow the [Conventional Commits 1.0](https://www.conventionalcommits.org/) specification — `<type>(<scope>): <description>`. Scope vocabulary is *hybrid*: use Principle 7 public-surface names (`bus`, `steel`, `fact`, `action`, `cli`, `config`) when the change touches a public surface; otherwise use workspace/area names (`core`, `ui`, `tui`, `docs`, `specify`). Conventional Commit types feed automated changelog generation and per-surface SemVer derivation under Principle 8. Breaking public-surface changes MUST include a `BREAKING CHANGE:` footer.
+- **License**: Weaver is licensed under **AGPL-3.0-or-later** (see `LICENSE`). All workspace member `Cargo.toml` manifests MUST declare `license = "AGPL-3.0-or-later"` (or inherit it via `license.workspace = true`). Inbound dependencies MUST carry licenses compatible with AGPL-3.0-or-later — MIT, Apache-2.0, BSD-*, MPL-2.0, ISC are acceptable; GPL-2.0-only, proprietary-only, and other non-reciprocal-incompatible licenses are not. Dependency additions MUST be reviewed for license compatibility as part of per-PR review. Licensing is treated as a compatibility surface per Principle 7.
 
 ## Development Workflow
 
@@ -327,4 +363,4 @@ AI contributions bind to this constitution: fact-style commits, doc updates as p
 - SemVer applies to L2 itself: MAJOR for backward-incompatible principle changes, MINOR for added principles, PATCH for clarifications.
 - All PRs MUST verify compliance with relevant L2 principles. Violations MUST be justified in the plan's Complexity Tracking section.
 
-**Version**: 0.4.0 | **Ratified**: 2026-04-19 | **Last Amended**: 2026-04-19
+**Version**: 0.5.0 | **Ratified**: 2026-04-19 | **Last Amended**: 2026-04-20
