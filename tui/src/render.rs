@@ -37,7 +37,7 @@ use weaver_core::types::message::{
     BUS_PROTOCOL_VERSION_STR, BusMessage, InspectionDetail, InspectionError,
 };
 
-use crate::client::{BusStreamItem, connect};
+use crate::client::{BusStreamItem, TuiClient, connect};
 use crate::commands::{self, SimulateKind};
 
 /// The entity id used for every simulated event in slice 001. A
@@ -130,19 +130,22 @@ impl AppState {
 }
 
 /// Entry point invoked from `lib::run`.
+///
+/// Order-independent startup per `cli-surfaces.md` — if the core isn't
+/// running yet, the TUI still enters raw mode and renders the
+/// `UNAVAILABLE` state. The user can hit `[r]econnect` once they
+/// start the core, or `[q]uit` to exit.
 pub async fn run(socket: PathBuf) -> miette::Result<()> {
-    let mut client = match connect(&socket).await {
-        Ok(c) => c,
-        Err(e) => {
-            // Render-free short-circuit: we never entered raw mode, so
-            // a plain-text error is appropriate.
-            eprintln!("weaver-tui: {e}");
-            eprintln!("[start `weaver run` in another terminal, then retry]");
-            return Err(e);
-        }
-    };
-
+    // Initial connection attempt. Failure is a documented state, not
+    // a fatal error — fall through to raw-mode with `UNAVAILABLE`.
+    let mut client: Option<TuiClient> = connect(&socket).await.ok();
     let mut state = AppState::new();
+    if client.is_none() {
+        state.mark_unavailable(format!(
+            "core not reachable at {} (press `r` to retry)",
+            socket.display()
+        ));
+    }
 
     // Terminal setup.
     terminal::enable_raw_mode().into_diagnostic()?;
@@ -162,6 +165,10 @@ pub async fn run(socket: PathBuf) -> miette::Result<()> {
     draw(&mut out, &state).map_err(|e| miette!("draw: {e}"))?;
 
     let result: miette::Result<()> = loop {
+        // `tokio::select!` uses the `if` guard to avoid polling
+        // `client.inbound.recv()` when we're not connected. When
+        // unavailable, only keystrokes wake the loop (which is fine —
+        // the user must press `r` or `q`).
         tokio::select! {
             maybe_key = key_rx.recv() => {
                 match maybe_key {
@@ -170,29 +177,28 @@ pub async fn run(socket: PathBuf) -> miette::Result<()> {
                             break Ok(());
                         }
                         if state.is_available() {
-                            if let Some(kind) = simulate_kind_for(&key) {
-                                if let Err(e) =
-                                    commands::publish(&mut client.writer, kind, SYNTHETIC_BUFFER)
-                                        .await
-                                {
-                                    state.mark_unavailable(format!("write failed: {e}"));
-                                }
-                            } else if is_inspect_key(&key) {
-                                // Inspect the first displayed fact, if any.
-                                if let Some(target_key) = state.facts.keys().next().cloned() {
-                                    match commands::inspect(
-                                        &mut client.writer,
-                                        target_key.clone(),
-                                    )
-                                    .await
-                                    {
-                                        Ok(request_id) => {
-                                            state.pending_inspection = Some((request_id, target_key));
-                                        }
-                                        Err(e) => {
-                                            state.mark_unavailable(format!("write failed: {e}"));
-                                        }
+                            if let Some(c) = client.as_mut() {
+                                handle_key_when_ready(&key, &mut state, c).await;
+                            }
+                        } else if is_reconnect_key(&key) {
+                            match connect(&socket).await {
+                                Ok(new_client) => {
+                                    // Abort the old reader if any (should be
+                                    // gone already, but be defensive).
+                                    if let Some(old) = client.take() {
+                                        old.reader_task.abort();
                                     }
+                                    client = Some(new_client);
+                                    // Reset view state — the fresh
+                                    // subscription replays the current
+                                    // snapshot, so we shouldn't show stale
+                                    // facts while waiting for it.
+                                    state = AppState::new();
+                                }
+                                Err(e) => {
+                                    state.mark_unavailable(format!(
+                                        "reconnect failed: {e} (press `r` to retry)"
+                                    ));
                                 }
                             }
                         }
@@ -200,10 +206,20 @@ pub async fn run(socket: PathBuf) -> miette::Result<()> {
                     None => break Ok(()),
                 }
             }
-            maybe_msg = client.inbound.recv() => {
+            maybe_msg = async {
+                client.as_mut().unwrap().inbound.recv().await
+            }, if client.is_some() => {
                 match maybe_msg {
                     Some(item) => apply_inbound(&mut state, item),
-                    None => state.mark_unavailable("bus reader ended".into()),
+                    None => {
+                        // Reader task ended — mark the connection dead.
+                        if let Some(old) = client.take() {
+                            old.reader_task.abort();
+                        }
+                        state.mark_unavailable(
+                            "bus reader ended (press `r` to reconnect)".into(),
+                        );
+                    }
                 }
             }
         }
@@ -214,7 +230,9 @@ pub async fn run(socket: PathBuf) -> miette::Result<()> {
 
     // Cleanup.
     key_task.abort();
-    client.reader_task.abort();
+    if let Some(c) = client.as_ref() {
+        c.reader_task.abort();
+    }
     let _ = execute!(
         out,
         cursor::Show,
@@ -257,6 +275,35 @@ fn is_inspect_key(key: &KeyEvent) -> bool {
         return false;
     }
     matches!(key.code, KeyCode::Char('i') | KeyCode::Char('I'))
+}
+
+fn is_reconnect_key(key: &KeyEvent) -> bool {
+    if key.modifiers.contains(KeyModifiers::CONTROL) {
+        return false;
+    }
+    matches!(key.code, KeyCode::Char('r') | KeyCode::Char('R'))
+}
+
+/// Handle a keystroke while connected. Factored out so the main loop
+/// stays readable.
+async fn handle_key_when_ready(key: &KeyEvent, state: &mut AppState, client: &mut TuiClient) {
+    if let Some(kind) = simulate_kind_for(key) {
+        if let Err(e) = commands::publish(&mut client.writer, kind, SYNTHETIC_BUFFER).await {
+            state.mark_unavailable(format!("write failed: {e} (press `r` to reconnect)"));
+        }
+    } else if is_inspect_key(key) {
+        // Inspect the first displayed fact, if any.
+        if let Some(target_key) = state.facts.keys().next().cloned() {
+            match commands::inspect(&mut client.writer, target_key.clone()).await {
+                Ok(request_id) => {
+                    state.pending_inspection = Some((request_id, target_key));
+                }
+                Err(e) => {
+                    state.mark_unavailable(format!("write failed: {e} (press `r` to reconnect)"));
+                }
+            }
+        }
+    }
 }
 
 /// Spawn a blocking thread to poll for terminal events. Crossterm's
@@ -402,7 +449,9 @@ fn draw<W: Write>(w: &mut W, state: &AppState) -> std::io::Result<()> {
             &mut row,
             "│ Commands: [e]dit  [c]lean  [i]nspect  [q]uit".into(),
         )?,
-        ConnStatus::Unavailable { .. } => emit(w, &mut row, "│ Commands: [q]uit".into())?,
+        ConnStatus::Unavailable { .. } => {
+            emit(w, &mut row, "│ Commands: [r]econnect  [q]uit".into())?
+        }
     }
     emit(
         w,
