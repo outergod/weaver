@@ -81,6 +81,21 @@ pub enum SubscribePattern {
     FamilyPrefix(String),
 }
 
+impl SubscribePattern {
+    /// Return `true` when a fact-key belongs to this subscription.
+    ///
+    /// `AllFacts` matches everything; `FamilyPrefix("buffer/")`
+    /// matches any attribute whose string representation starts with
+    /// `"buffer/"`. Shared between the listener (for snapshot-on-
+    /// subscribe) and the fact store's internal matcher.
+    pub fn matches(&self, key: &FactKey) -> bool {
+        match self {
+            SubscribePattern::AllFacts => true,
+            SubscribePattern::FamilyPrefix(prefix) => key.attribute.starts_with(prefix.as_str()),
+        }
+    }
+}
+
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum LifecycleSignal {

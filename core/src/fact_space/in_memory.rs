@@ -28,13 +28,6 @@ impl InMemoryFactStore {
         }
     }
 
-    fn matches(pattern: &SubscribePattern, key: &FactKey) -> bool {
-        match pattern {
-            SubscribePattern::AllFacts => true,
-            SubscribePattern::FamilyPrefix(prefix) => key.attribute.starts_with(prefix.as_str()),
-        }
-    }
-
     fn broadcast(&mut self, event: FactEvent) {
         let key = match &event {
             FactEvent::Asserted(fact) => &fact.key,
@@ -42,7 +35,7 @@ impl InMemoryFactStore {
         };
         // Prune subscribers whose channels have been dropped (receiver gone).
         self.subscribers.retain(|sub| {
-            if Self::matches(&sub.pattern, key) {
+            if sub.pattern.matches(key) {
                 sub.tx.send(event.clone()).is_ok()
             } else {
                 // Keep the subscriber — no send, no close check needed.

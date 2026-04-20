@@ -216,16 +216,35 @@ async fn handle_client_message(
             Ok(None)
         }
         BusMessage::Subscribe(pattern) => {
+            // Take the snapshot and register the subscription under the
+            // same fact-store lock so the two are atomic with respect
+            // to the broadcast path. Any FactAssert published *after*
+            // our lock release reaches the handle via the mpsc; anything
+            // before is covered by the snapshot we're about to replay.
             let fs = dispatcher.fact_store();
-            let handle = {
+            let (snapshot, handle) = {
                 let mut fs = fs.lock().await;
-                fs.subscribe(pattern)
+                let snap = fs.snapshot();
+                let handle = fs.subscribe(pattern.clone());
+                (snap, handle)
             };
             // Starting sequence is always `0` in slice 001 — the
             // delivery layer doesn't yet stamp FactAssert/FactRetract
             // with per-publisher numbers; gap detection lands with a
             // later slice (contracts/bus-messages.md §Versioning).
             write_message(writer, &BusMessage::SubscribeAck { sequence: 0 }).await?;
+            // Snapshot on subscribe — emit FactAssert for every
+            // currently-asserted fact that matches the pattern, per
+            // `contracts/bus-messages.md` §FactAssert ("on reconnect,
+            // subscribers receive the current snapshot of subscribed
+            // fact families followed by missed deltas"). Without this,
+            // a client that subscribes AFTER a fact was asserted would
+            // never learn the current state.
+            for fact in snapshot.values() {
+                if pattern.matches(&fact.key) {
+                    write_message(writer, &BusMessage::FactAssert(fact.clone())).await?;
+                }
+            }
             Ok(Some(handle))
         }
         BusMessage::InspectRequest { request_id, fact } => {

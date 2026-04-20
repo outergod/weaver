@@ -25,3 +25,7 @@ path = "e2e/hello_fact.rs"
 [[test]]
 name = "disconnect"
 path = "e2e/disconnect.rs"
+
+[[test]]
+name = "subscribe_snapshot"
+path = "e2e/subscribe_snapshot.rs"
