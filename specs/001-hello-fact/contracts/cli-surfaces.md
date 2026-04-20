@@ -19,9 +19,11 @@ CLI flags and structured output shapes for `weaver` (core binary) and `weaver-tu
 
 ```
 -v, --verbose            increase log verbosity (repeatable: -v, -vv, -vvv)
-    --output=<format>    json | human (default: human); applies to commands that produce structured output
+-o, --output=<format>    json | human (default: human); applies to commands that produce structured output
     --socket=<path>      override the default bus socket path (default: $XDG_RUNTIME_DIR/weaver.sock)
 ```
+
+**Short alias `-o`**: kubectl-style shorthand for `--output`. Both forms accept the same set of format values. `-o json` and `--output=json` are equivalent. No format-specific shorthand flags (e.g., no bare `--json`) — adding one would invite the same recurring decision for every future format (`--toon`, `--cbor`, etc.) and erode L2 P4 (simplicity in implementation). The single short alias `-o` covers ergonomics without that compounding cost.
 
 ### Output shapes (`--output=json`)
 
