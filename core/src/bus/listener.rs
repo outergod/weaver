@@ -43,6 +43,12 @@ pub enum ListenerError {
 
     #[error("protocol version mismatch: client sent {client}, core supports {core}")]
     VersionMismatch { client: u8, core: u8 },
+
+    #[error(
+        "refusing to unlink non-socket path {path:?} (file type: {kind}); \
+        refusing to touch it. Use `--socket <new-path>` or remove the file manually."
+    )]
+    RefuseToUnlinkNonSocket { path: PathBuf, kind: &'static str },
 }
 
 /// Start the bus listener on the given socket path. Removes a stale
@@ -50,9 +56,21 @@ pub enum ListenerError {
 /// loop until the process is terminated; each connection runs in its
 /// own task.
 pub async fn run(socket_path: PathBuf, dispatcher: Arc<Dispatcher>) -> miette::Result<()> {
-    // Remove a stale socket file from a previous run, if present.
-    if socket_path.exists() {
-        std::fs::remove_file(&socket_path).into_diagnostic()?;
+    // Remove a stale socket file from a previous run, if present — but
+    // ONLY if the path actually holds a Unix-domain socket. Blindly
+    // unlinking whatever the caller pointed `--socket` at would happily
+    // delete a regular file (e.g., if a user typo'd `weaver run
+    // --socket /etc/passwd`). Defense in depth against caller error.
+    if let Some(kind) = classify_path_to_unlink(&socket_path).into_diagnostic()? {
+        if kind == "socket" {
+            std::fs::remove_file(&socket_path).into_diagnostic()?;
+        } else {
+            return Err(ListenerError::RefuseToUnlinkNonSocket {
+                path: socket_path.clone(),
+                kind,
+            })
+            .into_diagnostic();
+        }
     }
 
     let listener = UnixListener::bind(&socket_path).into_diagnostic()?;
@@ -267,7 +285,100 @@ pub fn default_socket_path() -> PathBuf {
     crate::cli::config::Config::default_socket_path()
 }
 
+/// Inspect `path` to decide whether pre-bind cleanup should touch it.
+///
+/// * `Ok(None)` — path does not exist; nothing to unlink.
+/// * `Ok(Some("socket"))` — path is a Unix-domain socket; safe to unlink.
+/// * `Ok(Some(other))` — any other file type (regular file, directory,
+///   symlink, fifo, block/char device); the caller must refuse rather
+///   than destroy user data.
+/// * `Err(...)` — stat failed with an error other than `NotFound`.
+///
+/// Uses `symlink_metadata` so a symlink pointing at a socket is
+/// reported as `"symlink"` rather than `"socket"` — following the
+/// link and then unlinking would remove the symlink itself, but the
+/// principle of least surprise is to refuse when the caller's path
+/// doesn't directly name a socket.
+fn classify_path_to_unlink(path: &Path) -> std::io::Result<Option<&'static str>> {
+    use std::os::unix::fs::FileTypeExt;
+
+    let meta = match std::fs::symlink_metadata(path) {
+        Ok(m) => m,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e),
+    };
+    let ft = meta.file_type();
+    let kind = if ft.is_socket() {
+        "socket"
+    } else if ft.is_symlink() {
+        "symlink"
+    } else if ft.is_dir() {
+        "directory"
+    } else if ft.is_file() {
+        "regular file"
+    } else if ft.is_fifo() {
+        "fifo"
+    } else if ft.is_block_device() {
+        "block-device"
+    } else if ft.is_char_device() {
+        "char-device"
+    } else {
+        "unknown"
+    };
+    Ok(Some(kind))
+}
+
 /// Convenience helper used by tests.
 pub fn is_socket(path: &Path) -> bool {
     path.exists()
+}
+
+#[cfg(test)]
+mod classify_tests {
+    use super::classify_path_to_unlink;
+    use std::fs::File;
+    use std::io::Write;
+    use std::os::unix::net::UnixListener as StdUnixListener;
+
+    fn unique_tmp(tag: &str) -> std::path::PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        std::env::temp_dir().join(format!(
+            "weaver-classify-{tag}-{pid}-{nanos}",
+            pid = std::process::id(),
+        ))
+    }
+
+    #[test]
+    fn missing_path_returns_none() {
+        let p = unique_tmp("missing");
+        assert_eq!(classify_path_to_unlink(&p).unwrap(), None);
+    }
+
+    #[test]
+    fn regular_file_returns_file_kind() {
+        let p = unique_tmp("regular");
+        let mut f = File::create(&p).unwrap();
+        f.write_all(b"sensitive").unwrap();
+        assert_eq!(classify_path_to_unlink(&p).unwrap(), Some("regular file"));
+        std::fs::remove_file(&p).unwrap();
+    }
+
+    #[test]
+    fn directory_returns_directory_kind() {
+        let p = unique_tmp("directory");
+        std::fs::create_dir(&p).unwrap();
+        assert_eq!(classify_path_to_unlink(&p).unwrap(), Some("directory"));
+        std::fs::remove_dir(&p).unwrap();
+    }
+
+    #[test]
+    fn unix_socket_returns_socket_kind() {
+        let p = unique_tmp("socket");
+        let _listener = StdUnixListener::bind(&p).unwrap();
+        assert_eq!(classify_path_to_unlink(&p).unwrap(), Some("socket"));
+        std::fs::remove_file(&p).unwrap();
+    }
 }
