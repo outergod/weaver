@@ -82,11 +82,26 @@ In a third terminal (with the core still running):
 cargo run --bin weaver -- status --output=json | jq .
 ```
 
-Then trigger an edit from the TUI (or via `cargo run --bin weaver -- simulate-edit 1`) and re-run the status command. Compare the JSON output before and after — the `facts` array should grow by one entry.
+Then trigger edits on **distinct buffer ids** (each one creates a new
+`FactKey { entity, attribute }` tuple):
+
+```bash
+cargo run --bin weaver -- simulate-edit 1
+cargo run --bin weaver -- simulate-edit 2
+cargo run --bin weaver -- status --output=json | jq '.facts | length'
+# → 2
+```
+
+> **Fact-space semantics note**: facts are keyed by `(entity,
+> attribute)`. Re-running `simulate-edit 1` does **not** grow `facts` —
+> it refreshes the provenance on the single `buffer/dirty` fact keyed to
+> `EntityRef(1)` (see `data-model.md` — idempotent re-assertion). The
+> trace store records each assertion; the fact store holds the keyed
+> set. To observe array growth, vary the buffer id.
 
 Pipe a single status query to a Rust deserializer test (or `jq` field extraction) and confirm the field names match those in `contracts/cli-surfaces.md`.
 
-**Pass criterion**: the output is valid JSON; the field names mirror the bus vocabulary; deserialization round-trip preserves identity.
+**Pass criterion**: the output is valid JSON; the field names mirror the bus vocabulary; deserialization round-trip preserves identity; `facts.length` equals the number of distinct buffer ids that have been edited but not cleaned.
 
 ### SC-004 — graceful degradation when core stops
 
