@@ -23,11 +23,15 @@ pub struct Provenance {
 ///
 /// `External` identifies out-of-process producers (future services,
 /// agents). Future slices may split `External` into richer variants.
-/// Serde representation: external tagging with `kebab-case` variant names
-/// (per L2 Amendment 5). `SourceId::Core` serializes as `"core"`,
-/// `SourceId::Behavior(id)` as `{"behavior": "id"}`, etc.
+///
+/// Wire shape (adjacent tagging with `"type"` discriminator and `"id"`
+/// content field, kebab-case variant names per L2 Amendment 5):
+/// `Core` → `{"type":"core"}`; `Behavior(id)` →
+/// `{"type":"behavior","id":"core/dirty-tracking"}`;
+/// `Tui` → `{"type":"tui"}`; `External(tag)` →
+/// `{"type":"external","id":"agent-1"}`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
+#[serde(tag = "type", content = "id", rename_all = "kebab-case")]
 pub enum SourceId {
     Core,
     Behavior(crate::types::ids::BehaviorId),

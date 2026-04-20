@@ -64,3 +64,34 @@ Entries land per phase of `specs/001-hello-fact/tasks.md`. They will be promoted
 - **Listener**: handles `StatusRequest` by snapshotting the fact-store, reading dispatcher uptime, and replying with `StatusResponse`.
 - **`core/src/cli/output.rs`** (new): `StatusResponse` struct with serde round-trip, `render_status` dispatcher, human and JSON formatters. Unit tests verify (a) round-trip preservation, (b) ready shape omits `error`, (c) unavailable shape omits `uptime_ns` and `facts`.
 - **New test coverage**: `cli_status_round_trip`, `cli_status_unavailable` (exit-code 2), `cli_status_human`, plus `cli::output::tests` (4) and `cli::errors::tests` (3).
+
+#### Phase 5.5 — Wire-tagging alignment (pre-1.0 cleanup)
+
+The first slice is the right time to unify serialization strategy across
+public wire surfaces. Adopted **adjacent tagging** (`"type"` + variant-specific
+content field) uniformly for every sum type with non-unit variants:
+
+- **`SourceId`** — `#[serde(tag = "type", content = "id")]`. Wire form now
+  matches `contracts/cli-surfaces.md`'s example literally:
+  `{"type":"behavior","id":"core/dirty-tracking"}` (was `{"behavior":"..."}`).
+- **`BusMessage`** — `#[serde(tag = "type", content = "payload")]`. Every
+  message variant now shares the shape `{"type":"<kind>","payload":<data>}`
+  (unit variants omit `payload`). Uniform `.type`-based dispatch for
+  consumers (was a rotating outer key per variant).
+- **`SubscribePattern`** — `#[serde(tag = "type", content = "pattern")]`.
+  `{"type":"family-prefix","pattern":"buffer/"}` (was `{"family-prefix":"..."}`).
+
+`FactValue` already used adjacent tagging (`tag="type", content="value"`) — all
+four data-bearing enums now share the pattern. Unit-only enums
+(`LifecycleSignal`, `EventPayload`, `InspectionError`) remain bare kebab-case
+strings, which is naturally consistent with adjacent-tag content semantics.
+
+**Why now and not later**: the bus protocol had no deployed external
+consumers. The change is wire-breaking for any already-serialized CBOR
+payload (none existed outside this repo). Every round-trip test passed
+without modification — serde handles both encode and decode through the
+same Rust types, so the proof that clients still agree with the core
+runs as part of `cargo test`.
+
+`contracts/bus-messages.md` now documents the tagging convention as a
+first-class principle.

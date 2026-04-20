@@ -21,13 +21,16 @@ pub const BUS_PROTOCOL_VERSION_STR: &str = "0.1.0";
 
 /// The top-level enum of bus messages.
 ///
-/// Serde representation is external tagging with `kebab-case` variant
-/// names — a message serializes as `{"hello": {...}}`,
-/// `{"fact-assert": {...}}`, etc. Kebab-case wire vocabulary per L2
-/// Additional Constraints (Amendment 5); external tagging handles
-/// newtype variants wrapping non-struct types cleanly.
+/// Wire shape (adjacent tagging with `"type"` discriminator and
+/// `"payload"` content field, kebab-case variant names per L2
+/// Amendment 5): `Hello(msg)` →
+/// `{"type":"hello","payload":{...}}`; `StatusRequest` →
+/// `{"type":"status-request"}` (unit variants omit `payload`);
+/// `FactRetract { key, provenance }` →
+/// `{"type":"fact-retract","payload":{"key":...,"provenance":...}}`.
+/// Consumers always dispatch on `.type` regardless of variant shape.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
+#[serde(tag = "type", content = "payload", rename_all = "kebab-case")]
 pub enum BusMessage {
     Hello(HelloMsg),
     Event(Event),
@@ -68,8 +71,11 @@ pub struct HelloMsg {
     pub client_kind: String,
 }
 
+/// Wire shape: adjacent tagging (`"type"` + `"pattern"`), kebab-case
+/// variants. `AllFacts` → `{"type":"all-facts"}`; `FamilyPrefix(s)` →
+/// `{"type":"family-prefix","pattern":"buffer/"}`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
+#[serde(tag = "type", content = "pattern", rename_all = "kebab-case")]
 pub enum SubscribePattern {
     AllFacts,
     FamilyPrefix(String),

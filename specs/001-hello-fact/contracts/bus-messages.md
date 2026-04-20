@@ -11,6 +11,29 @@ Per L2 Additional Constraints (Amendment 5):
 - **Fact attribute strings** are kebab-case with `/`-delimited namespaces (e.g., `buffer/dirty`).
 - **Struct field names** inside messages follow the implementing language's idiom: `snake_case` in Rust, `camelCase` in JavaScript clients. The CBOR/JSON on the wire uses the Rust-snake_case form (`protocol_version`, `causal_parent`, `request_id`).
 
+## Wire tagging convention
+
+All sum types on the wire use **adjacent tagging** — a `"type"` discriminator
+plus a variant-specific content field. Consumers dispatch on `.type`
+regardless of the variant's shape.
+
+| Enum              | Content field | Example (JSON)                                                   |
+|-------------------|---------------|------------------------------------------------------------------|
+| `BusMessage`      | `payload`     | `{"type":"fact-assert","payload":{...fact...}}`                  |
+| `SourceId`        | `id`          | `{"type":"behavior","id":"core/dirty-tracking"}`                 |
+| `SubscribePattern`| `pattern`     | `{"type":"family-prefix","pattern":"buffer/"}`                   |
+| `FactValue`       | `value`       | `{"type":"bool","value":true}`                                   |
+
+**Unit variants omit their content field.** `BusMessage::StatusRequest`
+serializes as `{"type":"status-request"}`; `SourceId::Core` as
+`{"type":"core"}`.
+
+**Unit-only enums serialize as bare strings** (no object wrapper):
+`LifecycleSignal::Ready` → `"ready"`; `EventPayload::BufferEdited` →
+`"buffer-edited"`; `InspectionError::FactNotFound` → `"fact-not-found"`.
+These appear inside the content of their enclosing adjacent-tagged
+message.
+
 ## Wire framing
 
 ```
