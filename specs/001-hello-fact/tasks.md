@@ -42,7 +42,7 @@ Per the L2 Constitution and the Vidvik review tasks-template additions, certain 
 
 - [ ] T001 Update workspace `Cargo.toml` with `[workspace.package]` (edition = "2024", license, authors) and `[workspace.dependencies]` for shared deps (tokio, serde, serde_json, ciborium, clap, miette, thiserror, tracing, tracing-subscriber, proptest, vergen, crossterm)
 - [ ] T002 [P] Create `rust-toolchain.toml` pinning the stable channel (per L2 P19)
-- [ ] T003 [P] Update `.gitignore` to add `target/`, `**/*.rs.bk`, `*.sock` (Rust + bus socket file)
+- [ ] T003 [P] Update `.gitignore` to add `target/`, `**/*.rs.bk`, `*.sock` (Rust + bus socket file). Do **not** add `Cargo.lock` to `.gitignore` — workspace Cargo.lock MUST be tracked per L2 P19 (reproducible builds). Cargo's defaults are correct; this clause is for defensive clarity.
 - [ ] T004 [P] Create `CHANGELOG.md` at workspace root with initial entries: `bus protocol v0.1.0`, `buffer/dirty fact-family schema v0.1.0`, `CLI surface v0.1.0`, `configuration schema v0.1.0` (per L2 P7 / P8)
 - [ ] T005 Create `core/Cargo.toml` with both `[lib]` and `[[bin]]` targets, declaring workspace dependencies it needs and a `[build-dependencies]` entry for `vergen`
 - [ ] T006 Create `core/build.rs` invoking `vergen` to emit `VERGEN_GIT_SHA`, `VERGEN_GIT_DIRTY`, `VERGEN_BUILD_TIMESTAMP`, `VERGEN_CARGO_DEBUG` (per L2 P11)
@@ -79,7 +79,7 @@ Per the L2 Constitution and the Vidvik review tasks-template additions, certain 
 
 ### Storage and codec layers (depend on types above)
 
-- [ ] T021 Define `FactStore` trait (`assert / retract / query / subscribe / snapshot`) in `core/src/fact_space/mod.rs`; reference `research.md` §13 in module docs noting the ECS-library decision is deferred
+- [ ] T021 Define `FactStore` trait (`assert / retract / query / subscribe / snapshot`) AND `FactSpaceSnapshot` type (immutable view of all currently-asserted facts; cheaply-cloneable, e.g., `Arc<HashMap<FactKey, Fact>>`) in `core/src/fact_space/mod.rs`; reference `research.md` §13 in module docs noting the ECS-library decision is deferred
 - [ ] T022 Implement `HashMap`-backed `FactStore` (`InMemoryFactStore`) with subscription channels in `core/src/fact_space/in_memory.rs`; unit tests for assert→query, assert→retract→query, subscription receives event
 - [ ] T023 [P] {retraction} Property test: `assert(f) → retract(f.key) → query(f.key) == None`; `assert(f) → assert(f') → query(key) == Some(f')` (latest wins) in `core/src/fact_space/in_memory.rs` `#[cfg(test)] mod tests`
 - [ ] T024 Implement TraceStore (`append`, reverse causal index by EventId and FactKey, monotonic sequence) in `core/src/trace/store.rs`; unit tests for append + reverse-lookup
@@ -122,6 +122,7 @@ Per the L2 Constitution and the Vidvik review tasks-template additions, certain 
 - [ ] T039 [P] [US1] {retraction} Scenario test: `(fact-space with buffer/dirty asserted, [Event::BufferCleaned(EntityRef(1))]) → retracts buffer/dirty on EntityRef(1)` in `core/tests/behavior/dirty_tracking_retract.rs`
 - [ ] T040 [P] [US1] Scenario test: `(empty fact-space, [BufferEdited, BufferCleaned, BufferEdited]) → final state has buffer/dirty asserted (assert/retract/assert sequence)` in `core/tests/behavior/dirty_tracking_sequence.rs`
 - [ ] T041 [P] [US1] Property test: for any sequence of BufferEdited/BufferCleaned events, the final state of `buffer/dirty` matches the parity of the last event in `core/tests/property/dirty_tracking_invariant.rs`
+- [ ] T074 [P] [US1] Scenario test: register a fixture behavior that raises an error during firing; publish an event matching its trigger; assert `TraceEntry::BehaviorFired { error: Some(_) }` is recorded; assert fact-space is unchanged; assert dispatcher processes the next matching event normally per spec FR-011 + L2 P3 in `core/tests/behavior/error_recovery.rs`
 
 ### Implementation for User Story 1
 
@@ -131,7 +132,10 @@ Per the L2 Constitution and the Vidvik review tasks-template additions, certain 
 - [ ] T045 [P] [US1] {surface:cli} {retraction} {latency:interactive} Implement `weaver simulate-clean <buffer-id>` CLI subcommand: connects to bus, publishes `Event::BufferCleaned`, returns submission ack in `core/src/cli/simulate.rs`
 - [ ] T046 [P] [US1] Implement TUI `e` and `c` keystroke handlers that publish events via the bus client in `tui/src/commands.rs`
 - [ ] T047 [P] [US1] Implement TUI fact rendering: subscribe to `buffer/dirty` family, render asserted facts in the facts list with "by behavior X, event Y, Δms ago" annotation in `tui/src/render.rs`
+- [ ] T071 [P] [US1] Implement TUI disconnect detection: heartbeat timeout (e.g., 2s no traffic) or read-error on the bus stream emits a `Disconnect` signal to the render layer in `tui/src/client.rs`
+- [ ] T072 [P] [US1] Implement TUI stale-fact rendering: on `Disconnect` signal, mark all subscribed facts as stale and switch the connection-status line to `UNAVAILABLE` per `contracts/cli-surfaces.md` in `tui/src/render.rs`
 - [ ] T048 [US1] {latency:interactive} End-to-end test: spawn `weaver run` as subprocess, connect a test client over the socket, publish BufferEdited, assert FactAssert arrives within 100 ms with correct provenance; then publish BufferCleaned, assert FactRetract arrives in `tests/e2e/hello_fact.rs`
+- [ ] T073 [US1] End-to-end test: spawn `weaver run` as subprocess, connect a test client, publish BufferEdited, assert FactAssert arrives, then SIGKILL the core process; assert client emits `Disconnect` signal within 5 s, no panic, exit cleanly per spec SC-004 in `tests/e2e/disconnect.rs`
 
 **Checkpoint**: User Story 1 is fully functional and testable independently. The TUI loop closes through the bus and the fact space (no local shortcuts). Spec SC-001 and SC-005 (happy path + retraction coverage) are met.
 
@@ -192,6 +196,7 @@ Per the L2 Constitution and the Vidvik review tasks-template additions, certain 
 - [ ] T065 [P] Add `core/README.md` briefly describing the crate's role (core runtime: bus, fact space, behaviors, trace) and link to the slice spec
 - [ ] T066 [P] Add `tui/README.md` briefly describing the TUI's role (subscribe, render, simulate commands) and link to the slice spec
 - [ ] T067 [P] Add `.github/workflows/ci.yml` running `cargo build --workspace`, `cargo test --workspace`, `cargo clippy --workspace -- -D warnings` (per L2 P19 reproducibility + L2 P10 test-as-gate)
+- [ ] T075 [P] Benchmark test: built `weaver --version` binary completes within 50 ms (warm-cache, debug profile) per spec SC-006; uses `std::time::Instant` around `Command::new("./target/debug/weaver").arg("--version").output()` in `core/tests/cli/version_timing.rs`
 - [ ] T068 [P] Property test: every `BusMessage` published over the wire carries non-empty Provenance (P11 invariant) in `tests/property/provenance_wire.rs`
 - [ ] T069 Run the `quickstart.md` walkthrough end-to-end manually; record any gaps as follow-up tasks in `CHANGELOG.md` notes
 - [ ] T070 Verify `git log --oneline` for this branch shows commits in Conventional Commits style (per L2 Additional Constraints / Amendment 1)
@@ -296,11 +301,14 @@ With multiple developers:
 
 ## Notes
 
-- **Total tasks**: 70.
-- **Per phase**: Setup 10, Foundational 27, US1 11, US2 7, US3 8, Polish 7.
-- **Parallel-marked**: ~40 tasks can run in parallel within their phase windows.
+- **Total tasks**: 75 (70 original + 5 added during `/speckit.analyze` remediation: T071–T075).
+- **Per phase**: Setup 10, Foundational 27, US1 15 (11 + T071/T072/T073/T074), US2 7, US3 8, Polish 8 (7 + T075).
+- **Parallel-marked**: ~45 tasks can run in parallel within their phase windows.
 - **Test-first**: every implementation task in US1/US2/US3 has corresponding tests preceding it.
 - **Retraction coverage** ({retraction} marker): T023, T039, T045 — assert, scenario test, CLI command.
+- **Disconnect / degradation coverage** (FR-009/FR-010 + SC-004): T071 (client detect), T072 (render mark stale), T073 (e2e test).
+- **Behavior error path** (FR-011 + L2 P3): T028 (impl) paired with T074 (scenario test).
+- **Version timing** (SC-006): T032 (content) paired with T075 (timing benchmark).
 - **Latency-class coverage** ({latency:interactive} marker): T044, T045, T048 — the hot path through bus + behavior + subscription.
 - **Public-surface markers** ({surface:bus|cli|fact|config}): T027, T030, T031, T034, T037, T044, T045, T054, T059, T060, T063 — paired with CHANGELOG via T064.
 - **No `{host-primitive}` tasks**: no Steel in this slice.
