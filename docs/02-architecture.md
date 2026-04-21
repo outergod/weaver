@@ -21,7 +21,9 @@ The core is not responsible for rendering UI.
 
 ## 2. Services
 
-Capabilities beyond the editing core are provided by services.
+Services are one **actor kind** (system-model §6): governed, independently-running processes that typically claim authority over fact families. Other actor kinds — users, embedded behaviors, language hosts, external agents — participate on the bus without running as services. See system-model §6 for the full actor taxonomy and constitution §17 for the multi-actor invariant.
+
+Capabilities beyond the core are provided by services.
 
 Typical services may include:
 
@@ -144,7 +146,7 @@ Incremental maintenance, caching with invalidation, and partial delegation to se
 
 ## 5. Authority and Ownership
 
-Each authoritative fact family must have a declared owner.
+Each authoritative fact family must have a declared owner. Authority is a role an actor holds (system-model §5–§6); services are the typical owners, but the commitment is to the role, not to a specific actor kind.
 
 Examples:
 
@@ -157,7 +159,7 @@ This avoids contradictory canonical claims. **Authority is single-writer per fam
 
 ### 5.1 Entity Lifetime
 
-The authority owning an entity's primary fact family decides when the entity ceases. Entity retraction cascades: action entities targeting the entity cease with it (see system-model §7.1), derived facts about it are invalidated, and subscriptions receive explicit retraction events with provenance.
+The authority owning an entity's primary fact family decides when the entity ceases. Entity retraction cascades: action entities targeting the entity cease with it (see system-model §8.1), derived facts about it are invalidated, and subscriptions receive explicit retraction events with provenance.
 
 Derived or speculative facts may still exist alongside authoritative facts, but must be marked accordingly.
 

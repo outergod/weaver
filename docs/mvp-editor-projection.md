@@ -1,10 +1,10 @@
-## Weaver Editor MVP — Definition
+## Weaver Editor-Projection MVP — Definition
 
-> **Milestone naming.** This document defines the **Editor MVP** — the first Weaver milestone usable as a real editor for daily work. It builds on the **Ontology Prototype** ([`mvp-ontology.md`](mvp-ontology.md)) by layering the gates that prevent the prototype from being used as an editor in production. This naming follows the framing decision in [`mvp-review-hacker-triage.md`](mvp-review-hacker-triage.md).
+> **Milestone naming.** This document defines the **Editor-Projection MVP** — the first Weaver milestone that validates a daily-use projection of the coordination substrate. The editor is the first projection Weaver commits to proving load-bearing; under constitution §17, editor-like surfaces are one projection among many, not the defining abstraction. This milestone builds on the **Ontology Prototype** ([`mvp-ontology.md`](mvp-ontology.md)) by layering the gates that prevent the substrate from being used for daily work under the editor projection. Naming follows the framing decision in [`mvp-review-hacker-triage.md`](mvp-review-hacker-triage.md), updated in the coordination-substrate pivot.
 
 ### Goal
 
-Prove that Weaver can serve as a primary editor for a willing first customer — not because every feature exists, but because the *editor-shaped concerns* that prevent daily use are resolved.
+Prove that Weaver can serve as a primary editor for a willing first customer — not because every feature exists, but because the *primary-use concerns* that prevent daily work through any projection are resolved. The editor is the first projection we commit to proving; Gates 1–3 generalize to any daily-use projection, Gate 4 is editor-domain specific.
 
 The Editor MVP is successful if a competent Emacs user can:
 
@@ -86,7 +86,7 @@ Acceptance:
 - `why?` on any hunk action returns a coherent causal chain.
 - The full workflow (open status → stage two hunks → split a third → commit) completes in fewer than ten user actions and matches Magit's responsiveness within the interactive latency class.
 
-This gate is the workflow defined in [`06-workflows.md` §5](06-workflows.md) (added in Vidvik triage Batch 3).
+This gate is the workflow defined in [`06-workflows.md` §6](06-workflows.md) (added in Vidvik triage Batch 3).
 
 ---
 

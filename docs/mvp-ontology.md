@@ -1,6 +1,6 @@
 ## Weaver Ontology Prototype — Definition
 
-> **Milestone naming.** This document defines the **Ontology Prototype** — the first verifiable milestone in Weaver's development. It proves Weaver's ontology works end-to-end. It is **not** an editor MVP: undo/redo, async tasks, runaway-Steel containment in production conditions, and Magit-grade hunk staging are deferred. The next milestone — usable as a real editor for daily work — is the **Editor MVP**, defined in [`mvp-editor.md`](mvp-editor.md). Naming follows the framing decision in [`mvp-review-hacker-triage.md`](mvp-review-hacker-triage.md). Within this document, references to "the MVP" or "post-MVP" denote *this* milestone (Ontology Prototype) and the work that follows it.
+> **Milestone naming.** This document defines the **Ontology Prototype** — the first verifiable milestone in Weaver's development. It proves Weaver's ontology works end-to-end. It is **not** an editor MVP: undo/redo, async tasks, runaway-Steel containment in production conditions, and Magit-grade hunk staging are deferred. The next milestone — usable as a real editor for daily work — is the **Editor MVP**, defined in [`mvp-editor-projection.md`](mvp-editor-projection.md). Naming follows the framing decision in [`mvp-review-hacker-triage.md`](mvp-review-hacker-triage.md). Within this document, references to "the MVP" or "post-MVP" denote *this* milestone (Ontology Prototype) and the work that follows it.
 
 ### Goal
 

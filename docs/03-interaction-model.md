@@ -99,7 +99,7 @@ This state is represented as facts and participates in behavior.
 
 ## 11. Command Vocabulary
 
-The set of all action entities (system-model §7.1) constitutes Weaver's command vocabulary — the canonical namespace for "what can be done in this system."
+The set of all action entities (system-model §8.1) constitutes Weaver's command vocabulary — the canonical namespace for "what can be done in this system."
 
 A command-vocabulary view (analogous to Emacs's `M-x`) is a query over the action-entity space, optionally filtered by target or by applicability.
 

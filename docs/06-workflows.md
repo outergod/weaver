@@ -79,12 +79,42 @@ A service becomes unavailable while the core remains active.
 
 ---
 
-## 5. Hunk Staging to Commit
+## 5. Multi-Actor Contribution Review
+
+### Scenario
+An external actor — an agent acting on a user instruction, or an autonomous service operating under user delegation — proposes a non-authoritative contribution to the shared semantic state. The user reviews the contribution through the standard inspection channel before accepting, refusing, or refining it.
+
+### Expected progression
+1. An actor A publishes a contribution (a proposed fact assertion, a proposed action invocation, or a derived view) carrying `source: A` in provenance and, where applicable, `on-behalf-of: user` in the delegation subfield (protocols §3.4).
+2. The fact space admits the contribution under its authority rules: if A holds authority over the relevant family, the assertion is authoritative; otherwise it lands as user-scratch or as a marked speculative derivation (see `07-open-questions.md §24`).
+3. A behavior derives applicability of inspection actions on the contribution entity: `inspect-contribution`, `accept-contribution`, `refuse-contribution`.
+4. The user invokes `inspect-contribution`. `why?` returns the full delegation chain: the contribution, the actor that published it, the `on-behalf-of` user if any, the causal event that triggered A's action, and any derivation context.
+5. The user invokes `refuse-contribution`. The authority owning the contested fact family retracts the contribution; facts that depended on it retract via causal provenance.
+6. The trace records the contribution, the inspection, and the refusal as first-class entries with full provenance.
+
+### Properties tested
+- actor identity in provenance across actor kinds (constitution §17)
+- delegation chain inspection (`on-behalf-of`; protocols §3.4)
+- user sovereignty as a mechanism — refusal propagates through the provenance graph (constitution §17 user-sovereignty clause)
+- reversibility of non-user contributions (§17)
+- reconcilable convergence without silent coalescence (constitution §11)
+
+### Failure modes worth surfacing
+- A's authority claim conflicts with an existing authority — does the system surface the conflict (per §11) or accept silently?
+- Delegation chain cannot be validated (A claims `on-behalf-of` but the claimed delegator never authorized) — does the contribution land as user-scratch, as rejected, or as flagged?
+- User refuses a contribution that other behaviors have already acted on — do downstream effects retract along the causal chain (§11 reconcilability)?
+
+### Why this workflow exists
+This workflow makes constitution §17 (Multi-Actor Coherence) and the user-sovereignty clause operational. Without it, §17 remains a framing-level invariant with no scenario showing how refusal, delegation inspection, and conflict surfacing manifest. It is explicitly *not* tied to the editor projection MVP — it gates the first non-editor / multi-actor slice (see the pivot follow-up in `07-open-questions.md §23–§25`).
+
+---
+
+## 6. Hunk Staging to Commit
 
 ### Scenario
 The user has uncommitted changes in a Git-backed project. They want to stage some hunks, split a multi-purpose hunk, discard one, and commit only the staged work — entirely within Weaver, at editor speed.
 
-This workflow is the diagnostic for the *core orchestrates multi-authority actions* rule (architecture §11) under a real, daily-use multi-authority load. It is also a Gate of the Editor MVP (`mvp-editor.md` Gate 4).
+This workflow is the diagnostic for the *core orchestrates multi-authority actions* rule (architecture §11) under a real, daily-use multi-authority load. It is also a Gate of the Editor-Projection MVP (`mvp-editor-projection.md` Gate 4).
 
 ### Expected progression
 1. Git service publishes facts about the working tree: per-file modification status, per-hunk diff content, staged vs. unstaged status. Hunk entities have stable IDs derived from `(file-path, hunk-anchor)` so they survive re-derivation.
