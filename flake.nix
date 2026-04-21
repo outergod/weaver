@@ -23,13 +23,13 @@
       # Read `rust-toolchain.toml` directly so the channel + components
       # listed there drive both this dev shell and CI's rustup.
       #
-      # First-setup note: on bumping the channel, nix will report a
-      # hash mismatch with the correct value to paste below. The
-      # all-zero placeholder is a Nix convention that triggers that
-      # error rather than silently succeeding with a stale hash.
+      # Bump discipline: when `rust-toolchain.toml`'s `channel` changes,
+      # swap the `sha256` below with an all-zero placeholder
+      # (`sha256-AAAAAA...=`); `nix develop` will report the correct
+      # hash in the resulting error and that goes back here.
       rustToolchain = fenix.packages.${system}.fromToolchainFile {
         file = ./rust-toolchain.toml;
-        sha256 = "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
+        sha256 = "sha256-qqF33vNuAdU5vua96VKVIwuc43j4EFeEXbjQ6+l4mO4=";
       };
 
       # Dev-friendly rust-analyzer tracks nightly, so pull it from the
