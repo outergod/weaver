@@ -25,8 +25,8 @@ const SOCKET_WAIT_TIMEOUT: Duration = Duration::from_secs(10);
 #[tokio::test]
 async fn sigkill_surfaces_disconnect_within_budget_without_panic() {
     let socket = unique_socket_path();
-    let mut child = spawn_weaver(&socket);
-    let child_pid = child.id();
+    let guard = ChildGuard::new(spawn_weaver(&socket));
+    let child_pid = guard.pid();
 
     wait_for_socket(&socket).await;
 
@@ -91,9 +91,41 @@ async fn sigkill_surfaces_disconnect_within_budget_without_panic() {
         "disconnect surfaced too slowly: {disconnect_elapsed:?}",
     );
 
-    // Reap the child so the guard path is simple.
-    let _ = child.wait();
+    // `ChildGuard::drop` will reap the already-SIGKILL'd child.
+    drop(guard);
     let _ = std::fs::remove_file(&socket);
+}
+
+/// RAII guard that owns the spawned `weaver` subprocess.
+///
+/// On `Drop` (including panic unwind), it sends SIGTERM, briefly
+/// waits, then falls back to SIGKILL (`Child::kill`) and always
+/// `wait()`s to reap the zombie. Owning the `Child` directly satisfies
+/// clippy's `zombie_processes` lint: every code path, including
+/// panics, flows through this destructor.
+struct ChildGuard {
+    child: Option<std::process::Child>,
+}
+
+impl ChildGuard {
+    fn new(child: std::process::Child) -> Self {
+        Self { child: Some(child) }
+    }
+
+    fn pid(&self) -> u32 {
+        self.child.as_ref().map(|c| c.id()).unwrap_or(0)
+    }
+}
+
+impl Drop for ChildGuard {
+    fn drop(&mut self) {
+        if let Some(mut child) = self.child.take() {
+            let _ = nix_signal(child.id(), libc::SIGTERM);
+            std::thread::sleep(Duration::from_millis(100));
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
 }
 
 fn build_weaver_binary() -> PathBuf {

@@ -27,8 +27,7 @@ const SOCKET_WAIT_TIMEOUT: Duration = Duration::from_secs(10);
 #[tokio::test]
 async fn buffer_edited_then_cleaned_round_trips_via_bus() {
     let socket = unique_socket_path();
-    let mut child = spawn_weaver(&socket);
-    let _guard = ChildGuard::new(&mut child);
+    let _guard = ChildGuard::new(spawn_weaver(&socket));
 
     wait_for_socket(&socket).await;
 
@@ -200,25 +199,33 @@ fn now_ns() -> u64 {
         .unwrap_or(0)
 }
 
-/// RAII guard: kills the weaver subprocess and removes the socket file
-/// on drop, even if the test panics.
+/// RAII guard that owns the spawned `weaver` subprocess.
+///
+/// On `Drop` (including panic unwind), it sends SIGTERM, briefly
+/// waits for the `cli::run_core` signal handler to unlink the
+/// socket, then falls back to SIGKILL (`Child::kill` is a no-op if
+/// the process already exited) and always `wait()`s to reap the
+/// zombie. Owning the `Child` directly satisfies clippy's
+/// `zombie_processes` lint: every code path, including panics,
+/// flows through this destructor.
 struct ChildGuard {
-    pid: u32,
+    child: Option<std::process::Child>,
 }
 
 impl ChildGuard {
-    fn new(child: &mut std::process::Child) -> Self {
-        Self { pid: child.id() }
+    fn new(child: std::process::Child) -> Self {
+        Self { child: Some(child) }
     }
 }
 
 impl Drop for ChildGuard {
     fn drop(&mut self) {
-        // SIGTERM first; the shell's Ctrl-C wiring in `cli::run_core`
-        // cleans up the socket file. Fall back to SIGKILL if needed.
-        let _ = nix_signal(self.pid, libc::SIGTERM);
-        std::thread::sleep(Duration::from_millis(200));
-        let _ = nix_signal(self.pid, libc::SIGKILL);
+        if let Some(mut child) = self.child.take() {
+            let _ = nix_signal(child.id(), libc::SIGTERM);
+            std::thread::sleep(Duration::from_millis(100));
+            let _ = child.kill();
+            let _ = child.wait();
+        }
     }
 }
 
