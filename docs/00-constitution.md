@@ -1,6 +1,8 @@
-# Weaver Constitution (v0.1)
+# Weaver Constitution (v0.2)
 
-Weaver is a programmable, event-driven editing system in which workflows emerge from interactions between independent services. Weaver is conceived as a spiritual evolution of GNU Emacs.
+Weaver is a programmable, event-driven coordination substrate for symbolic work. It provides a shared semantic environment in which entities, facts, behaviors, services, and interfaces interact. Editor-like surfaces are one projection of this system, not its defining abstraction.
+
+Weaver draws inspiration from systems like GNU Emacs, but generalizes the model beyond text editing into a multi-actor, distributed runtime.
 
 This document defines the non-negotiable principles of the system.
 
@@ -13,6 +15,8 @@ Weaver does not rely on a single embedded runtime as the universal medium of ext
 - The core remains responsive under partial failure.
 
 The system must not require all extensibility to exist inside one privileged language image or process.
+
+No single process, service, or actor may become a privileged, opaque locus of system behavior. The prohibition is not only architectural — it is a failure-domain guarantee.
 
 ---
 
@@ -31,7 +35,7 @@ All meaningful system elements must expose:
 - provenance
 - relationships
 - applicability
-- traceability
+- traceability (including causal context)
 
 Opacity is a defect.
 
@@ -171,6 +175,8 @@ Only shared semantic state participates in system-wide behavior.
 
 Client-local view state remains outside the core model.
 
+Shared semantic state may be partial and temporarily divergent across services, but must be reconcilable. Conflicts between authoritative contributions must be made explicit rather than silently resolved. Divergence without a path to reconciliation is a defect.
+
 ---
 
 ## 12. Composition Is First-Class
@@ -245,3 +251,21 @@ When there is tension between:
 Weaver prefers explainable behavior.
 
 The system must remain legible to the user.
+
+---
+
+## 17. Multi-Actor Coherence
+
+Weaver participates with heterogeneous actors — users, services, embedded behaviors, language hosts, and external agents. These are not disjoint categories, and actor identity is orthogonal to the extension lanes defined in §14.
+
+The system must:
+
+- record the originating actor in provenance for every fact, event, and action
+- allow concurrent contributions from multiple actors without silent coalescence
+- make conflicts and overlaps between contributions explicit and inspectable
+
+Contributions from non-user actors MUST remain reversible and refusable by the user on inspection.
+
+No actor may operate as an opaque authority. This closes the corresponding loophole in §1 at the actor level, just as §1 closes it at the process level.
+
+The user is the final authority over shared semantic state. Non-user actors contribute under delegated powers that the user may constrain, revoke, or reverse.

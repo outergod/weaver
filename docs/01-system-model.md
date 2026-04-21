@@ -191,14 +191,14 @@ A behavior should never be semantically invisible.
 
 ## 5. Authorities
 
-Some services are authoritative over specific fact families.
+Authority is a role an actor (§6) may hold over a specific fact family. Services are the typical authority holders; other actor kinds may hold authority in principle but rarely do in practice.
 
 Examples:
 
-- editor core may be authoritative for open-buffer state
-- project service may be authoritative for project membership facts
-- git service may be authoritative for repository state
-- language service may be authoritative for diagnostics
+- the core is authoritative for open-buffer state
+- project service is authoritative for project membership facts
+- git service is authoritative for repository state
+- language service is authoritative for diagnostics
 
 Authority constrains who may publish canonical facts in a given domain.
 
@@ -206,7 +206,35 @@ Derived facts may exist alongside authoritative facts, but must say so explicitl
 
 ---
 
-## 6. Derived Views
+## 6. Actors
+
+An actor is the origin of contributions to the system. Every fact, event, and action is attributable to an actor (constitution §17).
+
+Actor kinds include:
+
+- **users** — humans interacting through a UI or CLI
+- **services** — governed, independently-running processes (§5; architecture §2) that typically claim authority over fact families
+- **embedded behaviors** — reactive units executing inside the composition runtime (§4)
+- **language hosts** — services that proxy user code (architecture §9.1.1)
+- **external agents** — actors delegated powers by the user to contribute on the user's behalf, often driven by non-deterministic (e.g. model-based) reasoning
+
+These kinds are **not disjoint**. A language host is also a service. An agent may run inside a language host. The taxonomy is descriptive.
+
+### 6.1 Authority Is a Role
+
+Authority (§5) is a role an actor may hold over a fact family; it is not an intrinsic property of any actor kind. Services commonly hold authority; other actor kinds commonly do not. An agent typically does not claim governed authority — its contributions flow through user-scratch or through a service that brokers them.
+
+### 6.2 Provenance Carries Actor Identity
+
+The `source` field on every fact, event, and action identifies the originating actor (protocols §3.4). When one actor acts on another's behalf — an agent at a user's request, a host running user code — provenance may carry an optional `on-behalf-of` subfield naming the delegating actor. This preserves the distinction between *who acted* and *who authorized* that §17 requires.
+
+### 6.3 User Sovereignty
+
+The user is the final authority over shared semantic state (constitution §17). Non-user actors operate under delegated powers that the user may constrain, revoke, or reverse. The trace (architecture §10) makes these contributions inspectable; retraction and refusal are available through the authority owning the contested fact family.
+
+---
+
+## 7. Derived Views
 
 A derived view is an interpretation assembled from underlying facts.
 
@@ -224,7 +252,7 @@ They are projections over the fact space.
 
 ---
 
-## 7. Applicability
+## 8. Applicability
 
 Actions are not owned by entities.
 
@@ -232,7 +260,7 @@ An action is applicable when the current combination of facts, events, and avail
 
 This is the central mechanism by which capability emerges in Weaver.
 
-### 7.1 Action Entities
+### 8.1 Action Entities
 
 Applicability is materialized as derived facts on stable **action entities**.
 
@@ -246,7 +274,7 @@ The set of all action entities constitutes Weaver's **command vocabulary** — t
 
 ---
 
-## 8. UI Intents
+## 9. UI Intents
 
 UI intents are structured records emitted by behaviors.
 
@@ -268,7 +296,7 @@ Interpretation is left to clients.
 
 ---
 
-## 9. Substrate
+## 10. Substrate
 
 A substrate is an interface — a set of fact predicates — that any entity may satisfy to participate in a class of uniform operations.
 
@@ -280,7 +308,7 @@ Substrate membership is a property of the fact space, not of the entity's essent
 
 Rendering of a substrate-satisfying entity is always a client concern. Different clients may render the same entity at different fidelities without affecting its substrate membership.
 
-### 9.1 Projections
+### 10.1 Projections
 
 When a substrate operation targets an entity whose primary representation is not textual, the operation may act against a **projection** — a derived textual view of the entity.
 

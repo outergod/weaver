@@ -68,7 +68,7 @@ See constitution §8, interaction-model.
 
 Resolved: UI intents are structured records `(intent-type, target-entity, parameters, source-behavior)`. Clients are free to ignore them. `source-behavior` integrates intents into the trace model, avoiding a second provenance mechanism.
 
-See system-model §8.
+See system-model §9.
 
 ---
 
@@ -92,7 +92,7 @@ Partially answered by the current Ontology Prototype scope ([`mvp-ontology.md`](
 
 Resolved: **projection-local by default**. Operations that would mutate the source representation must be explicitly routed to the source authority, which may accept or reject them. No implicit write-through.
 
-See system-model §9.1.
+See system-model §10.1.
 
 ---
 
@@ -100,7 +100,7 @@ See system-model §9.1.
 
 Resolved: **event-driven change messages + periodic fact snapshots** by default. Services may declare alternative update models in their lifecycle metadata; consumers adapt to the declaration.
 
-See protocols §3.2, system-model §9.1.
+See protocols §3.2, system-model §10.1.
 
 ---
 
@@ -108,7 +108,7 @@ See protocols §3.2, system-model §9.1.
 
 Resolved: **projections carry structured annotations as first-class content** — regions, action targets, semantic markers travel alongside the rendered text. Emacs text-properties promoted to a cross-service protocol. Not a separate out-of-band stream.
 
-See system-model §9.1.
+See system-model §10.1.
 
 ---
 
@@ -253,3 +253,51 @@ The original concerns map as follows:
 - **Snapshot vs. snapshot+deltas on reconnect** — committed to snapshot+deltas; per-publisher sequence numbers make it implementable.
 
 Distribution-specific refinements (cross-network sequence ordering, snapshot transfer cost) become relevant when the distribution story is concrete and pair with §16.
+
+---
+
+## 23. Authorship vs Provenance
+
+Constitution §17 requires provenance to carry the originating actor. Protocols §3.4 introduces `on-behalf-of` as an optional delegation subfield. Open: how far does the delegation chain go, and how is it validated?
+
+- shape of the delegation chain — single delegator, nested chain, or a set of co-authorizers?
+- validation — does the delegator's identity have to be signed, or is claim-based attribution sufficient for MVP?
+- UI presentation — when the user refuses an agent contribution (§17 reversibility), does the refusal retract along the delegation chain or only at the primary `source`?
+
+Deferred until a slice requires delegation semantics beyond the existing hosted-origin pattern (candidate: agent-integration follow-up slice).
+
+---
+
+## 24. Speculative-Fact Mechanism
+
+Constitution §11 (convergence clause) allows temporary divergence with reconcilable shared state. Speculative or provisional contributions — an agent proposing a change the user has not yet accepted, a behavior computing a what-if — have no declared mechanism today.
+
+Options:
+
+- (a) **Separate fact-space partition** — speculative facts live in a staging space outside the authoritative fact space; promotion to authoritative is explicit
+- (b) **Provenance flag** — speculative facts live in the normal fact space with a `speculative: true` provenance field; authority rules define visibility
+- (c) **Per-actor shadow** — each actor maintains a speculative overlay visible to itself; promotion requires the governing authority to accept
+
+Consequences:
+
+- (a) clean separation, harder integration with applicability rules
+- (b) minimal mechanism, risk of silent coalescence into authoritative state
+- (c) strong isolation, complex multi-actor coordination
+
+Deferred until a slice demonstrably needs speculative contributions. The constitution commits only to "reconcilable" shared state (§11); it does not promise the mechanism exists.
+
+---
+
+## 25. SourceId Evolution to Typed ActorKind
+
+The core today carries `SourceId::{Core, Behavior(id), Tui, External(String)}` in provenance. The `External(String)` variant is an opaque placeholder; it collapses all out-of-process actors into a single unstructured tag.
+
+Constitution §17 and system-model §6 name five actor kinds (users, services, embedded behaviors, language hosts, external agents). A structured `ActorKind` enum is the natural code-level expression of this taxonomy.
+
+Open:
+
+- shape — single `ActorKind` enum, or a trait with per-kind implementations?
+- migration — does `SourceId::External` get replaced, or does `ActorKind` live alongside it as a richer field?
+- identity stability — how is an actor's identity persisted across sessions (relevant for `on-behalf-of` chains in stored traces)?
+
+Becomes relevant at the first slice that introduces a non-core, non-behavior actor on the bus with a stable identity (candidate: non-editor service slice per pivot follow-up).

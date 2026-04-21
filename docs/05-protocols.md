@@ -85,6 +85,16 @@ Assertions emitted by a **language host** on behalf of user code it runs carry a
 
 The host remains the authoritative `source` — authority does not fragment across hosted users. See architecture §9.1.1.
 
+### 3.4 Actor Identity and Delegation
+
+The `source` field identifies the **originating actor** — the bus participant that produced this message (constitution §17; system-model §6). Actor identity spans users, services, embedded behaviors, language hosts, and external agents; it is not reducible to service identity.
+
+When an actor acts on another actor's behalf, provenance may carry an optional `on-behalf-of` subfield naming the delegating actor. This distinguishes *who acted* (primary `source`, mechanical) from *who authorized* (delegation chain, intentional) — the authorship-versus-provenance distinction constitution §17 requires.
+
+The `hosted-origin` subfield (§3.3) is the canonical specialization of this pattern for language-hosted user code. Agent-on-behalf-of-user delegation follows the same shape.
+
+Consumers may filter, route, or weight by actor identity and delegation chain. Open questions on the exact shape of the delegation schema remain (see `07-open-questions.md §23`).
+
 ---
 
 ## 4. Requests and Responses
