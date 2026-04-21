@@ -6,7 +6,7 @@
 use weaver_core::behavior::dirty_tracking::DirtyTrackingBehavior;
 use weaver_core::behavior::dispatcher::Dispatcher;
 use weaver_core::fact_space::FactStore;
-use weaver_core::provenance::{Provenance, SourceId};
+use weaver_core::provenance::{ActorIdentity, Provenance};
 use weaver_core::types::entity_ref::EntityRef;
 use weaver_core::types::event::{Event, EventPayload};
 use weaver_core::types::fact::FactKey;
@@ -25,7 +25,7 @@ async fn buffer_cleaned_retracts_buffer_dirty() {
         name: "buffer/edited".into(),
         target: Some(entity),
         payload: EventPayload::BufferEdited,
-        provenance: Provenance::new(SourceId::Tui, 1_000, None).unwrap(),
+        provenance: Provenance::new(ActorIdentity::Tui, 1_000, None).unwrap(),
     };
     dispatcher.process_event(edited).await;
 
@@ -45,7 +45,7 @@ async fn buffer_cleaned_retracts_buffer_dirty() {
         name: "buffer/cleaned".into(),
         target: Some(entity),
         payload: EventPayload::BufferCleaned,
-        provenance: Provenance::new(SourceId::Tui, 2_000, None).unwrap(),
+        provenance: Provenance::new(ActorIdentity::Tui, 2_000, None).unwrap(),
     };
     dispatcher.process_event(cleaned).await;
 

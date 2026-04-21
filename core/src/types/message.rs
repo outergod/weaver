@@ -9,15 +9,23 @@ use crate::types::fact::{Fact, FactKey};
 use crate::types::ids::{BehaviorId, EventId};
 use serde::{Deserialize, Serialize};
 
-/// Bus protocol version — slice 001 ships v0.1.0 as `0x01`.
+/// Bus protocol version.
+///
+/// - `0x01` / `0.1.0` — slice 001 shipped this with opaque
+///   `SourceId::External(String)` in provenance.
+/// - `0x02` / `0.2.0` — **current**, slice 002. Breaking wire change:
+///   provenance carries structured [`crate::provenance::ActorIdentity`]
+///   (new CBOR tag 1002), and [`LifecycleSignal`] gains
+///   `Degraded` / `Unavailable` / `Restarting` variants. See
+///   `specs/002-git-watcher-actor/contracts/bus-messages.md`.
 ///
 /// Public surface per L2 P7. Increments follow the policy in
-/// `specs/001-hello-fact/contracts/bus-messages.md` §Versioning.
-pub const BUS_PROTOCOL_VERSION: u8 = 0x01;
+/// `specs/002-git-watcher-actor/contracts/bus-messages.md` §Versioning.
+pub const BUS_PROTOCOL_VERSION: u8 = 0x02;
 
 /// Semver-style string representation of [`BUS_PROTOCOL_VERSION`].
 /// Used in CLI output (e.g., `weaver --version`).
-pub const BUS_PROTOCOL_VERSION_STR: &str = "0.1.0";
+pub const BUS_PROTOCOL_VERSION_STR: &str = "0.2.0";
 
 /// The top-level enum of bus messages.
 ///
@@ -96,11 +104,25 @@ impl SubscribePattern {
     }
 }
 
+/// Service-lifecycle signal carried over the bus.
+///
+/// Slice 001 shipped `Started` / `Ready` / `Stopped` for the core's
+/// own lifecycle. Slice 002 extends the enum with `Degraded` /
+/// `Unavailable` / `Restarting` per `docs/05-protocols.md §5`; these
+/// are emitted by services that can degrade without exiting (e.g.,
+/// `weaver-git-watcher` losing observation of its repository
+/// transiently).
+///
+/// The core continues to emit only `Started` / `Ready` / `Stopped`
+/// this slice; the richer transitions are service-kind-specific.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum LifecycleSignal {
     Started,
     Ready,
+    Degraded,
+    Unavailable,
+    Restarting,
     Stopped,
 }
 
@@ -129,7 +151,7 @@ pub enum InspectionError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::provenance::SourceId;
+    use crate::provenance::ActorIdentity;
     use crate::types::entity_ref::EntityRef;
     use crate::types::event::EventPayload;
     use crate::types::fact::FactValue;
@@ -139,7 +161,7 @@ mod tests {
             key: FactKey::new(EntityRef::new(1), "buffer/dirty"),
             value: FactValue::Bool(true),
             provenance: Provenance::new(
-                SourceId::Behavior(BehaviorId::new("core/dirty-tracking")),
+                ActorIdentity::behavior(BehaviorId::new("core/dirty-tracking")),
                 1000,
                 Some(EventId::new(42)),
             )
@@ -153,7 +175,7 @@ mod tests {
             name: "buffer/edited".into(),
             target: Some(EntityRef::new(1)),
             payload: EventPayload::BufferEdited,
-            provenance: Provenance::new(SourceId::Tui, 999, None).unwrap(),
+            provenance: Provenance::new(ActorIdentity::Tui, 999, None).unwrap(),
         }
     }
 
@@ -167,7 +189,7 @@ mod tests {
             BusMessage::FactAssert(sample_fact()),
             BusMessage::FactRetract {
                 key: FactKey::new(EntityRef::new(1), "buffer/dirty"),
-                provenance: Provenance::new(SourceId::Core, 2000, None).unwrap(),
+                provenance: Provenance::new(ActorIdentity::Core, 2000, None).unwrap(),
             },
             BusMessage::Subscribe(SubscribePattern::FamilyPrefix("buffer/".into())),
             BusMessage::Subscribe(SubscribePattern::AllFacts),

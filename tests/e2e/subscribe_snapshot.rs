@@ -13,8 +13,9 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use tokio::time::{sleep, timeout};
 
+use uuid::Uuid;
 use weaver_core::bus::client::Client;
-use weaver_core::provenance::{Provenance, SourceId};
+use weaver_core::provenance::{ActorIdentity, Provenance};
 use weaver_core::types::entity_ref::EntityRef;
 use weaver_core::types::event::{Event, EventPayload};
 use weaver_core::types::fact::{FactKey, FactValue};
@@ -44,7 +45,7 @@ async fn subscribe_replays_current_facts_before_live_updates() {
                 target: Some(EntityRef::new(1)),
                 payload: EventPayload::BufferEdited,
                 provenance: Provenance::new(
-                    SourceId::External("e2e-publisher".into()),
+                    ActorIdentity::service("e2e-publisher", Uuid::new_v4()).unwrap(),
                     edit_id.as_u64(),
                     None,
                 )
@@ -89,7 +90,7 @@ async fn subscribe_replays_current_facts_before_live_updates() {
     assert_eq!(msg.value, FactValue::Bool(true));
     assert_eq!(
         msg.provenance.source,
-        SourceId::Behavior(BehaviorId::new("core/dirty-tracking")),
+        ActorIdentity::behavior(BehaviorId::new("core/dirty-tracking")),
     );
 
     // `ChildGuard::drop` handles SIGTERM → brief wait → SIGKILL →

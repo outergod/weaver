@@ -9,7 +9,7 @@ use weaver_core::behavior::dirty_tracking::DirtyTrackingBehavior;
 use weaver_core::behavior::dispatcher::Dispatcher;
 use weaver_core::fact_space::FactStore;
 use weaver_core::inspect::inspect_fact;
-use weaver_core::provenance::{Provenance, SourceId};
+use weaver_core::provenance::{ActorIdentity, Provenance};
 use weaver_core::types::entity_ref::EntityRef;
 use weaver_core::types::event::{Event, EventPayload};
 use weaver_core::types::fact::FactKey;
@@ -28,7 +28,7 @@ async fn asserted_fact_is_inspectable_with_full_provenance() {
             name: "buffer/edited".into(),
             target: Some(entity),
             payload: EventPayload::BufferEdited,
-            provenance: Provenance::new(SourceId::Tui, 100, None).unwrap(),
+            provenance: Provenance::new(ActorIdentity::Tui, 100, None).unwrap(),
         })
         .await;
 

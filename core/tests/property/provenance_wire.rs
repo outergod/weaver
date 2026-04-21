@@ -1,17 +1,21 @@
 //! T068 — property test: every `BusMessage` variant that carries
-//! `Provenance` on the wire has non-empty `source`.
+//! `Provenance` on the wire has a non-empty `source` after a CBOR or
+//! JSON round-trip.
 //!
-//! L2 P11 requires provenance on every published message. This
-//! invariant is enforced at construction via [`Provenance::new`]
-//! (which rejects `External("")`); this test demonstrates that no
-//! wire-level encoding path sneaks an empty source through the
-//! variants that carry provenance.
+//! L2 P11 requires provenance on every published message. The slice
+//! 002 [`ActorIdentity`] enum's unit variants (`Core`, `Tui`) are
+//! always non-empty by construction; `Behavior` / `Service` / `User`
+//! / `Host` / `Agent` variants carry non-empty identifiers (enforced
+//! at `ActorIdentity::service` construction via kebab-case validation,
+//! and at higher-level constructors for the other variants).
 //!
-//! Reference: `specs/001-hello-fact/tasks.md` T068.
+//! Reference: `specs/001-hello-fact/tasks.md` T068 (extended for slice
+//! 002 `ActorIdentity` wire shape).
 
 use proptest::prelude::*;
+use uuid::Uuid;
 
-use weaver_core::provenance::{Provenance, SourceId};
+use weaver_core::provenance::{ActorIdentity, Provenance};
 use weaver_core::types::entity_ref::EntityRef;
 use weaver_core::types::event::{Event, EventPayload};
 use weaver_core::types::fact::{Fact, FactKey, FactValue};
@@ -32,20 +36,30 @@ fn provenance_of(msg: &BusMessage) -> Option<&Provenance> {
     }
 }
 
-/// An `External` source built from a non-empty tag, guaranteed
-/// round-trippable via CBOR / JSON.
-fn arb_source() -> impl Strategy<Value = SourceId> {
+/// Arbitrary well-formed [`ActorIdentity`] across every variant the
+/// slice-002 wire accepts. Service identifiers are constructed as
+/// hyphen-joined `[a-z0-9]+` segments so the kebab-case validator
+/// never rejects a generated value.
+fn arb_identity() -> impl Strategy<Value = ActorIdentity> {
     prop_oneof![
-        Just(SourceId::Core),
-        Just(SourceId::Tui),
-        "[a-z]{1,20}".prop_map(SourceId::External),
-        "[a-z]{1,10}/[a-z]{1,20}".prop_map(|id| SourceId::Behavior(BehaviorId::new(id))),
+        Just(ActorIdentity::Core),
+        Just(ActorIdentity::Tui),
+        "[a-z]{1,10}/[a-z]{1,20}".prop_map(|id| ActorIdentity::behavior(BehaviorId::new(id))),
+        (
+            proptest::collection::vec("[a-z0-9]{1,6}", 1..=4),
+            any::<[u8; 16]>(),
+        )
+            .prop_map(|(segments, bytes)| {
+                let id = segments.join("-");
+                ActorIdentity::service(id, Uuid::from_bytes(bytes))
+                    .expect("arb_identity segments produce valid kebab-case")
+            }),
     ]
 }
 
 fn arb_provenance() -> impl Strategy<Value = Provenance> {
     (
-        arb_source(),
+        arb_identity(),
         0u64..u64::MAX,
         proptest::option::of(0u64..u64::MAX),
     )
@@ -100,17 +114,23 @@ fn arb_provenanced_message() -> impl Strategy<Value = BusMessage> {
     ]
 }
 
-fn source_is_non_empty(source: &SourceId) -> bool {
+fn identity_is_non_empty(source: &ActorIdentity) -> bool {
     match source {
-        SourceId::Core | SourceId::Tui => true,
-        SourceId::Behavior(id) => !id.as_str().is_empty(),
-        SourceId::External(tag) => !tag.is_empty(),
+        ActorIdentity::Core | ActorIdentity::Tui => true,
+        ActorIdentity::Behavior { id } => !id.as_str().is_empty(),
+        ActorIdentity::Service {
+            service_id,
+            instance_id: _,
+        } => !service_id.is_empty(),
+        ActorIdentity::User { id } => !id.as_str().is_empty(),
+        ActorIdentity::Host { host_id, .. } => !host_id.is_empty(),
+        ActorIdentity::Agent { agent_id, .. } => !agent_id.is_empty(),
     }
 }
 
 proptest! {
     /// After a CBOR round-trip, every provenance-carrying variant still
-    /// has a non-empty `source`.
+    /// has a non-empty structured `source`.
     #[test]
     fn cbor_round_trip_preserves_non_empty_source(msg in arb_provenanced_message()) {
         let mut buf = Vec::new();
@@ -119,7 +139,7 @@ proptest! {
         let source = provenance_of(&back)
             .map(|p| &p.source)
             .expect("generator only produces provenance-carrying variants");
-        prop_assert!(source_is_non_empty(source));
+        prop_assert!(identity_is_non_empty(source));
     }
 
     /// After a JSON round-trip, same invariant.
@@ -130,6 +150,16 @@ proptest! {
         let source = provenance_of(&back)
             .map(|p| &p.source)
             .expect("generator only produces provenance-carrying variants");
-        prop_assert!(source_is_non_empty(source));
+        prop_assert!(identity_is_non_empty(source));
+    }
+
+    /// Slice 002 T020 — round-trip over every `ActorIdentity` variant
+    /// preserves equality exactly (not just non-emptiness).
+    #[test]
+    fn actor_identity_cbor_round_trip_exact(p in arb_provenance()) {
+        let mut buf = Vec::new();
+        ciborium::into_writer(&p, &mut buf).unwrap();
+        let back: Provenance = ciborium::from_reader(buf.as_slice()).unwrap();
+        prop_assert_eq!(p, back);
     }
 }

@@ -33,7 +33,7 @@ pub enum EventPayload {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::provenance::SourceId;
+    use crate::provenance::ActorIdentity;
     use proptest::prelude::*;
 
     fn sample_event(id: u64) -> Event {
@@ -42,7 +42,7 @@ mod tests {
             name: "buffer/edited".into(),
             target: Some(EntityRef::new(1)),
             payload: EventPayload::BufferEdited,
-            provenance: Provenance::new(SourceId::Tui, id.saturating_mul(1000), None).unwrap(),
+            provenance: Provenance::new(ActorIdentity::Tui, id.saturating_mul(1000), None).unwrap(),
         }
     }
 

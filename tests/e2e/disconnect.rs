@@ -12,8 +12,9 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use tokio::time::{sleep, timeout};
 
+use uuid::Uuid;
 use weaver_core::bus::client::{Client, ClientError};
-use weaver_core::provenance::{Provenance, SourceId};
+use weaver_core::provenance::{ActorIdentity, Provenance};
 use weaver_core::types::entity_ref::EntityRef;
 use weaver_core::types::event::{Event, EventPayload};
 use weaver_core::types::ids::EventId;
@@ -47,8 +48,12 @@ async fn sigkill_surfaces_disconnect_within_budget_without_panic() {
             name: "buffer/edited".into(),
             target: Some(EntityRef::new(1)),
             payload: EventPayload::BufferEdited,
-            provenance: Provenance::new(SourceId::External("e2e".into()), edit_id.as_u64(), None)
-                .unwrap(),
+            provenance: Provenance::new(
+                ActorIdentity::service("e2e-publisher", Uuid::new_v4()).unwrap(),
+                edit_id.as_u64(),
+                None,
+            )
+            .unwrap(),
         }))
         .await
         .expect("send BufferEdited");

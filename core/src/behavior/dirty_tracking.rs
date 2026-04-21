@@ -9,7 +9,7 @@
 //! `specs/001-hello-fact/data-model.md`.
 
 use crate::behavior::dispatcher::{Behavior, BehaviorContext, BehaviorOutputs};
-use crate::provenance::{Provenance, SourceId};
+use crate::provenance::{ActorIdentity, Provenance};
 use crate::types::event::{Event, EventPayload};
 use crate::types::fact::{Fact, FactKey, FactValue};
 use crate::types::ids::BehaviorId;
@@ -30,14 +30,14 @@ impl DirtyTrackingBehavior {
     }
 
     fn provenance(&self, ctx: &BehaviorContext, event: &Event) -> Provenance {
-        // `Provenance::new` only rejects `External("")`; `Behavior(...)`
-        // sources never fail, so `expect` is infallible here.
+        // `Provenance::new` is infallible for well-formed ActorIdentity
+        // variants; Behavior carries a pre-validated BehaviorId.
         Provenance::new(
-            SourceId::Behavior(self.id.clone()),
+            ActorIdentity::behavior(self.id.clone()),
             ctx.now_ns,
             Some(event.id),
         )
-        .expect("behavior provenance is never External")
+        .expect("behavior provenance is infallible")
     }
 }
 

@@ -10,7 +10,7 @@
 
 use weaver_core::behavior::dispatcher::{Behavior, BehaviorContext, BehaviorOutputs, Dispatcher};
 use weaver_core::fact_space::FactStore;
-use weaver_core::provenance::{Provenance, SourceId};
+use weaver_core::provenance::{ActorIdentity, Provenance};
 use weaver_core::trace::entry::TracePayload;
 use weaver_core::types::entity_ref::EntityRef;
 use weaver_core::types::event::{Event, EventPayload};
@@ -45,7 +45,7 @@ fn sample_event(id: u64, entity: EntityRef) -> Event {
         name: "buffer/edited".into(),
         target: Some(entity),
         payload: EventPayload::BufferEdited,
-        provenance: Provenance::new(SourceId::Tui, id.saturating_mul(1_000), None).unwrap(),
+        provenance: Provenance::new(ActorIdentity::Tui, id.saturating_mul(1_000), None).unwrap(),
     }
 }
 
@@ -57,7 +57,7 @@ async fn erroring_behavior_is_contained_and_dispatcher_continues() {
     let tainted_fact = Fact {
         key: tainted_key.clone(),
         value: FactValue::Bool(true),
-        provenance: Provenance::new(SourceId::Behavior(fixture_id.clone()), 42, None).unwrap(),
+        provenance: Provenance::new(ActorIdentity::behavior(fixture_id.clone()), 42, None).unwrap(),
     };
 
     let mut dispatcher = Dispatcher::new();

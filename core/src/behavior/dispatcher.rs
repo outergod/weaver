@@ -188,7 +188,7 @@ fn _trace_sequence_used() -> TraceSequence {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::provenance::SourceId;
+    use crate::provenance::ActorIdentity;
     use crate::types::entity_ref::EntityRef;
     use crate::types::event::EventPayload;
     use crate::types::ids::EventId;
@@ -201,7 +201,7 @@ mod tests {
             name: "buffer/edited".into(),
             target: Some(EntityRef::new(1)),
             payload: EventPayload::BufferEdited,
-            provenance: Provenance::new(SourceId::Tui, 100, None).unwrap(),
+            provenance: Provenance::new(ActorIdentity::Tui, 100, None).unwrap(),
         };
         d.process_event(event).await;
         let trace_arc = d.trace();

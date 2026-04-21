@@ -16,6 +16,7 @@ publish = false
 weaver_core = { path = "../core" }
 tokio.workspace = true
 ciborium.workspace = true
+uuid.workspace = true
 libc = "0.2"
 
 [[test]]

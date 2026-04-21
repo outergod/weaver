@@ -12,7 +12,7 @@ use weaver_core::behavior::dirty_tracking::DirtyTrackingBehavior;
 use weaver_core::behavior::dispatcher::Dispatcher;
 use weaver_core::fact_space::FactStore;
 use weaver_core::inspect::inspect_fact;
-use weaver_core::provenance::{Provenance, SourceId};
+use weaver_core::provenance::{ActorIdentity, Provenance};
 use weaver_core::types::entity_ref::EntityRef;
 use weaver_core::types::event::{Event, EventPayload};
 use weaver_core::types::fact::FactKey;
@@ -39,7 +39,8 @@ fn run(events: &[bool]) -> Option<(String, u64, usize)> {
                 name: name.into(),
                 target: Some(entity),
                 payload,
-                provenance: Provenance::new(SourceId::Tui, (i as u64 + 1) * 1_000, None).unwrap(),
+                provenance: Provenance::new(ActorIdentity::Tui, (i as u64 + 1) * 1_000, None)
+                    .unwrap(),
             })
             .await;
         }

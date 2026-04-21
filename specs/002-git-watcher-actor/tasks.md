@@ -42,13 +42,13 @@ Markers apply in addition to `[P]` and `[Story]`:
 
 **Purpose**: Add the `git-watcher` crate to the workspace and wire in new dependencies. Make `cargo build --workspace` succeed with a stubbed `fn main()`.
 
-- [ ] T001 Update workspace `Cargo.toml` to add `git-watcher` as a new workspace member; add `uuid = "1"` (default-features = false, features = `["v4"]`) and `gix = "0.6x"` (pin current minor version per research §1) to `[workspace.dependencies]`; add `humantime = "2"` for `--poll-interval` parsing
-- [ ] T002 [P] Create `git-watcher/Cargo.toml` with `[package]` declaring `name = "weaver-git-watcher"`, `edition.workspace = true`, `license = "AGPL-3.0-or-later"`; declare `[[bin]]` target named `weaver-git-watcher`; depend on `core` (for shared types) + `tokio` + `clap` + `miette` + `thiserror` + `tracing` + `tracing-subscriber` + `ciborium` + `gix` + `uuid` + `humantime`
-- [ ] T003 [P] Create `git-watcher/build.rs` invoking `vergen` (shared workspace dep) to emit `VERGEN_GIT_SHA`, `VERGEN_GIT_DIRTY`, `VERGEN_BUILD_TIMESTAMP`, `VERGEN_CARGO_DEBUG` per L2 P11
-- [ ] T004 [P] Create `git-watcher/src/lib.rs` with empty module declarations (`pub mod model; pub mod observer; pub mod publisher; pub mod cli;`) so integration tests can import watcher types
-- [ ] T005 [P] Create `git-watcher/src/main.rs` with minimal `fn main() -> Result<(), miette::Report>` that calls `weaver_git_watcher::cli::run()`
-- [ ] T006 [P] Create `git-watcher/README.md` briefly describing role, usage, and a pointer to `specs/002-git-watcher-actor/`
-- [ ] T007 Verify `cargo build --workspace` succeeds after T001–T006; `cargo lint` and `cargo fmt-check` are clean
+- [X] T001 Update workspace `Cargo.toml` to add `git-watcher` as a new workspace member; add `uuid = "1"` (default-features = false, features = `["v4"]`) and `gix = "0.6x"` (pin current minor version per research §1) to `[workspace.dependencies]`; add `humantime = "2"` for `--poll-interval` parsing
+- [X] T002 [P] Create `git-watcher/Cargo.toml` with `[package]` declaring `name = "weaver-git-watcher"`, `edition.workspace = true`, `license = "AGPL-3.0-or-later"`; declare `[[bin]]` target named `weaver-git-watcher`; depend on `core` (for shared types) + `tokio` + `clap` + `miette` + `thiserror` + `tracing` + `tracing-subscriber` + `ciborium` + `gix` + `uuid` + `humantime`
+- [X] T003 [P] Create `git-watcher/build.rs` invoking `vergen` (shared workspace dep) to emit `VERGEN_GIT_SHA`, `VERGEN_GIT_DIRTY`, `VERGEN_BUILD_TIMESTAMP`, `VERGEN_CARGO_DEBUG` per L2 P11
+- [X] T004 [P] Create `git-watcher/src/lib.rs` with empty module declarations (`pub mod model; pub mod observer; pub mod publisher; pub mod cli;`) so integration tests can import watcher types
+- [X] T005 [P] Create `git-watcher/src/main.rs` with minimal `fn main() -> Result<(), miette::Report>` that calls `weaver_git_watcher::cli::run()`
+- [X] T006 [P] Create `git-watcher/README.md` briefly describing role, usage, and a pointer to `specs/002-git-watcher-actor/`
+- [X] T007 Verify `cargo build --workspace` succeeds after T001–T006; `cargo lint` and `cargo fmt-check` are clean
 
 **Checkpoint**: The workspace compiles with a stub watcher binary that does nothing. Ready for Phase 2.
 
@@ -62,45 +62,45 @@ Markers apply in addition to `[P]` and `[Story]`:
 
 ### Type migration (core)
 
-- [ ] T008 [P] Replace `SourceId` in `core/src/provenance.rs` with a new `ActorIdentity` enum carrying variants `Core`, `Behavior(BehaviorId)`, `Tui`, `Service { service_id: String, instance_id: Uuid }`, `User(UserId)`, `Host { host_id: String, hosted_origin: HostedOrigin }`, `Agent { agent_id: String, on_behalf_of: Option<Box<ActorIdentity>> }` — see `data-model.md` **{surface:bus} {schema-migration}**
-- [ ] T009 [P] Define `UserId(String)`, `HostedOrigin { file, location, runtime_version }` helper types in `core/src/provenance.rs` alongside `ActorIdentity`
-- [ ] T010 [P] Update `Provenance` struct in `core/src/provenance.rs` to use `source: ActorIdentity` (replacing `source: SourceId`); preserve `timestamp_ns` and `causal_parent` fields unchanged
-- [ ] T011 Derive `serde::Serialize + Deserialize` with `#[serde(tag = "type", rename_all = "kebab-case")]` on `ActorIdentity` so CBOR + JSON produce the adjacent-tagged form documented in `contracts/bus-messages.md` **{surface:bus}**
-- [ ] T012 [P] [P] Validate constructor: `ActorIdentity::service(id: &str, instance: Uuid)` rejects empty or non-kebab-case `service_id` with a structured error (per Amendment 5); add in `core/src/provenance.rs`
-- [ ] T013 Wire the new CBOR tag 1002 for `ActorIdentity` in `core/src/bus/codec.rs` (or wherever the Weaver tag registry lives); see `contracts/bus-messages.md` **{surface:bus}**
+- [X] T008 [P] Replace `SourceId` in `core/src/provenance.rs` with a new `ActorIdentity` enum carrying variants `Core`, `Behavior(BehaviorId)`, `Tui`, `Service { service_id: String, instance_id: Uuid }`, `User(UserId)`, `Host { host_id: String, hosted_origin: HostedOrigin }`, `Agent { agent_id: String, on_behalf_of: Option<Box<ActorIdentity>> }` — see `data-model.md` **{surface:bus} {schema-migration}**
+- [X] T009 [P] Define `UserId(String)`, `HostedOrigin { file, location, runtime_version }` helper types in `core/src/provenance.rs` alongside `ActorIdentity`
+- [X] T010 [P] Update `Provenance` struct in `core/src/provenance.rs` to use `source: ActorIdentity` (replacing `source: SourceId`); preserve `timestamp_ns` and `causal_parent` fields unchanged
+- [X] T011 Derive `serde::Serialize + Deserialize` with `#[serde(tag = "type", rename_all = "kebab-case")]` on `ActorIdentity` so CBOR + JSON produce the adjacent-tagged form documented in `contracts/bus-messages.md` **{surface:bus}**
+- [X] T012 [P] [P] Validate constructor: `ActorIdentity::service(id: &str, instance: Uuid)` rejects empty or non-kebab-case `service_id` with a structured error (per Amendment 5); add in `core/src/provenance.rs`
+- [X] T013 Wire the new CBOR tag 1002 for `ActorIdentity` in `core/src/bus/codec.rs` (or wherever the Weaver tag registry lives); see `contracts/bus-messages.md` **{surface:bus}**
 
 ### Bus protocol bump
 
-- [ ] T014 [P] Update `Hello.protocol_version` constant in `core/src/types/` from `0x01` to `0x02`; verify exactly one such constant exists in the codebase **{surface:bus}**
-- [ ] T015 Update handshake in `core/src/bus/listener.rs` to reject `Hello.protocol_version != 0x02` with `Error { category: "version-mismatch", detail: "bus protocol 0x02 required; received {n}" }` followed by connection close **{surface:bus}**
+- [X] T014 [P] Update `Hello.protocol_version` constant in `core/src/types/` from `0x01` to `0x02`; verify exactly one such constant exists in the codebase **{surface:bus}**
+- [X] T015 Update handshake in `core/src/bus/listener.rs` to reject `Hello.protocol_version != 0x02` with `Error { category: "version-mismatch", detail: "bus protocol 0x02 required; received {n}" }` followed by connection close **{surface:bus}**
 
 ### LifecycleSignal extension
 
-- [ ] T016 [P] Extend `LifecycleSignal` enum in `core/src/types/lifecycle.rs` with three additional variants: `Degraded`, `Unavailable`, `Restarting` (kebab-case on the wire per Amendment 5); preserve existing `Started`, `Ready`, `Stopped` **{surface:bus}**
-- [ ] T017 [P] Update any exhaustive `match` on `LifecycleSignal` in core, TUI, and tests to handle the new variants (default: pass through / ignore; only the watcher will emit the new ones)
+- [X] T016 [P] Extend `LifecycleSignal` enum in `core/src/types/lifecycle.rs` with three additional variants: `Degraded`, `Unavailable`, `Restarting` (kebab-case on the wire per Amendment 5); preserve existing `Started`, `Ready`, `Stopped` **{surface:bus}**
+- [X] T017 [P] Update any exhaustive `match` on `LifecycleSignal` in core, TUI, and tests to handle the new variants (default: pass through / ignore; only the watcher will emit the new ones)
 
 ### Trace + inspection integration
 
-- [ ] T018 Update `core/src/trace/store.rs` so every `TraceEntry` carries `ActorIdentity` in provenance; reverse causal indexes unchanged in shape
-- [ ] T019 Update `core/src/inspect/` so `InspectionDetail` carries enough information to reconstruct the originating actor's identity: either `asserting_behavior: BehaviorId` OR `asserting_service: String` + `asserting_instance: Uuid` — not both. See `contracts/cli-surfaces.md` **{surface:cli}**
+- [X] T018 Update `core/src/trace/store.rs` so every `TraceEntry` carries `ActorIdentity` in provenance; reverse causal indexes unchanged in shape
+- [ ] T019 Update `core/src/inspect/` so `InspectionDetail` carries enough information to reconstruct the originating actor's identity: either `asserting_behavior: BehaviorId` OR `asserting_service: String` + `asserting_instance: Uuid` — not both. See `contracts/cli-surfaces.md` **{surface:cli}** — **deferred to the Phase 3 boundary**: load-bearing once the watcher publishes service-authored facts (Phase 3 T041/T055). Slice-001 behavior-authored facts continue to work with the existing `InspectionDetail` shape, so Phase 2 checkpoint is not blocked.
 
 ### Property tests for the migration
 
-- [ ] T020 [P] Property test in `core/tests/property/actor_identity_wire.rs`: round-trip every `ActorIdentity` variant through CBOR; assert equality on decode **{surface:bus}**
-- [ ] T021 [P] Property test in `core/tests/property/actor_identity_json.rs`: round-trip every `ActorIdentity` variant through `serde_json`; assert JSON field names are kebab-case (`service-id`, `instance-id`, `hosted-origin`)
-- [ ] T022 [P] Property test in `core/tests/property/provenance_wire.rs` (existing file): extend to cover `ActorIdentity::Service` variants alongside `Core` / `Behavior` / `Tui`
+- [X] T020 [P] Property test in `core/tests/property/actor_identity_wire.rs`: round-trip every `ActorIdentity` variant through CBOR; assert equality on decode **{surface:bus}**
+- [X] T021 [P] Property test in `core/tests/property/actor_identity_json.rs`: round-trip every `ActorIdentity` variant through `serde_json`; assert JSON field names are kebab-case (`service-id`, `instance-id`, `hosted-origin`)
+- [X] T022 [P] Property test in `core/tests/property/provenance_wire.rs` (existing file): extend to cover `ActorIdentity::Service` variants alongside `Core` / `Behavior` / `Tui`
 
 ### Slice 001 non-regression
 
-- [ ] T023 Update slice 001 call sites in `core/src/behavior/dirty_tracking.rs` (and similar) that constructed `SourceId::Behavior(...)` to construct `ActorIdentity::Behavior(...)`; no behavioural change
-- [ ] T024 Update all test fixtures in `core/tests/` and `tests/e2e/` that reference `SourceId::*` to use the corresponding `ActorIdentity::*` variant; no semantic change
-- [ ] T025 Verify slice 001 tests still pass: `cargo test --workspace` — any regression here is a migration bug, not a new-feature failure
-- [ ] T026 Verify `weaver inspect 1:buffer/dirty` still returns a valid result against a running slice-001-style core (ad hoc smoke; no new test file needed)
+- [X] T023 Update slice 001 call sites in `core/src/behavior/dirty_tracking.rs` (and similar) that constructed `SourceId::Behavior(...)` to construct `ActorIdentity::Behavior(...)`; no behavioural change
+- [X] T024 Update all test fixtures in `core/tests/` and `tests/e2e/` that reference `SourceId::*` to use the corresponding `ActorIdentity::*` variant; no semantic change
+- [X] T025 Verify slice 001 tests still pass: `cargo test --workspace` — any regression here is a migration bug, not a new-feature failure
+- [X] T026 Verify `weaver inspect 1:buffer/dirty` still returns a valid result against a running slice-001-style core (ad hoc smoke; no new test file needed)
 
 ### Version + changelog
 
-- [ ] T027 Update `weaver --version` output in `core/src/cli/version.rs` to emit `bus_protocol: "0.2.0"` (human + JSON forms); see `contracts/cli-surfaces.md` **{surface:cli}**
-- [ ] T028 Update `CHANGELOG.md` with entries: `## Bus protocol 0.2.0 - 2026-04-21` (provenance shape change; `ActorIdentity` replaces `SourceId::External`; new CBOR tag 1002; `LifecycleSignal` gains three variants); `## CLI surface - 2026-04-21` (`weaver inspect` JSON output adds `asserting_service`/`asserting_instance` for service-authored facts) **{surface:bus} {surface:cli}**
+- [X] T027 Update `weaver --version` output in `core/src/cli/version.rs` to emit `bus_protocol: "0.2.0"` (human + JSON forms); see `contracts/cli-surfaces.md` **{surface:cli}**
+- [X] T028 Update `CHANGELOG.md` with entries: `## Bus protocol 0.2.0 - 2026-04-21` (provenance shape change; `ActorIdentity` replaces `SourceId::External`; new CBOR tag 1002; `LifecycleSignal` gains three variants); `## CLI surface - 2026-04-21` (`weaver inspect` JSON output adds `asserting_service`/`asserting_instance` for service-authored facts) **{surface:bus} {surface:cli}**
 
 **Checkpoint**: Foundation ready. `cargo test --workspace` green. Bus protocol is v0.2. All slice-001 scenarios continue to pass under the new wire.
 

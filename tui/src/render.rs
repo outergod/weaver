@@ -29,7 +29,7 @@ use crossterm::{cursor, execute, queue, style::Print, terminal};
 use miette::{IntoDiagnostic, miette};
 use tokio::sync::mpsc;
 
-use weaver_core::provenance::SourceId;
+use weaver_core::provenance::ActorIdentity;
 use weaver_core::types::entity_ref::EntityRef;
 use weaver_core::types::fact::{Fact, FactKey, FactValue};
 use weaver_core::types::ids::EventId;
@@ -474,10 +474,22 @@ fn format_value(v: &FactValue) -> String {
 
 fn annotation(fact: &Fact, asserted_at_wall_ns: u64, stale: bool) -> String {
     let behavior = match &fact.provenance.source {
-        SourceId::Behavior(id) => id.as_str().to_string(),
-        SourceId::Core => "core".into(),
-        SourceId::Tui => "tui".into(),
-        SourceId::External(s) => format!("external:{s}"),
+        ActorIdentity::Behavior { id } => id.as_str().to_string(),
+        ActorIdentity::Core => "core".into(),
+        ActorIdentity::Tui => "tui".into(),
+        ActorIdentity::Service {
+            service_id,
+            instance_id,
+        } => {
+            // Show the service + a short instance suffix per
+            // contracts/cli-surfaces.md TUI rendering rules.
+            let inst = instance_id.as_hyphenated().to_string();
+            let short = inst.get(..8).unwrap_or(inst.as_str());
+            format!("service {service_id} (inst {short})")
+        }
+        ActorIdentity::User { id } => format!("user {id}"),
+        ActorIdentity::Host { host_id, .. } => format!("host {host_id}"),
+        ActorIdentity::Agent { agent_id, .. } => format!("agent {agent_id}"),
     };
     let event = match fact.provenance.causal_parent {
         Some(EventId { .. }) => format!("event {}", fact.provenance.causal_parent.unwrap()),
