@@ -46,8 +46,11 @@ async fn asserted_fact_is_inspectable_with_full_provenance() {
     assert_eq!(detail.source_event, event_id);
     assert_eq!(
         detail.asserting_behavior,
-        BehaviorId::new("core/dirty-tracking"),
+        Some(BehaviorId::new("core/dirty-tracking")),
     );
+    // Slice 002: service/instance fields are absent for behavior-authored facts.
+    assert!(detail.asserting_service.is_none());
+    assert!(detail.asserting_instance.is_none());
     assert!(detail.asserted_at_ns > 0, "asserted_at_ns must be set");
     // trace_sequence is u64; validate it points at a real entry.
     assert!(

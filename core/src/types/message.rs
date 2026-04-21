@@ -133,12 +133,95 @@ pub struct ErrorMsg {
     pub context: Option<String>,
 }
 
+/// Provenance detail returned by an `InspectRequest`.
+///
+/// Slice 002 extends the shape so service-authored facts render
+/// alongside behavior-authored ones. The invariant is: exactly one of
+/// the `asserting_*` field groups is populated per response.
+///
+/// - **Behavior-authored** (slice 001 shape): `asserting_behavior` is
+///   `Some(id)`; `asserting_service` / `asserting_instance` are
+///   `None`. Used when a registered in-core behavior fires and asserts
+///   the fact through the dispatcher.
+/// - **Service-authored** (slice 002, e.g. `weaver-git-watcher`):
+///   `asserting_service` is `Some("git-watcher")` and
+///   `asserting_instance` is `Some(<uuid-v4>)`; `asserting_behavior`
+///   is `None`. Used when the fact arrives via a bare `FactAssert`
+///   from an external service on the bus.
+/// - **Other actor kinds** (`Core` / `Tui` / `User` / `Host` /
+///   `Agent`): all three `asserting_*` fields are `None`, indicating
+///   the fact is attributable to an actor whose identity doesn't
+///   naturally reduce to "behavior" or "service" semantics. Rendering
+///   falls back on `source_event` + the trace entry.
+///
+/// JSON wire shape uses `#[serde(skip_serializing_if = "Option::is_none")]`
+/// so each variant renders as a flat object without the other
+/// variant's fields — matches `specs/002-git-watcher-actor/contracts/cli-surfaces.md`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InspectionDetail {
     pub source_event: EventId,
-    pub asserting_behavior: BehaviorId,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub asserting_behavior: Option<BehaviorId>,
+    #[serde(skip_serializing_if = "Option::is_none", rename = "asserting_service")]
+    pub asserting_service: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", rename = "asserting_instance")]
+    pub asserting_instance: Option<uuid::Uuid>,
     pub asserted_at_ns: u64,
     pub trace_sequence: u64,
+}
+
+impl InspectionDetail {
+    /// Build an `InspectionDetail` for a behavior-authored fact.
+    /// Slice-001 shape. All `asserting_service` / `asserting_instance`
+    /// fields are `None`.
+    pub fn behavior(
+        source_event: EventId,
+        asserting_behavior: BehaviorId,
+        asserted_at_ns: u64,
+        trace_sequence: u64,
+    ) -> Self {
+        Self {
+            source_event,
+            asserting_behavior: Some(asserting_behavior),
+            asserting_service: None,
+            asserting_instance: None,
+            asserted_at_ns,
+            trace_sequence,
+        }
+    }
+
+    /// Build an `InspectionDetail` for a service-authored fact.
+    /// Slice-002 shape. The `asserting_behavior` field is `None`.
+    pub fn service(
+        source_event: EventId,
+        service_id: String,
+        instance_id: uuid::Uuid,
+        asserted_at_ns: u64,
+        trace_sequence: u64,
+    ) -> Self {
+        Self {
+            source_event,
+            asserting_behavior: None,
+            asserting_service: Some(service_id),
+            asserting_instance: Some(instance_id),
+            asserted_at_ns,
+            trace_sequence,
+        }
+    }
+
+    /// Build an `InspectionDetail` for a fact whose actor kind does
+    /// not reduce to behavior or service (e.g. Core-authored or other
+    /// reserved variants). All three `asserting_*` fields are `None`.
+    pub fn opaque(source_event: EventId, asserted_at_ns: u64, trace_sequence: u64) -> Self {
+        Self {
+            source_event,
+            asserting_behavior: None,
+            asserting_service: None,
+            asserting_instance: None,
+            asserted_at_ns,
+            trace_sequence,
+        }
+    }
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -200,12 +283,12 @@ mod tests {
             },
             BusMessage::InspectResponse {
                 request_id: 7,
-                result: Ok(InspectionDetail {
-                    source_event: EventId::new(42),
-                    asserting_behavior: BehaviorId::new("core/dirty-tracking"),
-                    asserted_at_ns: 1000,
-                    trace_sequence: 17,
-                }),
+                result: Ok(InspectionDetail::behavior(
+                    EventId::new(42),
+                    BehaviorId::new("core/dirty-tracking"),
+                    1000,
+                    17,
+                )),
             },
             BusMessage::InspectResponse {
                 request_id: 8,

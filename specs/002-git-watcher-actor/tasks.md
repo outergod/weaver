@@ -82,7 +82,7 @@ Markers apply in addition to `[P]` and `[Story]`:
 ### Trace + inspection integration
 
 - [X] T018 Update `core/src/trace/store.rs` so every `TraceEntry` carries `ActorIdentity` in provenance; reverse causal indexes unchanged in shape
-- [ ] T019 Update `core/src/inspect/` so `InspectionDetail` carries enough information to reconstruct the originating actor's identity: either `asserting_behavior: BehaviorId` OR `asserting_service: String` + `asserting_instance: Uuid` — not both. See `contracts/cli-surfaces.md` **{surface:cli}** — **deferred to the Phase 3 boundary**: load-bearing once the watcher publishes service-authored facts (Phase 3 T041/T055). Slice-001 behavior-authored facts continue to work with the existing `InspectionDetail` shape, so Phase 2 checkpoint is not blocked.
+- [X] T019 Update `core/src/inspect/` so `InspectionDetail` carries enough information to reconstruct the originating actor's identity: either `asserting_behavior: BehaviorId` OR `asserting_service: String` + `asserting_instance: Uuid` — not both. See `contracts/cli-surfaces.md` **{surface:cli}** — **deferred to the Phase 3 boundary**: load-bearing once the watcher publishes service-authored facts (Phase 3 T041/T055). Slice-001 behavior-authored facts continue to work with the existing `InspectionDetail` shape, so Phase 2 checkpoint is not blocked.
 
 ### Property tests for the migration
 
@@ -114,31 +114,31 @@ Markers apply in addition to `[P]` and `[Story]`:
 
 ### Watcher: data model and observation
 
-- [ ] T029 [P] [US1] Implement `WorkingCopyState` enum in `git-watcher/src/model.rs` with variants `OnBranch { name }`, `Detached { commit }`, `Unborn { intended_branch_name }`; derive common traits (`Debug`, `Clone`, `Eq`, `PartialEq`)
-- [ ] T030 [P] [US1] Implement conversion `TryFrom<gix::head::Head<'_>> for WorkingCopyState` in `git-watcher/src/model.rs`; map `gix::head::Kind::Symbolic` → `OnBranch`, `Kind::Detached` → `Detached`, `Kind::Unborn` → `Unborn`
-- [ ] T031 [US1] Unit tests in `git-watcher/tests/model.rs` covering all three `WorkingCopyState` variants from synthetic `gix` fixture repositories
-- [ ] T032 [P] [US1] Implement `git-watcher/src/observer.rs` with a `RepoObserver` struct owning a `gix::Repository` handle and exposing `fn observe(&self) -> Result<Observation, ObserverError>` returning `{ state: WorkingCopyState, dirty: bool, head_commit: Option<String> }` **{latency:interactive}**
-- [ ] T033 [US1] Dirty-check implementation in `RepoObserver::observe`: uses `gix::status` (or `gix::diff::index::*`) configured to match Clarification Q5 — working tree OR index differs from HEAD, untracked files EXCLUDED
-- [ ] T034 [US1] Head-commit resolution: `repo.rev_parse_single("HEAD")` → hex string; `None` for `Unborn` state
-- [ ] T035 [P] [US1] Scenario test in `git-watcher/tests/observer.rs`: build a fresh temp repo via `tempfile::TempDir` + `std::process::Command::new("git")` for setup; assert `observe()` returns expected `Observation` for each of: freshly-initialized (`Unborn`), committed-on-main (`OnBranch`), detached-HEAD, dirty-modified-tracked, dirty-staged-only, dirty-modified-and-staged, dirty-untracked-only (→ dirty=false per Q5)
+- [X] T029 [P] [US1] Implement `WorkingCopyState` enum in `git-watcher/src/model.rs` with variants `OnBranch { name }`, `Detached { commit }`, `Unborn { intended_branch_name }`; derive common traits (`Debug`, `Clone`, `Eq`, `PartialEq`)
+- [X] T030 [P] [US1] Implement conversion `TryFrom<gix::head::Head<'_>> for WorkingCopyState` in `git-watcher/src/model.rs`; map `gix::head::Kind::Symbolic` → `OnBranch`, `Kind::Detached` → `Detached`, `Kind::Unborn` → `Unborn`
+- [X] T031 [US1] Unit tests in `git-watcher/tests/model.rs` covering all three `WorkingCopyState` variants from synthetic `gix` fixture repositories
+- [X] T032 [P] [US1] Implement `git-watcher/src/observer.rs` with a `RepoObserver` struct owning a `gix::Repository` handle and exposing `fn observe(&self) -> Result<Observation, ObserverError>` returning `{ state: WorkingCopyState, dirty: bool, head_commit: Option<String> }` **{latency:interactive}**
+- [X] T033 [US1] Dirty-check implementation in `RepoObserver::observe`: uses `gix::status` (or `gix::diff::index::*`) configured to match Clarification Q5 — working tree OR index differs from HEAD, untracked files EXCLUDED
+- [X] T034 [US1] Head-commit resolution: `repo.rev_parse_single("HEAD")` → hex string; `None` for `Unborn` state
+- [X] T035 [P] [US1] Scenario test in `git-watcher/tests/observer.rs`: build a fresh temp repo via `tempfile::TempDir` + `std::process::Command::new("git")` for setup; assert `observe()` returns expected `Observation` for each of: freshly-initialized (`Unborn`), committed-on-main (`OnBranch`), detached-HEAD, dirty-modified-tracked, dirty-staged-only, dirty-modified-and-staged, dirty-untracked-only (→ dirty=false per Q5)
 
 ### Watcher: CLI + startup
 
-- [ ] T036 [US1] Implement `git-watcher/src/cli.rs` with `clap` derive: positional `<REPOSITORY-PATH>`, `--poll-interval <duration>` (parsed via `humantime::parse_duration`, default `250ms`), `--socket <path>`, `--output <format>` (`human` | `json`), `-v/--verbose`, `--version` **{surface:cli}**
-- [ ] T037 [US1] `--version` output in `git-watcher/src/cli.rs` mirroring `weaver --version` plus `service_id: "git-watcher"` field; both human and JSON forms per `contracts/cli-surfaces.md`
-- [ ] T038 [US1] `cli::run()` in `git-watcher/src/cli.rs`: parse args; canonicalize repo path; fail with exit-code 1 + `WEAVER-GW-001` if path does not exist or is not a git repo; call into `publisher::run`
+- [X] T036 [US1] Implement `git-watcher/src/cli.rs` with `clap` derive: positional `<REPOSITORY-PATH>`, `--poll-interval <duration>` (parsed via `humantime::parse_duration`, default `250ms`), `--socket <path>`, `--output <format>` (`human` | `json`), `-v/--verbose`, `--version` **{surface:cli}**
+- [X] T037 [US1] `--version` output in `git-watcher/src/cli.rs` mirroring `weaver --version` plus `service_id: "git-watcher"` field; both human and JSON forms per `contracts/cli-surfaces.md`
+- [X] T038 [US1] `cli::run()` in `git-watcher/src/cli.rs`: parse args; canonicalize repo path; fail with exit-code 1 + `WEAVER-GW-001` if path does not exist or is not a git repo; call into `publisher::run`
 
 ### Watcher: publisher (bus client + lifecycle)
 
-- [ ] T039 [US1] Implement `git-watcher/src/publisher.rs` with `Publisher` struct owning the Unix-socket stream, an `ActorIdentity::Service { service_id: "git-watcher", instance_id: Uuid::new_v4() }`, and the observer handle
-- [ ] T040 [US1] Handshake in `Publisher::connect`: send `Hello { protocol_version: 0x02, client_kind: "git-watcher" }`; await `Lifecycle(Started)` then `Lifecycle(Ready)`; exit-code 2 + `WEAVER-GW-002` on version mismatch or connection failure
-- [ ] T041 [US1] Bootstrap publication in `Publisher::publish_initial`: on `Ready`, assert `repo/path <canonical-path>`, `repo/head-commit <sha>` (if Some), the single `repo/state/*` variant matching `WorkingCopyState`, `repo/dirty <bool>`, `repo/observable true`, `watcher/status ready`. All with `Provenance.source = self.identity`, `causal_parent: None`. **{surface:fact} {schema-migration}**
-- [ ] T042 [US1] Poll loop in `Publisher::run`: wake every `poll_interval`; call `observer.observe()`; compare against last-known state; on change, publish diffs (see T043 for transition shape)
-- [ ] T043 [US1] State-transition publishing: when `WorkingCopyState` variant changes, emit exactly one `FactRetract` for the old variant followed by one `FactAssert` for the new variant, both carrying the same `causal_parent` event id (the poll-tick event). Document the two messages MUST be written to the stream before any intervening fact publishes **{retraction} {surface:fact}**
-- [ ] T044 [US1] Non-variant-change updates (same `repo/state/*` but value changed — e.g., branch head moved): single `FactAssert` replacing the prior value; `causal_parent: Some(poll-tick)`
-- [ ] T045 [US1] `repo/dirty` + `repo/head-commit` updates: `FactAssert` replacing the prior value on change; no retract needed (those attributes have a single-value-at-a-time semantic without discriminator)
-- [ ] T046 [US1] Degradation path: on `observer.observe()` error, emit `Lifecycle(Degraded)` + assert `repo/observable false`; retain prior `repo/state/*` fact (stale but observably so); re-attempt next poll. On recovery, assert `repo/observable true` + re-evaluate state via regular path **{retraction}**
-- [ ] T047 [US1] Shutdown handling: on SIGTERM/SIGINT or bus disconnect, retract every `repo/*` fact authored by this instance (tracked via a `HashSet<FactKey>` maintained alongside publishes); emit `Lifecycle(Unavailable)` then `Lifecycle(Stopped)`; exit 0 **{retraction}**
+- [X] T039 [US1] Implement `git-watcher/src/publisher.rs` with `Publisher` struct owning the Unix-socket stream, an `ActorIdentity::Service { service_id: "git-watcher", instance_id: Uuid::new_v4() }`, and the observer handle
+- [X] T040 [US1] Handshake in `Publisher::connect`: send `Hello { protocol_version: 0x02, client_kind: "git-watcher" }`; await `Lifecycle(Started)` then `Lifecycle(Ready)`; exit-code 2 + `WEAVER-GW-002` on version mismatch or connection failure
+- [X] T041 [US1] Bootstrap publication in `Publisher::publish_initial`: on `Ready`, assert `repo/path <canonical-path>`, `repo/head-commit <sha>` (if Some), the single `repo/state/*` variant matching `WorkingCopyState`, `repo/dirty <bool>`, `repo/observable true`, `watcher/status ready`. All with `Provenance.source = self.identity`, `causal_parent: None`. **{surface:fact} {schema-migration}**
+- [X] T042 [US1] Poll loop in `Publisher::run`: wake every `poll_interval`; call `observer.observe()`; compare against last-known state; on change, publish diffs (see T043 for transition shape)
+- [X] T043 [US1] State-transition publishing: when `WorkingCopyState` variant changes, emit exactly one `FactRetract` for the old variant followed by one `FactAssert` for the new variant, both carrying the same `causal_parent` event id (the poll-tick event). Document the two messages MUST be written to the stream before any intervening fact publishes **{retraction} {surface:fact}**
+- [X] T044 [US1] Non-variant-change updates (same `repo/state/*` but value changed — e.g., branch head moved): single `FactAssert` replacing the prior value; `causal_parent: Some(poll-tick)`
+- [X] T045 [US1] `repo/dirty` + `repo/head-commit` updates: `FactAssert` replacing the prior value on change; no retract needed (those attributes have a single-value-at-a-time semantic without discriminator)
+- [X] T046 [US1] Degradation path: on `observer.observe()` error, emit `Lifecycle(Degraded)` + assert `repo/observable false`; retain prior `repo/state/*` fact (stale but observably so); re-attempt next poll. On recovery, assert `repo/observable true` + re-evaluate state via regular path **{retraction}**
+- [X] T047 [US1] Shutdown handling: on SIGTERM/SIGINT or bus disconnect, retract every `repo/*` fact authored by this instance (tracked via a `HashSet<FactKey>` maintained alongside publishes); emit `Lifecycle(Unavailable)` then `Lifecycle(Stopped)`; exit 0 **{retraction}**
 
 ### Core: authority-conflict mechanism (FR-009)
 

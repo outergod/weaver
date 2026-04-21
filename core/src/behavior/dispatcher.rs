@@ -162,6 +162,45 @@ impl Dispatcher {
     }
 }
 
+impl Dispatcher {
+    /// Service-originated fact assertion. Slice 002: external bus
+    /// clients (e.g. `weaver-git-watcher`) publish authoritative facts
+    /// directly. The fact's provenance carries the originating
+    /// [`crate::provenance::ActorIdentity::Service`]; the dispatcher
+    /// stores the fact and broadcasts to subscribers.
+    ///
+    /// Appends a `TracePayload::FactAsserted` entry but no
+    /// `BehaviorFired` wrapper (there is no behavior firing — the
+    /// fact comes straight off the bus). This is what makes the
+    /// inspection path's service-branch produce a clean
+    /// `InspectionDetail::service(...)` result.
+    pub async fn publish_from_service(&self, fact: Fact) {
+        let now = now_ns();
+        let _ = self.sequence.next();
+        let mut fact_store = self.fact_store.lock().await;
+        let mut trace = self.trace.lock().await;
+        trace.append(now, TracePayload::FactAsserted { fact: fact.clone() });
+        fact_store.assert(fact);
+    }
+
+    /// Service-originated fact retraction. Slice 002: counterpart to
+    /// [`Self::publish_from_service`].
+    pub async fn retract_from_service(&self, key: FactKey, provenance: Provenance) {
+        let now = now_ns();
+        let _ = self.sequence.next();
+        let mut fact_store = self.fact_store.lock().await;
+        let mut trace = self.trace.lock().await;
+        trace.append(
+            now,
+            TracePayload::FactRetracted {
+                key: key.clone(),
+                provenance: provenance.clone(),
+            },
+        );
+        fact_store.retract(&key, provenance);
+    }
+}
+
 impl Default for Dispatcher {
     fn default() -> Self {
         Self::new()

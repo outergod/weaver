@@ -417,11 +417,15 @@ fn draw<W: Write>(w: &mut W, state: &AppState) -> std::io::Result<()> {
                     &mut row,
                     format!("│   source_event:       {}", detail.source_event),
                 )?;
-                emit(
-                    w,
-                    &mut row,
-                    format!("│   asserting_behavior: {}", detail.asserting_behavior),
-                )?;
+                if let Some(b) = &detail.asserting_behavior {
+                    emit(w, &mut row, format!("│   asserting_behavior: {b}"))?;
+                }
+                if let Some(svc) = &detail.asserting_service {
+                    emit(w, &mut row, format!("│   asserting_service:  {svc}"))?;
+                }
+                if let Some(inst) = &detail.asserting_instance {
+                    emit(w, &mut row, format!("│   asserting_instance: {inst}"))?;
+                }
                 emit(
                     w,
                     &mut row,

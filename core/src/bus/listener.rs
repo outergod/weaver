@@ -281,9 +281,21 @@ async fn handle_client_message(
             .await?;
             Ok(None)
         }
-        BusMessage::FactAssert(_)
-        | BusMessage::FactRetract { .. }
-        | BusMessage::SubscribeAck { .. }
+        BusMessage::FactAssert(fact) => {
+            // Slice 002: services can publish authoritative facts
+            // directly. The dispatcher stores + broadcasts; the
+            // fact's `ActorIdentity::Service` provenance is preserved.
+            // (Authority-conflict tracking per FR-009 is a later
+            // refinement; the current MVP accepts all service
+            // assertions.)
+            dispatcher.publish_from_service(fact).await;
+            Ok(None)
+        }
+        BusMessage::FactRetract { key, provenance } => {
+            dispatcher.retract_from_service(key, provenance).await;
+            Ok(None)
+        }
+        BusMessage::SubscribeAck { .. }
         | BusMessage::InspectResponse { .. }
         | BusMessage::Lifecycle(_)
         | BusMessage::Error(_)
