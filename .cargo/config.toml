@@ -1,0 +1,11 @@
+# Cargo aliases — per L2 constitution Amendment 6 (code quality gates).
+#
+# These aliases match the invocations CI enforces. Running them locally
+# surfaces clippy / rustfmt issues before push.
+
+[alias]
+# Lint the entire workspace at -D warnings — matches CI exactly.
+lint = "clippy --all-targets --workspace -- -D warnings"
+
+# Check formatting without rewriting — matches CI exactly.
+fmt-check = "fmt --all -- --check"

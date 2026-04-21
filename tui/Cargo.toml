@@ -1,0 +1,31 @@
+[package]
+name = "weaver-tui"
+description = "Weaver TUI — bus client + crossterm renderer for the Hello-fact slice"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[lib]
+name = "weaver_tui"
+path = "src/lib.rs"
+
+[[bin]]
+name = "weaver-tui"
+path = "src/main.rs"
+
+[dependencies]
+weaver_core = { path = "../core" }
+crossterm.workspace = true
+tokio.workspace = true
+ciborium.workspace = true
+ciborium-io.workspace = true
+clap.workspace = true
+miette.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true

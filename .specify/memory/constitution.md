@@ -109,6 +109,174 @@ Out of scope (deferred to later batches or sessions):
   - AC1 (core as semantic bottleneck) — re-evaluate after Batch 3.
   - AC3 (service-promotion ergonomics) — post-MVP engineering work.
   - UQ2 (cursor promotion API) — post-Editor-MVP.
+
+----------------------------------------------------------------------
+AMENDMENT 3 — 2026-04-19 — version 0.3.0 → 0.4.0
+
+Origin: spec-review during /speckit.specify for the Hello-fact slice
+(specs/001-hello-fact/spec.md FR-007 / FR-008 framing tension surfaced
+the missing CLI-vs-bus boundary).
+
+Modified principles:
+  - P5 (Serialization and Open Standards) — added an explicit boundary
+    between CLI structured output (one-shot scripting; snapshot interface)
+    and continuous machine integration (bus-subscriber concern delivered
+    via services). Clarifies that agents, monitoring, introspection
+    clients, and language hosts MUST be designed as bus participants —
+    not as CLI parsers — to inherit delivery-class guarantees,
+    provenance, retraction, lifecycle signals, and reconnect semantics.
+
+L1 / architecture documents updated in lockstep:
+  - None this amendment. The boundary is a constitutional articulation
+    of an architectural shape already implied by docs/02-architecture.md
+    §3.1 (delivery classes) and the overall services-on-the-bus model;
+    no architectural document required new commitments.
+
+Bump rationale: MINOR — materially expanded guidance via a new
+positive constraint about where continuous-integration consumers live.
+Not backward-incompatible (no implementation exists; no consumer is
+relying on the old framing).
+
+Forward-looking implication:
+  - A future "introspection / agent service" slice is anticipated. It
+    will participate as a service on the bus, expose introspection
+    requests/responses, and be the primary surface for continuous
+    machine consumers. Hello-fact (specs/001-hello-fact) is being
+    aligned now so its bus-level inspection capability (FR-008) is
+    forward-compatible without rework.
+
+----------------------------------------------------------------------
+AMENDMENT 4 — 2026-04-20 — version 0.4.0 → 0.5.0
+
+Origin: drift caught during /speckit.implement Phase 1. The scaffold's
+Cargo.toml declared `license = "MIT OR Apache-2.0"` (Rust-ecosystem
+default) while LICENSE clearly specifies AGPL-3.0-or-later. No
+constitutional commitment existed to prevent this drift.
+
+Added:
+  - Additional Constraints: License clause. Weaver is AGPL-3.0-or-later;
+    all workspace members MUST declare that license; inbound
+    dependencies MUST carry AGPL-3.0-or-later-compatible licenses
+    (MIT, Apache-2.0, BSD-*, MPL-2.0, ISC acceptable; GPL-2.0-only,
+    proprietary-only, and other non-reciprocal-incompatible licenses
+    are not). Licensing is treated as a compatibility surface per P7.
+
+L1 / architecture documents updated in lockstep:
+  - None this amendment. Licensing is orthogonal to architecture; it
+    lives at the engineering-discipline layer (L2).
+
+Bump rationale: MINOR — materially expanded guidance. Adds a new
+binding rule about inbound-dependency license compatibility that
+agents and reviewers MUST check on every new dependency. Not
+backward-incompatible since no prior license commitment existed in L2
+to override.
+
+Forward-looking implication:
+  - Phase 1 scaffolding (commit 9924d0d) used the wrong license
+    declaration. The correction lands in a follow-up commit that updates
+    Cargo.toml (workspace root) and amends CHANGELOG.md Phase 1 notes.
+  - Future dependency additions and future member crates MUST honor
+    this clause. Agent contributions in particular (per P21) MUST
+    verify license alignment as part of scaffolding any new crate or
+    proposing any new dependency.
+
+----------------------------------------------------------------------
+AMENDMENT 5 — 2026-04-20 — version 0.5.0 → 0.6.0
+
+Origin: noticed during /speckit.implement Phase 2. Serde derive
+produced snake_case variant-tag values (`fact_assert`, `buffer_edited`,
+`fact_not_found`) while fact attribute strings are kebab-ish
+(`buffer/dirty`). The inconsistency grates in a Lisp-heritage project
+whose composition language is Scheme (Steel). Without a constitutional
+commitment, agents default to Rust's snake_case convention and the
+drift spreads.
+
+Added to Additional Constraints:
+  - Wire vocabulary naming: identifier VALUES on the bus and in CLI
+    structured output follow Lisp/Scheme convention (kebab-case).
+    Applies to event names, fact attributes, action types, behavior
+    identifiers, message-kind discriminators, enum tag values,
+    lifecycle states, error categories, subscription pattern names,
+    output-format names. Behavior identifiers use `/` as namespace
+    separator (e.g., `core/dirty-tracking`, not `core::dirty_tracking`).
+    Struct FIELD NAMES inside structured messages follow the
+    implementing language's idiom (snake_case in Rust, camelCase in
+    JavaScript). Line: protocol-visible values are kebab-case;
+    in-language field names are language-idiomatic.
+
+L1 / architecture documents updated in lockstep:
+  - None this amendment. Naming is orthogonal to architecture; lives at
+    the engineering-discipline layer (L2).
+
+Bump rationale: MINOR — materially expanded guidance. Adds a new
+binding rule about wire-identifier casing that agents and reviewers
+MUST apply to every new fact family, event, action, and behavior ID.
+Not backward-incompatible since slice 001 is unshipped; the follow-up
+commit updates the existing types to honor the convention before any
+external consumer exists.
+
+Forward-looking implication:
+  - Phase 2 scaffold (commit f212bdc) used serde defaults (snake_case
+    variant tags). Follow-up commit adds `#[serde(rename_all =
+    "kebab-case")]` to BusMessage, SubscribePattern, EventPayload,
+    InspectionError, SourceId, OutputFormat — plus updates the two
+    contracts/ docs to reflect kebab-case wire-format examples.
+  - Phase 3 behavior registration (T042) uses `core/dirty-tracking`
+    as the behavior ID, not `core::dirty_tracking`.
+  - Future agents authoring new fact families, actions, or behaviors
+    MUST use kebab-case for all wire-visible names.
+
+----------------------------------------------------------------------
+AMENDMENT 6 — 2026-04-20 — version 0.6.0 → 0.7.0
+
+Origin: mid-implementation observation that T067 (CI) already plans
+`cargo clippy --workspace -- -D warnings` but nothing enforces at
+commit time or even defines a local one-command invocation. Without
+a binding rule, contributors (human or agent) repeatedly push code
+that fails CI; pre-commit hook installation, cargo aliases, and
+rustfmt enforcement are all things each project typically rediscovers.
+The pattern of this slice's prior amendments (4 License, 5 Wire
+vocabulary) — "bind conventions the scaffolding process needs" —
+applies here.
+
+Added to Additional Constraints:
+  - Code quality gates: Rust code MUST pass `cargo clippy
+    --all-targets --workspace -- -D warnings` and
+    `cargo fmt --all -- --check`. CI enforces both as mandatory,
+    unbypassable gate checks. `.cargo/config.toml` defines `cargo
+    lint` and `cargo fmt-check` aliases matching the CI invocations;
+    `scripts/ci.sh` chains lint + fmt-check + build + test (cargo
+    aliases cannot chain multiple subcommands natively). A
+    repo-provided pre-commit hook (`scripts/install-git-hooks.sh`
+    installs it) runs both gates at commit time; opt-in but SHOULD
+    be installed. `git commit --no-verify` is the documented escape
+    valve. Agent contributions MUST run `scripts/ci.sh` before
+    proposing a commit.
+  - Scope: default clippy lints + `-D warnings` is the binding floor.
+    `clippy::pedantic` and `clippy::nursery` are SUGGESTED for new
+    modules but not globally required (too noisy; too opinionated).
+
+L1 / architecture documents updated in lockstep:
+  - None this amendment. Tooling is orthogonal to architecture;
+    lives at the engineering-discipline layer (L2).
+
+Bump rationale: MINOR — materially expanded guidance. Adds a new
+binding rule about local + CI quality gates. Not
+backward-incompatible since the Phase 2 code already passes both
+(rustfmt run as a prep commit; clippy clean).
+
+Forward-looking implication:
+  - A follow-up commit adds `.cargo/config.toml` with the `lint`,
+    `fmt-check`, and `ci` aliases.
+  - Another follow-up adds `scripts/install-git-hooks.sh` +
+    `scripts/hooks/pre-commit` (shell, POSIX, idempotent) and a
+    mention in AGENTS.md.
+  - T067 task description tightened in the slice's tasks.md to add
+    `--all-targets` to clippy and add the `cargo fmt --all -- --check`
+    step.
+  - Phase 2 formatting baseline established separately in commit
+    f14f5d5 (`style(core,tui): apply rustfmt --all`) so Amendment 6
+    turns on green on first CI run.
 -->
 
 # Weaver Constitution (Engineering — L2)
@@ -150,11 +318,15 @@ Bus wire format (core ↔ services) is **CBOR** with a Weaver tag scheme (entity
 
 The outer shell (CLI) MUST support `--output=<format>` with **JSON** as the Day-1 minimum, exposed via a pluggable serde-style serializer. **TOON** is a v1.x roadmap aspiration, not a Day-1 gate. Output shape MUST mirror the bus fact/event/intent vocabulary. Tests MUST assert on deserialized structures, not on output strings.
 
+**CLI structured output is for one-shot scripting and human-adjacent tooling.** It is a snapshot interface: it cannot represent streaming state, sequence guarantees, snapshot-plus-deltas reconnect, or causal continuity through the trace. It MUST NOT be treated as the primary integration surface for continuous machine consumers.
+
+**Continuous machine integration — agents, monitoring tools, introspection clients, language hosts — is a bus-subscriber concern.** Such consumers participate as services (or service-like clients) on the bus, where they receive the full delivery-class guarantees of Principle 5 and Principle 7 and can walk the causal chain via the `why?` channel. New continuous-integration use cases MUST be designed as bus participants, not as CLI parsers.
+
 S-expressions belong to Steel source and the REPL only — never on the bus.
 
 Ecosystem standards (LSP, XDG base directories, OS-native file watching) are adopted where applicable. Weaver-original protocols are versioned per Principle 8.
 
-**Rationale:** Serialization frontiers are independent. The fact tuple is the canonical semantic shape; serializers are per-frontier views. Pluggable serializers make format evolution a dependency change, not a rewrite.
+**Rationale:** Serialization frontiers are independent. The fact tuple is the canonical semantic shape; serializers are per-frontier views. Pluggable serializers make format evolution a dependency change, not a rewrite. Conflating "structured CLI output" with "agent integration surface" is a category error: STDOUT is a snapshot, the bus is a stream. Designing agents around STDOUT JSON forecloses provenance, retraction, lifecycle signals, and reconnect — exactly the guarantees Weaver exists to provide.
 
 ### 6. Humane Shell
 
@@ -271,6 +443,9 @@ AI contributions bind to this constitution: fact-style commits, doc updates as p
 - **Serialization frontiers are independent**: fact tuples are the canonical semantic shape. Serializers (CBOR on the bus, JSON / TOON in the outer shell, native Steel values in-core) are per-frontier views. Steel ↔ wire conversion is defined once in the core so SDK consumers receive idiomatic language types.
 - **Constitution sync**: `.specify/memory/constitution.md` (L2) and `docs/00-constitution.md` (L1) MUST stay in sync. CI enforces this per Principle 17.
 - **Commit messages**: follow the [Conventional Commits 1.0](https://www.conventionalcommits.org/) specification — `<type>(<scope>): <description>`. Scope vocabulary is *hybrid*: use Principle 7 public-surface names (`bus`, `steel`, `fact`, `action`, `cli`, `config`) when the change touches a public surface; otherwise use workspace/area names (`core`, `ui`, `tui`, `docs`, `specify`). Conventional Commit types feed automated changelog generation and per-surface SemVer derivation under Principle 8. Breaking public-surface changes MUST include a `BREAKING CHANGE:` footer.
+- **License**: Weaver is licensed under **AGPL-3.0-or-later** (see `LICENSE`). All workspace member `Cargo.toml` manifests MUST declare `license = "AGPL-3.0-or-later"` (or inherit it via `license.workspace = true`). Inbound dependencies MUST carry licenses compatible with AGPL-3.0-or-later — MIT, Apache-2.0, BSD-*, MPL-2.0, ISC are acceptable; GPL-2.0-only, proprietary-only, and other non-reciprocal-incompatible licenses are not. Dependency additions MUST be reviewed for license compatibility as part of per-PR review. Licensing is treated as a compatibility surface per Principle 7.
+- **Wire vocabulary naming**: identifier *values* on the bus and in CLI structured output follow Lisp/Scheme convention — **kebab-case**. This applies to: event names, fact attributes, action types, behavior identifiers, message-kind discriminators, enum tag values, lifecycle states, error categories, subscription pattern names, output-format names. Behavior identifiers use `/` as the namespace separator (e.g., `core/dirty-tracking`, not `core::dirty_tracking`). Struct *field names* inside structured messages follow the implementing language's idiom (`snake_case` in Rust, `camelCase` in JavaScript clients). The line: protocol-visible identifier *values* are kebab-case; in-language *field names* are language-idiomatic. Per Principle 5, both bus (CBOR) and outer-shell (JSON) representations honor this.
+- **Code quality gates**: All Rust code in the workspace MUST pass `cargo clippy --all-targets --workspace -- -D warnings` and `cargo fmt --all -- --check`. **CI enforces both as mandatory gate checks** — the unbypassable source of truth (per Principle 19). The `.cargo/config.toml` defines `cargo lint` and `cargo fmt-check` aliases matching the CI invocations exactly; `scripts/ci.sh` chains lint + fmt-check + build + test for pre-push validation. A repo-provided pre-commit hook (installed via `scripts/install-git-hooks.sh`) runs both gates at commit time; installation is opt-in but SHOULD be completed by contributors for fast local feedback. `git commit --no-verify` remains the documented escape valve for WIP commits on feature branches. Agent contributions (per Principle 21) MUST run `scripts/ci.sh` before proposing a commit, regardless of hook installation. Default clippy lints + `-D warnings` is the binding floor; `clippy::pedantic` and `clippy::nursery` are SUGGESTED for new modules but not required globally.
 
 ## Development Workflow
 
@@ -288,4 +463,4 @@ AI contributions bind to this constitution: fact-style commits, doc updates as p
 - SemVer applies to L2 itself: MAJOR for backward-incompatible principle changes, MINOR for added principles, PATCH for clarifications.
 - All PRs MUST verify compliance with relevant L2 principles. Violations MUST be justified in the plan's Complexity Tracking section.
 
-**Version**: 0.3.0 | **Ratified**: 2026-04-19 | **Last Amended**: 2026-04-19
+**Version**: 0.7.0 | **Ratified**: 2026-04-19 | **Last Amended**: 2026-04-20

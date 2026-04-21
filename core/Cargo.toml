@@ -1,0 +1,90 @@
+[package]
+name = "weaver_core"
+description = "Weaver core: bus, fact space, behavior dispatcher, embedded behaviors, CLI"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "weaver"
+path = "src/main.rs"
+
+[dependencies]
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+ciborium.workspace = true
+ciborium-io.workspace = true
+clap.workspace = true
+miette.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+toml.workspace = true
+
+[build-dependencies]
+vergen.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
+
+# Phase 3 (US1) integration tests. Cargo auto-discovers files directly
+# under `tests/`, but subdirectories are not picked up unless declared
+# explicitly. These entries keep the task-spec paths verbatim.
+[[test]]
+name = "behavior_dirty_tracking_assert"
+path = "tests/behavior/dirty_tracking_assert.rs"
+
+[[test]]
+name = "behavior_dirty_tracking_retract"
+path = "tests/behavior/dirty_tracking_retract.rs"
+
+[[test]]
+name = "behavior_dirty_tracking_sequence"
+path = "tests/behavior/dirty_tracking_sequence.rs"
+
+[[test]]
+name = "behavior_error_recovery"
+path = "tests/behavior/error_recovery.rs"
+
+[[test]]
+name = "property_dirty_tracking_invariant"
+path = "tests/property/dirty_tracking_invariant.rs"
+
+# Phase 4 (US2) inspection tests.
+[[test]]
+name = "inspect_inspection_found"
+path = "tests/inspect/inspection_found.rs"
+
+[[test]]
+name = "inspect_inspection_not_found"
+path = "tests/inspect/inspection_not_found.rs"
+
+[[test]]
+name = "property_inspection_invariant"
+path = "tests/property/inspection_invariant.rs"
+
+# Phase 5 (US3) status CLI tests — spawn `weaver` via CARGO_BIN_EXE.
+[[test]]
+name = "cli_status_round_trip"
+path = "tests/cli/status_round_trip.rs"
+
+[[test]]
+name = "cli_status_unavailable"
+path = "tests/cli/status_unavailable.rs"
+
+[[test]]
+name = "cli_status_human"
+path = "tests/cli/status_human.rs"
+
+# Phase 6 (polish) additional tests.
+[[test]]
+name = "property_provenance_wire"
+path = "tests/property/provenance_wire.rs"
+
+[[test]]
+name = "cli_version_timing"
+path = "tests/cli/version_timing.rs"

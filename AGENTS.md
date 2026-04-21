@@ -28,6 +28,14 @@ Start here before making changes.
   - `/speckit.implement` — execute the task list.
 - For trivial fixes (typos, single-line edits), edit directly but still follow Principle 10 (regression test before fix when applicable).
 
+## Local quality gates
+- CI enforces `cargo clippy --all-targets --workspace -- -D warnings` and `cargo fmt --all -- --check` — the source of truth per L2 Amendment 6.
+- Locally, run the same gates via the cargo aliases in `.cargo/config.toml`:
+  - `cargo lint` — clippy, -D warnings.
+  - `cargo fmt-check` — rustfmt without rewriting.
+- Full pre-push chain: `scripts/ci.sh` (lint + fmt-check + build + test). Add `--no-test` for a quicker pre-commit check.
+- Pre-commit hook: run `scripts/install-git-hooks.sh` once per clone; it catches lint/format issues before push. Bypass with `git commit --no-verify` for WIP commits on feature branches.
+
 ## Commit conventions
 - Follow [Conventional Commits 1.0](https://www.conventionalcommits.org/): `<type>(<scope>): <description>`.
 - **Type vocabulary**: `feat`, `fix`, `refactor`, `docs`, `chore`, `test`, `build`, `ci`, `perf`, `style`.
@@ -42,3 +50,11 @@ Start here before making changes.
   - `docs(specify): clarify retraction-task expectations`
   - `chore(ci): pin Steel toolchain version`
 
+## Review policy
+When reviewing code:
+- prioritize correctness, security, regressions, data races, and migration risk
+- flag only issues introduced by the current diff
+- prefer concrete, actionable findings
+- call out missing tests when risk is non-trivial
+
+See `docs/code-review.md` for the full checklist.
