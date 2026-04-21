@@ -1,3 +1,15 @@
 [toolchain]
-channel = "1.85.0"
-components = ["rustfmt", "clippy"]
+# Pinned per L2 constitution P19 (reproducible builds).
+#
+# `rustup toolchain install` (in CI and outside the nix dev shell)
+# reads this file directly. The nix dev shell reads it via
+# `fenix.fromToolchainFile` in `flake.nix` so the SAME channel flows
+# into both worlds; that's what makes `cargo lint` produce identical
+# clippy output locally and in CI.
+#
+# Bump discipline: when updating this `channel`, also regenerate
+# `flake.lock` (`nix flake update fenix`) and update the `sha256` in
+# `flake.nix`'s `fromToolchainFile` call (nix will report the correct
+# hash as part of the error on first `nix develop` after the bump).
+channel = "1.94.0"
+components = ["rustfmt", "clippy", "rust-src"]

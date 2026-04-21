@@ -3,21 +3,44 @@
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
+    # `fenix` provides a Rust toolchain that honors `rust-toolchain.toml`
+    # the same way `rustup` does. Keeping the nix dev shell and CI on
+    # identical rustc/clippy/rustfmt versions is what lets pre-commit
+    # `cargo lint` catch everything CI's `clippy --all-targets -D
+    # warnings` catches — no more local-passes-but-CI-fails on lints
+    # whose default level changed between Rust versions.
+    fenix = {
+      url = "github:nix-community/fenix";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
   };
 
-  outputs = { self, nixpkgs, ... }:
+  outputs = { self, nixpkgs, fenix, ... }:
     let
       system = "x86_64-linux"; # change as needed
       pkgs = import nixpkgs { inherit system; config.allowUnfree = true; };
+
+      # Read `rust-toolchain.toml` directly so the channel + components
+      # listed there drive both this dev shell and CI's rustup.
+      #
+      # First-setup note: on bumping the channel, nix will report a
+      # hash mismatch with the correct value to paste below. The
+      # all-zero placeholder is a Nix convention that triggers that
+      # error rather than silently succeeding with a stale hash.
+      rustToolchain = fenix.packages.${system}.fromToolchainFile {
+        file = ./rust-toolchain.toml;
+        sha256 = "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
+      };
+
+      # Dev-friendly rust-analyzer tracks nightly, so pull it from the
+      # fenix `rust-analyzer` output rather than bundling it into the
+      # toolchain. Keeps the IDE current without forcing nightly
+      # rustc/clippy into builds.
+      rustAnalyzer = fenix.packages.${system}.rust-analyzer;
     in {
       devShells.${system}.default = pkgs.mkShell {
         packages = with pkgs; [
           yaml-language-server
-          cargo
-          rustc
-          rust-analyzer
-          rustfmt
-          clippy
           pkg-config
           git
           uv
@@ -25,9 +48,13 @@
           jq
           envsubst
           stdenv.cc.cc
+        ] ++ [
+          rustToolchain
+          rustAnalyzer
         ];
 
-        RUST_SRC_PATH = "${pkgs.rustPlatform.rustLibSrc}";
+        # Point rust-analyzer at the pinned toolchain's std sources.
+        RUST_SRC_PATH = "${rustToolchain}/lib/rustlib/src/rust/library";
 
         shellHook = ''
           export UV_PYTHON_DOWNLOADS=never
