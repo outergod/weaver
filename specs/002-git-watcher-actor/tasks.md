@@ -187,6 +187,7 @@ Markers apply in addition to `[P]` and `[Story]`:
 - [ ] T065 [P] [US2] Scenario test in `core/tests/inspect/behavior_authored.rs`: start core; trigger a `BufferEdited` event; run `weaver inspect 1:buffer/dirty --output=json`; assert output contains `asserting_behavior: "core/dirty-tracking"` and NO `asserting_service` field
 - [ ] T066 [P] [US2] Scenario test in `tests/e2e/git_watcher_inspect.rs`: start core + watcher; run `weaver inspect <repo-eref>:repo/dirty --output=json`; assert output contains `asserting_service: "git-watcher"` and `asserting_instance` is a valid UUID v4 matching the watcher's startup log
 - [ ] T067 [P] [US2] Scenario test in `core/tests/inspect/structured_always.rs`: across ALL fact families (`buffer/*`, `repo/*`, `watcher/*`), `weaver inspect` output NEVER renders an opaque or raw-string actor identity. Enforced at the JSON level (no field value matching `^External\(`)
+- [ ] T067a [P] [US2] Scenario test in `core/tests/inspect/causal_walkback.rs`: construct a multi-hop causal chain (buffer-edited Event → core/dirty-tracking Behavior fires → FactAssert of `buffer/dirty`); invoke `why?` on the resulting fact and walk the chain back to its originating Event; assert every step (Event, Behavior firing, Fact assertion) renders structured `ActorIdentity` — never an opaque tag, never a missing actor. Extend with a service-authored step (a `repo/*` fact from a running `weaver-git-watcher`) to verify multi-kind chains preserve structured identity at every hop. Covers FR-013 explicitly (previously only implicitly tested via per-fact scenarios)
 
 ### Property test (Phase 4)
 
@@ -233,7 +234,7 @@ Markers apply in addition to `[P]` and `[Story]`:
 - **Phase 3 model layer**: T029, T030 land in `git-watcher/src/model.rs` (serialize); T032 (`observer.rs`) is independent — runs parallel.
 - **Phase 3 publisher + TUI**: T039–T047 are in `git-watcher/src/publisher.rs` (serialize); T051–T054 are in `tui/src/` (different crate — parallel with watcher work).
 - **Phase 3 e2e tests**: T055–T059 are in distinct files — all parallel.
-- **Phase 4 scenarios + property**: T065, T066, T067, T068 are in distinct files — all parallel.
+- **Phase 4 scenarios + property**: T065, T066, T067, T067a, T068 are in distinct files — all parallel.
 
 ---
 
