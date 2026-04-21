@@ -288,16 +288,48 @@ Deferred until a slice demonstrably needs speculative contributions. The constit
 
 ---
 
-## 25. SourceId Evolution to Typed ActorKind
+## 25. SourceId Evolution to Typed ActorKind — PARTIALLY RESOLVED
 
-The core today carries `SourceId::{Core, Behavior(id), Tui, External(String)}` in provenance. The `External(String)` variant is an opaque placeholder; it collapses all out-of-process actors into a single unstructured tag.
+The core previously carried `SourceId::{Core, Behavior(id), Tui, External(String)}` in provenance. The `External(String)` variant was an opaque placeholder; it collapsed all out-of-process actors into a single unstructured tag.
 
-Constitution §17 and system-model §6 name five actor kinds (users, services, embedded behaviors, language hosts, external agents). A structured `ActorKind` enum is the natural code-level expression of this taxonomy.
+Constitution §17 and system-model §6 name five actor kinds (users, services, embedded behaviors, language hosts, external agents). A structured `ActorKind` is the natural code-level expression of this taxonomy.
 
-Open:
+Resolved by slice 002 (`specs/002-git-watcher-actor/` Clarifications Q1 and Q2):
 
-- shape — single `ActorKind` enum, or a trait with per-kind implementations?
-- migration — does `SourceId::External` get replaced, or does `ActorKind` live alongside it as a richer field?
-- identity stability — how is an actor's identity persisted across sessions (relevant for `on-behalf-of` chains in stored traces)?
+- **shape** — single closed enum, one variant per actor kind, payload per variant. Matches the §6 taxonomy; future kinds are added as new variants under additive-evolution rules (L2 Principle 15).
+- **migration** — `SourceId::External(String)` is replaced entirely; no parallel support, no deprecation shim. Breaking at the wire; paired with a bus protocol version bump (L2 Principle 8).
 
-Becomes relevant at the first slice that introduces a non-core, non-behavior actor on the bus with a stable identity (candidate: non-editor service slice per pivot follow-up).
+Remains open:
+
+- **identity stability across sessions** — how is an actor's identity persisted so `on-behalf-of` chains in stored traces survive restarts, upgrades, and re-deployments? Slice 002 generates watcher instance identities as random UUIDs per invocation (spec Clarification Q3), deliberately *not* persisting identity across restarts. A stable identity scheme becomes relevant when delegation chains must survive trace-horizon boundaries — candidate trigger is the agent-delegation slice.
+
+---
+
+## 26. Discriminated-Union Facts: Naming-Based Stopgap vs. Components
+
+Some fact families naturally express discriminated unions — one unit-concept with mutually exclusive variants. Working-copy state (`on-branch` / `detached` / `unborn` / `rebasing` / `merging` / …) is the motivating instance. Weaver's fact-value type is primitive-only today (`FactValue::{Bool, String, Int, Null}`; system-model §2 explicitly defers richer nested records). A discriminated union therefore cannot cross the wire as one typed fact value under the current regime.
+
+Slice 002 (`specs/002-git-watcher-actor/`, Clarification Q4) adopts the stopgap: **discriminated-union-by-naming** under a shared family (`repo/state/*`), with the authoring service enforcing the mutex invariant (exactly one variant asserted per entity at any time). This lets the slice ship without extending `FactValue` or introducing component infrastructure.
+
+**Known costs of the stopgap:**
+
+- Mutex invariant lives in producer code, not the type system — a producer bug can admit inconsistent state that consumers silently observe.
+- State transitions appear in the trace as retract-then-assert pairs; consumers must pair them cognitively.
+- "Subscribe to any state change" fragments across N predicate-shape indexes (architecture §4.1).
+- Schema discoverability: union membership is implicit in the naming convention only.
+
+**Candidate long-term resolutions:**
+
+- (a) **Extend `FactValue` with a `Variant` or `Record` case.** A discriminated union becomes one typed value on one attribute. Requires wire-format change, CBOR tag addition, serializer/deserializer updates. Risk: pressure to stuff arbitrary structured data into `FactValue` erodes the fact/component boundary (system-model §2.4).
+- (b) **Lean into components** (system-model §2.4). A discriminated union becomes a typed *component* attached to an entity; the authority updates it in place and emits derived facts for behaviors to predicate on (`repo/on-branch ?name`, `repo/detached`, …). §2.4-native. Requires component infrastructure in code — a `Component` type, point-query primitive, update-in-place semantics — none of which exist today.
+- (c) **Accept the naming-based stopgap permanently** and document it as the chosen idiom. Producers carry the mutex invariant as a first-class responsibility. No architectural work required; cost is ongoing and cumulative.
+
+**Revisit triggers (any one should prompt reconsideration):**
+
+1. A *third* producer publishes discriminated-union-shaped facts and begins reinventing the mutex pattern across services.
+2. Behaviors routinely subscribe to the full family rather than specific variants, indicating the naming split works against the consumption pattern.
+3. Traces become difficult to read because retract-then-assert pairs dominate the transition events under analysis.
+
+**Current lean:** **(b) — components.** §2.4 already commits to the fact/component distinction; slice 002 is an acknowledged stopgap, not a rejection. Deferred until at least one revisit trigger fires.
+
+First concrete instance: `specs/002-git-watcher-actor/` Clarification Q4 (`repo/state/*`).
