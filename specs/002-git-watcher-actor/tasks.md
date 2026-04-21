@@ -142,23 +142,23 @@ Markers apply in addition to `[P]` and `[Story]`:
 
 ### Core: authority-conflict mechanism (FR-009)
 
-- [ ] T048 [US1] Add authority-claim tracking in `core/src/fact_space/` (or a new `core/src/authority.rs`): a `HashMap<FactFamilyClaim, ActorIdentity>` keyed by `(family_prefix: "repo/", entity: EntityRef)`. First `FactAssert` in a family for a given entity claims authority; subsequent asserts from a different `ActorIdentity` are rejected
-- [ ] T049 [US1] On rejected assert, core sends `Error { category: "authority-conflict", detail: "repo/{attribute} for entity {eref} already claimed by {existing-identity}" }` to the offending publisher's connection; does not close unless the publisher closes
-- [ ] T050 [US1] Authority-claim cleanup: when the publishing actor disconnects, its claims are released (claims are tied to connection lifetime for this slice; persistent claims deferred)
+- [X] T048 [US1] Add authority-claim tracking in `core/src/fact_space/` (or a new `core/src/authority.rs`): a `HashMap<FactFamilyClaim, ActorIdentity>` keyed by `(family_prefix: "repo/", entity: EntityRef)`. First `FactAssert` in a family for a given entity claims authority; subsequent asserts from a different `ActorIdentity` are rejected
+- [X] T049 [US1] On rejected assert, core sends `Error { category: "authority-conflict", detail: "repo/{attribute} for entity {eref} already claimed by {existing-identity}" }` to the offending publisher's connection; does not close unless the publisher closes
+- [X] T050 [US1] Authority-claim cleanup: when the publishing actor disconnects, its claims are released (claims are tied to connection lifetime for this slice; persistent claims deferred)
 
 ### TUI: Repositories section
 
-- [ ] T051 [P] [US1] Extend `tui/src/client.rs` subscription to include `FamilyPrefix("repo/")` and `FamilyPrefix("watcher/")` in addition to existing `"buffer/"`
+- [X] T051 [P] [US1] Extend `tui/src/client.rs` subscription to include `FamilyPrefix("repo/")` and `FamilyPrefix("watcher/")` in addition to existing `"buffer/"`
 - [ ] T052 [US1] Extend `tui/src/render.rs` with a `render_repositories` function producing the Repositories section per `contracts/cli-surfaces.md`. State badge logic: `[on <name>]` if `repo/state/on-branch` asserted; `[detached <short-sha>]` if `repo/state/detached`; `[unborn <name>]` if `repo/state/unborn`; `[state unknown]` otherwise; append `[observability lost]` if `repo/observable = false`; append `[stale]` when the TUI's subscription has dropped
 - [ ] T053 [US1] Dirty-indicator rendering in `tui/src/render.rs`: `clean` / `dirty` next to the state badge; suppressed when `repo/observable = false`
 - [ ] T054 [US1] Authoring-actor line in the TUI Repositories section: `by service {service_id} (inst {short-uuid}), event {id}, {elapsed}s ago`
 
 ### End-to-end tests (Phase 3)
 
-- [ ] T055 [P] [US1] E2E test in `tests/e2e/git_watcher_attach.rs`: spawn core; spawn watcher against a freshly-initialized temp repo with one commit; spawn a test client; assert the expected initial `repo/*` bootstrap fact set is observed within SC-001 (1s) window **{latency:interactive}**
-- [ ] T056 [P] [US1] E2E test in `tests/e2e/git_watcher_transitions.rs`: start watcher on a repo on `main`; from outside, `git checkout <sha>`; assert the test client observes `FactRetract(repo/state/on-branch)` and `FactAssert(repo/state/detached)` in sequence with a shared `causal_parent` event id. Repeat for the return path (checkout back to `main`) and for unborn→on-branch (initial commit on a fresh repo) **{retraction}**
-- [ ] T057 [P] [US1] E2E test in `tests/e2e/git_watcher_dirty.rs`: start watcher on a clean repo; modify a tracked file; assert `repo/dirty=true` observed within SC-002 (500ms). Stage the change; verify `repo/dirty=true` persists. Commit; verify `repo/dirty=false` observed within 500ms. Also verify untracked-only state stays at `repo/dirty=false` per Q5 semantics **{latency:interactive}**
-- [ ] T058 [P] [US1] E2E test in `tests/e2e/git_watcher_disconnect.rs`: start watcher; kill watcher process; assert the test client sees `Lifecycle(Unavailable)` + `FactRetract` for every prior `repo/*` fact; `weaver status --output=json` confirms no `repo/*` facts remain asserted **{retraction}**
+- [X] T055 [P] [US1] E2E test in `tests/e2e/git_watcher_attach.rs`: spawn core; spawn watcher against a freshly-initialized temp repo with one commit; spawn a test client; assert the expected initial `repo/*` bootstrap fact set is observed within SC-001 (1s) window **{latency:interactive}**
+- [X] T056 [P] [US1] E2E test in `tests/e2e/git_watcher_transitions.rs`: start watcher on a repo on `main`; from outside, `git checkout <sha>`; assert the test client observes `FactRetract(repo/state/on-branch)` and `FactAssert(repo/state/detached)` in sequence with a shared `causal_parent` event id. Repeat for the return path (checkout back to `main`) and for unborn→on-branch (initial commit on a fresh repo) **{retraction}**
+- [X] T057 [P] [US1] E2E test in `tests/e2e/git_watcher_dirty.rs`: start watcher on a clean repo; modify a tracked file; assert `repo/dirty=true` observed within SC-002 (500ms). Stage the change; verify `repo/dirty=true` persists. Commit; verify `repo/dirty=false` observed within 500ms. Also verify untracked-only state stays at `repo/dirty=false` per Q5 semantics **{latency:interactive}**
+- [X] T058 [P] [US1] E2E test in `tests/e2e/git_watcher_disconnect.rs`: start watcher; kill watcher process; assert the test client sees `Lifecycle(Unavailable)` + `FactRetract` for every prior `repo/*` fact; `weaver status --output=json` confirms no `repo/*` facts remain asserted **{retraction}**
 - [ ] T059 [US1] E2E test in `tests/e2e/git_watcher_authority_conflict.rs`: start watcher A on repo R; start watcher B on same repo R; assert watcher B receives `Error { category: "authority-conflict", ... }` and exits with code 3 (`WEAVER-GW-003`)
 
 ### Scenario / property tests (Phase 3)
@@ -178,8 +178,8 @@ Markers apply in addition to `[P]` and `[Story]`:
 
 ### JSON + human rendering
 
-- [ ] T062 [US2] Extend `core/src/inspect/render.rs`: `InspectionDetail` JSON serialization writes `asserting_behavior` for `ActorIdentity::Behavior(_)`, and `asserting_service` + `asserting_instance` for `ActorIdentity::Service { .. }`. Only one of these field groups appears per response. Per `contracts/cli-surfaces.md` **{surface:cli}**
-- [ ] T063 [P] [US2] Extend human rendering in `core/src/inspect/render.rs`: output labelled lines `source: service {service_id} (instance {uuid})` for services, `source: behavior {behavior_id}` for behaviors, `source: core` / `source: tui` for unit variants
+- [X] T062 [US2] Extend `core/src/inspect/render.rs`: `InspectionDetail` JSON serialization writes `asserting_behavior` for `ActorIdentity::Behavior(_)`, and `asserting_service` + `asserting_instance` for `ActorIdentity::Service { .. }`. Only one of these field groups appears per response. Per `contracts/cli-surfaces.md` **{surface:cli}**
+- [X] T063 [P] [US2] Extend human rendering in `core/src/inspect/render.rs`: output labelled lines `source: service {service_id} (instance {uuid})` for services, `source: behavior {behavior_id}` for behaviors, `source: core` / `source: tui` for unit variants
 - [ ] T064 [US2] Core-authored and TUI-authored fact rendering: for `ActorIdentity::Core` / `ActorIdentity::Tui`, JSON emits `{ "asserting_kind": "core" }` / `{ "asserting_kind": "tui" }` without identifier fields
 
 ### Scenario tests (Phase 4)

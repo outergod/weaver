@@ -8,18 +8,80 @@
 //! registered — events are appended to the trace and otherwise ignored.
 //! The dirty-tracking behavior is registered in Phase 3 (T042).
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::Mutex;
 
 use crate::bus::delivery::SequenceCounter;
 use crate::fact_space::{FactStore, InMemoryFactStore};
-use crate::provenance::Provenance;
+use crate::provenance::{ActorIdentity, Provenance};
 use crate::trace::entry::{TracePayload, TraceSequence};
 use crate::trace::store::TraceStore;
+use crate::types::entity_ref::EntityRef;
 use crate::types::event::Event;
 use crate::types::fact::{Fact, FactKey};
 use crate::types::ids::BehaviorId;
+
+/// Outcome of a service-originated fact assertion. Slice-002
+/// authority-conflict mechanism (FR-009): first `FactAssert` for a
+/// `(family, entity)` pair claims authority on behalf of the
+/// connecting client; subsequent asserts from a different
+/// `ActorIdentity` on a different connection are rejected.
+#[derive(Debug)]
+pub enum ServicePublishOutcome {
+    Asserted,
+    AuthorityConflict {
+        family: String,
+        entity: EntityRef,
+        existing: ActorIdentity,
+    },
+}
+
+/// Maps `(family_prefix, entity)` → `(connection_id, claiming actor)`.
+/// Claims are released when the owning connection drops (listener
+/// calls `Dispatcher::release_connection` on disconnect).
+#[derive(Default)]
+pub(crate) struct AuthorityMap {
+    claims: HashMap<(String, EntityRef), (u64, ActorIdentity)>,
+}
+
+impl AuthorityMap {
+    fn claim(
+        &mut self,
+        conn_id: u64,
+        identity: &ActorIdentity,
+        family: &str,
+        entity: EntityRef,
+    ) -> Result<(), ActorIdentity> {
+        let key = (family.to_string(), entity);
+        match self.claims.get(&key) {
+            None => {
+                self.claims.insert(key, (conn_id, identity.clone()));
+                Ok(())
+            }
+            Some((existing_conn, existing_identity)) => {
+                if *existing_conn == conn_id || existing_identity == identity {
+                    Ok(())
+                } else {
+                    Err(existing_identity.clone())
+                }
+            }
+        }
+    }
+
+    fn release_connection(&mut self, conn_id: u64) {
+        self.claims.retain(|_, (c, _)| *c != conn_id);
+    }
+}
+
+/// Extract the family prefix from a fact attribute. `"repo/dirty"` →
+/// `"repo"`; `"repo/state/on-branch"` → `"repo"`; `"buffer/dirty"` →
+/// `"buffer"`. Per `docs/01-system-model.md §2.2`, family is the
+/// namespace before the first `/`.
+pub(crate) fn family_of(key: &FactKey) -> &str {
+    key.attribute.split('/').next().unwrap_or("")
+}
 
 /// A registered behavior.
 ///
@@ -59,6 +121,9 @@ pub struct Dispatcher {
     /// Wall-clock nanoseconds the dispatcher was constructed at; used
     /// to compute `uptime_ns` for status responses.
     started_at_ns: u64,
+    /// Slice-002 authority map — tracks `(family, entity) →
+    /// (connection, actor)` claims for service-published facts.
+    authority: Arc<Mutex<AuthorityMap>>,
 }
 
 impl Dispatcher {
@@ -69,6 +134,7 @@ impl Dispatcher {
             sequence: SequenceCounter::new(),
             behaviors: Vec::new(),
             started_at_ns: now_ns(),
+            authority: Arc::new(Mutex::new(AuthorityMap::default())),
         }
     }
 
@@ -169,22 +235,45 @@ impl Dispatcher {
     /// [`crate::provenance::ActorIdentity::Service`]; the dispatcher
     /// stores the fact and broadcasts to subscribers.
     ///
+    /// Applies the authority-conflict check (FR-009): the first
+    /// assertion for a `(family, entity)` pair claims authority on
+    /// behalf of `conn_id`; subsequent assertions on a different
+    /// connection from a different actor are rejected with
+    /// [`ServicePublishOutcome::AuthorityConflict`]. The listener
+    /// translates the conflict into a structured `Error` message.
+    ///
     /// Appends a `TracePayload::FactAsserted` entry but no
     /// `BehaviorFired` wrapper (there is no behavior firing — the
     /// fact comes straight off the bus). This is what makes the
     /// inspection path's service-branch produce a clean
     /// `InspectionDetail::service(...)` result.
-    pub async fn publish_from_service(&self, fact: Fact) {
+    pub async fn publish_from_service(&self, conn_id: u64, fact: Fact) -> ServicePublishOutcome {
+        let family = family_of(&fact.key).to_string();
+        let entity = fact.key.entity;
+        {
+            let mut auth = self.authority.lock().await;
+            if let Err(existing) = auth.claim(conn_id, &fact.provenance.source, &family, entity) {
+                return ServicePublishOutcome::AuthorityConflict {
+                    family,
+                    entity,
+                    existing,
+                };
+            }
+        }
         let now = now_ns();
         let _ = self.sequence.next();
         let mut fact_store = self.fact_store.lock().await;
         let mut trace = self.trace.lock().await;
         trace.append(now, TracePayload::FactAsserted { fact: fact.clone() });
         fact_store.assert(fact);
+        ServicePublishOutcome::Asserted
     }
 
     /// Service-originated fact retraction. Slice 002: counterpart to
-    /// [`Self::publish_from_service`].
+    /// [`Self::publish_from_service`]. Does not consult the authority
+    /// map — a connection can retract anything it previously asserted;
+    /// retracting a fact it didn't assert is a no-op at the fact-store
+    /// level (the key isn't present).
     pub async fn retract_from_service(&self, key: FactKey, provenance: Provenance) {
         let now = now_ns();
         let _ = self.sequence.next();
@@ -198,6 +287,15 @@ impl Dispatcher {
             },
         );
         fact_store.retract(&key, provenance);
+    }
+
+    /// Release every authority claim held by `conn_id`. Called by the
+    /// listener when a bus connection drops, so a re-launched service
+    /// with the same identity (or a different service claiming the
+    /// same family) can take over without the prior claim blocking.
+    pub async fn release_connection(&self, conn_id: u64) {
+        let mut auth = self.authority.lock().await;
+        auth.release_connection(conn_id);
     }
 }
 

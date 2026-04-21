@@ -103,6 +103,11 @@ pub async fn serve(listener: UnixListener, dispatcher: Arc<Dispatcher>) {
     }
 }
 
+/// Monotonic connection-id counter used by the authority-conflict
+/// mechanism (FR-009). Each handled connection gets a unique id so
+/// authority claims can be released on disconnect.
+static CONN_ID_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
 /// Per-connection task: handshake, then loop multiplexing inbound
 /// client messages and outbound fact-space events until the stream
 /// closes on either side.
@@ -110,6 +115,7 @@ async fn handle_connection(
     mut stream: UnixStream,
     dispatcher: Arc<Dispatcher>,
 ) -> Result<(), ListenerError> {
+    let conn_id = CONN_ID_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     // 1. Handshake: expect Hello.
     let client_kind = match read_message(&mut stream).await? {
         BusMessage::Hello(HelloMsg {
@@ -166,7 +172,9 @@ async fn handle_connection(
 
         match next {
             Incoming::Client(Ok(msg)) => {
-                if let Some(new_sub) = handle_client_message(msg, &dispatcher, &mut stream).await? {
+                if let Some(new_sub) =
+                    handle_client_message(conn_id, msg, &dispatcher, &mut stream).await?
+                {
                     subscription = Some(new_sub);
                 }
             }
@@ -174,9 +182,13 @@ async fn handle_connection(
                 if e.kind() == std::io::ErrorKind::UnexpectedEof =>
             {
                 tracing::info!(target: "weaver::bus", client_kind = %client_kind, "client disconnected");
+                dispatcher.release_connection(conn_id).await;
                 return Ok(());
             }
-            Incoming::Client(Err(e)) => return Err(e.into()),
+            Incoming::Client(Err(e)) => {
+                dispatcher.release_connection(conn_id).await;
+                return Err(e.into());
+            }
             Incoming::FactEvent(Some(evt)) => {
                 forward_fact_event(evt, &mut stream).await?;
             }
@@ -197,6 +209,7 @@ enum Incoming {
 
 /// Returns `Some(handle)` when a new subscription was established.
 async fn handle_client_message(
+    conn_id: u64,
     msg: BusMessage,
     dispatcher: &Arc<Dispatcher>,
     writer: &mut UnixStream,
@@ -285,10 +298,31 @@ async fn handle_client_message(
             // Slice 002: services can publish authoritative facts
             // directly. The dispatcher stores + broadcasts; the
             // fact's `ActorIdentity::Service` provenance is preserved.
-            // (Authority-conflict tracking per FR-009 is a later
-            // refinement; the current MVP accepts all service
-            // assertions.)
-            dispatcher.publish_from_service(fact).await;
+            //
+            // FR-009: first claim wins per (family, entity); a second
+            // actor asserting into the same pair receives a structured
+            // `authority-conflict` error.
+            use crate::behavior::dispatcher::ServicePublishOutcome;
+            match dispatcher.publish_from_service(conn_id, fact).await {
+                ServicePublishOutcome::Asserted => {}
+                ServicePublishOutcome::AuthorityConflict {
+                    family,
+                    entity,
+                    existing,
+                } => {
+                    let detail = format!(
+                        "{family}/* for entity {} already claimed by {}",
+                        entity.as_u64(),
+                        existing.kind_label(),
+                    );
+                    let err = BusMessage::Error(ErrorMsg {
+                        category: "authority-conflict".into(),
+                        detail,
+                        context: None,
+                    });
+                    write_message(writer, &err).await?;
+                }
+            }
             Ok(None)
         }
         BusMessage::FactRetract { key, provenance } => {
