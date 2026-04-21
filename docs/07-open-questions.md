@@ -84,7 +84,7 @@ See architecture §10.
 
 What is the smallest in-memory prototype that can honestly validate the ontology before introducing distribution?
 
-Partially answered by the current Ontology Prototype scope ([`mvp-ontology.md`](mvp-ontology.md)) and extended by the Editor MVP scope ([`mvp-editor.md`](mvp-editor.md)). Open question: what's the smallest *next* prototype that introduces real distribution without losing the reflective-loop feel?
+Partially answered by the current Ontology Prototype scope ([`mvp-ontology.md`](mvp-ontology.md)) and extended by the Editor MVP scope ([`mvp-editor-projection.md`](mvp-editor-projection.md)). Open question: what's the smallest *next* prototype that introduces real distribution without losing the reflective-loop feel?
 
 ---
 
@@ -160,7 +160,7 @@ Original options preserved for context:
 
 ## 18. Undo Model — RESOLVED for Editor MVP
 
-The undo model is committed as a gate of the Editor MVP ([`mvp-editor.md`](mvp-editor.md) Gate 1). The Ontology Prototype ([`mvp-ontology.md`](mvp-ontology.md)) does not include undo and is honestly named to reflect that. Editor-shaped use waits for the Editor MVP.
+The undo model is committed as a gate of the Editor MVP ([`mvp-editor-projection.md`](mvp-editor-projection.md) Gate 1). The Ontology Prototype ([`mvp-ontology.md`](mvp-ontology.md)) does not include undo and is honestly named to reflect that. Editor-shaped use waits for the Editor MVP.
 
 **Committed shape: (c) + (d) combined.** Content components carry lightweight version tags as part of their update model; a governed history service reads them to implement undo/redo. Behavior effects that are pure derivations (e.g., `dirty`) re-derive naturally on revert; effects authored elsewhere become explicit concerns of the history service.
 
