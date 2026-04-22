@@ -380,25 +380,35 @@ impl Dispatcher {
     ) -> ServiceRetractOutcome {
         // Ownership check: the retraction is valid only if this
         // connection is the current owner of the key in `conn_facts`.
-        {
+        //
+        // F25 review fix: decide ownership under `conn_facts` alone,
+        // drop the guard, THEN (if not owned) acquire `fact_store`.
+        // `publish_from_service` locks `fact_store` before
+        // `conn_facts`; holding `conn_facts` across an await on
+        // `fact_store.lock()` here is a lock-order inversion that
+        // can deadlock the dispatcher under concurrent
+        // publish + non-owner retract.
+        let owned = {
             let mut conn_facts = self.conn_facts.lock().await;
             match conn_facts.get_mut(&conn_id) {
                 Some(set) if set.contains(&key) => {
                     set.remove(&key);
+                    true
                 }
-                _ => {
-                    // Determine which outcome to return: NotOwned if
-                    // the fact is currently asserted (by someone
-                    // else), NotPresent if it isn't in the fact store
-                    // at all.
-                    let present = self.fact_store.lock().await.query(&key).is_some();
-                    return if present {
-                        ServiceRetractOutcome::NotOwned
-                    } else {
-                        ServiceRetractOutcome::NotPresent
-                    };
-                }
+                _ => false,
             }
+        };
+        if !owned {
+            // The `conn_facts` guard has dropped — safe to acquire
+            // `fact_store` for the NotOwned-vs-NotPresent split.
+            // This check is diagnostic-only; a brief TOCTOU window
+            // between the two locks doesn't affect correctness.
+            let present = self.fact_store.lock().await.query(&key).is_some();
+            return if present {
+                ServiceRetractOutcome::NotOwned
+            } else {
+                ServiceRetractOutcome::NotPresent
+            };
         }
         let now = now_ns();
         let _ = self.sequence.next();
