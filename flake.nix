@@ -43,6 +43,11 @@
           yaml-language-server
           pkg-config
           git
+          # GitHub CLI for agent PR/issue workflows (`gh pr view`,
+          # `gh pr checks`, `gh api repos/.../pulls/.../comments`).
+          # Keep in the dev shell so agents don't need a separate
+          # ambient install.
+          gh
           uv
           python314
           jq
