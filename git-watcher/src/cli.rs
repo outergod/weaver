@@ -32,7 +32,6 @@ pub mod exit_code {
 #[derive(Parser, Debug)]
 #[command(
     name = "weaver-git-watcher",
-    version,
     about = "Weaver git-watcher: first non-editor service actor on the bus",
     long_about = "Observes one local git repository and publishes authoritative \
                   repo/* facts (dirty, head-commit, working-copy state) under a \
@@ -40,8 +39,10 @@ pub mod exit_code {
                   specs/002-git-watcher-actor/ for the specification."
 )]
 pub struct Cli {
-    /// Path to the git repository's working-tree root.
-    pub repository: PathBuf,
+    /// Path to the git repository's working-tree root. Not required
+    /// when `--version` is supplied.
+    #[arg(required_unless_present = "version")]
+    pub repository: Option<PathBuf>,
 
     /// Observation cadence. Humantime-parsed (e.g. `100ms`, `1s`).
     #[arg(long, default_value = "250ms")]
@@ -51,13 +52,21 @@ pub struct Cli {
     #[arg(long)]
     pub socket: Option<PathBuf>,
 
-    /// Output format for startup logs and --version.
+    /// Output format for startup logs and `--version`.
     #[arg(long, short = 'o', default_value = "human")]
     pub output: String,
 
     /// Increase log verbosity (repeatable: -v, -vv, -vvv).
     #[arg(long, short = 'v', action = clap::ArgAction::Count)]
     pub verbose: u8,
+
+    /// Print contracted version output (human or JSON per `--output`)
+    /// and exit. Routes through this crate's own renderer rather than
+    /// clap's built-in single-line action so the output matches
+    /// `contracts/cli-surfaces.md` (commit/dirty/built/profile/rustc/
+    /// bus_protocol/service_id fields).
+    #[arg(long, action = clap::ArgAction::SetTrue)]
+    pub version: bool,
 }
 
 #[derive(Debug, Error)]
@@ -74,10 +83,22 @@ pub enum CliError {
 pub fn run() -> Result<(), Report> {
     let cli = Cli::parse();
 
+    // F5 review fix: render the contracted version shape before any
+    // runtime setup. clap's built-in version action would have exited
+    // here producing a single-line string; routing through our own
+    // renderer honours `--output=json|human` per the CLI contract.
+    if cli.version {
+        crate::version::print_version(&cli.output);
+        return Ok(());
+    }
+
     init_tracing(cli.verbose);
 
     let poll_interval = parse_duration(&cli.poll_interval).into_diagnostic()?;
-    let repo_path = cli.repository.clone();
+    let repo_path = cli
+        .repository
+        .clone()
+        .expect("clap requires repository unless --version is set");
     let socket_override = cli.socket.clone();
 
     // T038: fail fast if the target is not a git repository.

@@ -18,3 +18,4 @@ pub mod cli;
 pub mod model;
 pub mod observer;
 pub mod publisher;
+pub mod version;
