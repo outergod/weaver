@@ -48,8 +48,12 @@ pub struct Cli {
     #[arg(long, default_value = "250ms")]
     pub poll_interval: String,
 
-    /// Override the bus socket path.
-    #[arg(long)]
+    /// Override the bus socket path. Mirrors core's lookup order:
+    /// `--socket` wins, then the `WEAVER_SOCKET` env var, then the
+    /// XDG/`/tmp` default. Keeping env parity with `weaver run`
+    /// means a watcher launched without `--socket` will find the
+    /// same socket core writes to (F20 review fix).
+    #[arg(long, env = "WEAVER_SOCKET")]
     pub socket: Option<PathBuf>,
 
     /// Output format for startup logs and `--version`.
