@@ -149,9 +149,9 @@ Markers apply in addition to `[P]` and `[Story]`:
 ### TUI: Repositories section
 
 - [X] T051 [P] [US1] Extend `tui/src/client.rs` subscription to include `FamilyPrefix("repo/")` and `FamilyPrefix("watcher/")` in addition to existing `"buffer/"`
-- [ ] T052 [US1] Extend `tui/src/render.rs` with a `render_repositories` function producing the Repositories section per `contracts/cli-surfaces.md`. State badge logic: `[on <name>]` if `repo/state/on-branch` asserted; `[detached <short-sha>]` if `repo/state/detached`; `[unborn <name>]` if `repo/state/unborn`; `[state unknown]` otherwise; append `[observability lost]` if `repo/observable = false`; append `[stale]` when the TUI's subscription has dropped
-- [ ] T053 [US1] Dirty-indicator rendering in `tui/src/render.rs`: `clean` / `dirty` next to the state badge; suppressed when `repo/observable = false`
-- [ ] T054 [US1] Authoring-actor line in the TUI Repositories section: `by service {service_id} (inst {short-uuid}), event {id}, {elapsed}s ago`
+- [X] T052 [US1] Extend `tui/src/render.rs` with a `render_repositories` function producing the Repositories section per `contracts/cli-surfaces.md`. State badge logic: `[on <name>]` if `repo/state/on-branch` asserted; `[detached <short-sha>]` if `repo/state/detached`; `[unborn <name>]` if `repo/state/unborn`; `[state unknown]` otherwise; append `[observability lost]` if `repo/observable = false`; append `[stale]` when the TUI's subscription has dropped
+- [X] T053 [US1] Dirty-indicator rendering in `tui/src/render.rs`: `clean` / `dirty` next to the state badge; suppressed when `repo/observable = false`
+- [X] T054 [US1] Authoring-actor line in the TUI Repositories section: `by service {service_id} (inst {short-uuid}), event {id}, {elapsed}s ago`
 
 ### End-to-end tests (Phase 3)
 
