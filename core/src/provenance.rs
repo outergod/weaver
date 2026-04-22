@@ -203,6 +203,22 @@ impl ActorIdentity {
     pub fn validate(&self) -> Result<(), ProvenanceError> {
         match self {
             Self::Service { service_id, .. } => validate_kebab_case(service_id),
+            Self::Behavior { id } => {
+                // F24 review fix: this branch used to fall through
+                // as payload-less, letting a wire-derived
+                // `Behavior { id: "" }` (or any string) slip into
+                // trace/inspection. Non-empty is the wire-edge
+                // floor here; stricter family/name vocabulary
+                // rules belong inside `BehaviorId` itself and are
+                // a follow-up for a later slice.
+                if id.as_str().is_empty() {
+                    Err(ProvenanceError::EmptyIdentityField {
+                        field: "behavior-id",
+                    })
+                } else {
+                    Ok(())
+                }
+            }
             Self::User { id } => {
                 if id.as_str().is_empty() {
                     Err(ProvenanceError::EmptyIdentityField { field: "user-id" })
@@ -243,7 +259,7 @@ impl ActorIdentity {
             }
             // Payload-less variants have no further invariants to
             // check beyond their type-level structure.
-            Self::Core | Self::Behavior { .. } | Self::Tui => Ok(()),
+            Self::Core | Self::Tui => Ok(()),
         }
     }
 }
@@ -318,6 +334,17 @@ mod tests {
         assert!(ActorIdentity::service("a", Uuid::nil()).is_ok());
         assert!(ActorIdentity::service("weaver-cli", Uuid::nil()).is_ok());
         assert!(ActorIdentity::service("abc-123-xyz", Uuid::nil()).is_ok());
+    }
+
+    #[test]
+    fn validate_rejects_empty_behavior_id() {
+        let id = ActorIdentity::behavior(BehaviorId::new(""));
+        assert_eq!(
+            id.validate().unwrap_err(),
+            ProvenanceError::EmptyIdentityField {
+                field: "behavior-id"
+            }
+        );
     }
 
     #[test]
