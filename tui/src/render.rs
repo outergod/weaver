@@ -19,6 +19,7 @@
 //! └─────────────────────────────────────────────────────────────────┘
 //! ```
 
+use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::io::{Write, stdout};
 use std::path::PathBuf;
@@ -377,10 +378,17 @@ fn draw<W: Write>(w: &mut W, state: &AppState) -> std::io::Result<()> {
         "Facts:"
     };
     emit(w, &mut row, format!("│ {label}"))?;
-    if state.facts.is_empty() {
+    // Only non-repo facts land here; repositories get their own
+    // section below per contracts/cli-surfaces.md §Repositories.
+    let non_repo: Vec<_> = state
+        .facts
+        .values()
+        .filter(|fd| !is_repo_fact_attribute(&fd.fact.key.attribute))
+        .collect();
+    if non_repo.is_empty() {
         emit(w, &mut row, "│   (none)".into())?;
     } else {
-        for fd in state.facts.values() {
+        for fd in &non_repo {
             emit(
                 w,
                 &mut row,
@@ -399,6 +407,40 @@ fn draw<W: Write>(w: &mut W, state: &AppState) -> std::io::Result<()> {
                     annotation(&fd.fact, fd.asserted_at_wall_ns, state.stale)
                 ),
             )?;
+        }
+    }
+    emit(w, &mut row, "│".into())?;
+
+    let repo_label = if state.stale {
+        "Repositories (stale):"
+    } else {
+        "Repositories:"
+    };
+    emit(w, &mut row, format!("│ {repo_label}"))?;
+    let repo_views = collect_repo_views(&state.facts);
+    if repo_views.is_empty() {
+        emit(w, &mut row, "│   (none)".into())?;
+    } else {
+        for view in &repo_views {
+            let path = view.path.unwrap_or("(path unknown)");
+            let badge = format_state_badge(view.state.as_ref());
+            let dirty_or_obs = format_dirty_or_obs_lost(view.observable, view.dirty);
+            let stale_tail = if state.stale { " [stale]" } else { "" };
+            emit(
+                w,
+                &mut row,
+                format!("│   {path}  {badge} {dirty_or_obs}{stale_tail}"),
+            )?;
+            if let Some(sha) = view.head_commit {
+                emit(w, &mut row, format!("│     head: {}", short_sha(sha)))?;
+            }
+            if let Some((fact, asserted_at)) = view.representative {
+                emit(
+                    w,
+                    &mut row,
+                    format!("│     {}", annotation(fact, asserted_at, state.stale)),
+                )?;
+            }
         }
     }
     emit(w, &mut row, "│".into())?;
@@ -467,6 +509,135 @@ fn draw<W: Write>(w: &mut W, state: &AppState) -> std::io::Result<()> {
     Ok(())
 }
 
+/// Does `attribute` belong to the `repo/*` family? Used to split the
+/// Facts section from the Repositories section in the TUI render.
+/// Matches what the watcher publishes: `repo/path`,
+/// `repo/head-commit`, `repo/dirty`, `repo/observable`, and
+/// `repo/state/*`.
+fn is_repo_fact_attribute(attribute: &str) -> bool {
+    attribute == "repo" || attribute.starts_with("repo/")
+}
+
+/// One repository's collapsed view, assembled from the currently-
+/// asserted `repo/*` facts for a single `EntityRef`.
+struct RepoView<'a> {
+    path: Option<&'a str>,
+    state: Option<RepoStateBadge<'a>>,
+    /// `Some(true)` when `repo/observable` is asserted as `true`;
+    /// `Some(false)` when asserted as `false`; `None` if the fact is
+    /// absent.
+    observable: Option<bool>,
+    head_commit: Option<&'a str>,
+    dirty: Option<bool>,
+    /// Any `repo/*` fact from this entity — used to pull the
+    /// service-identity `by` line via the shared `annotation`
+    /// helper. All repo facts for one entity share the same
+    /// asserting identity under F14, so any one will do.
+    representative: Option<(&'a Fact, u64)>,
+}
+
+enum RepoStateBadge<'a> {
+    OnBranch(&'a str),
+    Detached(&'a str),
+    Unborn(&'a str),
+}
+
+/// Group `repo/*` facts by `EntityRef` and assemble a `RepoView` per
+/// repository. Ordering is deterministic (`BTreeMap` on entity id) so
+/// the TUI doesn't flicker between ticks.
+fn collect_repo_views(facts: &HashMap<FactKey, FactDisplay>) -> Vec<RepoView<'_>> {
+    let mut grouped: BTreeMap<EntityRef, RepoView<'_>> = BTreeMap::new();
+    for fd in facts.values() {
+        if !is_repo_fact_attribute(&fd.fact.key.attribute) {
+            continue;
+        }
+        let entry = grouped.entry(fd.fact.key.entity).or_insert(RepoView {
+            path: None,
+            state: None,
+            observable: None,
+            head_commit: None,
+            dirty: None,
+            representative: None,
+        });
+        match fd.fact.key.attribute.as_str() {
+            "repo/path" => {
+                if let FactValue::String(s) = &fd.fact.value {
+                    entry.path = Some(s.as_str());
+                }
+            }
+            "repo/state/on-branch" => {
+                if let FactValue::String(s) = &fd.fact.value {
+                    entry.state = Some(RepoStateBadge::OnBranch(s.as_str()));
+                }
+            }
+            "repo/state/detached" => {
+                if let FactValue::String(s) = &fd.fact.value {
+                    entry.state = Some(RepoStateBadge::Detached(s.as_str()));
+                }
+            }
+            "repo/state/unborn" => {
+                if let FactValue::String(s) = &fd.fact.value {
+                    entry.state = Some(RepoStateBadge::Unborn(s.as_str()));
+                }
+            }
+            "repo/observable" => {
+                if let FactValue::Bool(b) = fd.fact.value {
+                    entry.observable = Some(b);
+                }
+            }
+            "repo/head-commit" => {
+                if let FactValue::String(s) = &fd.fact.value {
+                    entry.head_commit = Some(s.as_str());
+                }
+            }
+            "repo/dirty" => {
+                if let FactValue::Bool(b) = fd.fact.value {
+                    entry.dirty = Some(b);
+                }
+            }
+            _ => {}
+        }
+        if entry.representative.is_none() {
+            entry.representative = Some((&fd.fact, fd.asserted_at_wall_ns));
+        }
+    }
+    grouped.into_values().collect()
+}
+
+fn format_state_badge(state: Option<&RepoStateBadge<'_>>) -> String {
+    match state {
+        Some(RepoStateBadge::OnBranch(name)) => format!("[on {name}]"),
+        Some(RepoStateBadge::Detached(sha)) => format!("[detached {}]", short_sha(sha)),
+        Some(RepoStateBadge::Unborn(name)) => format!("[unborn {name}]"),
+        None => "[state unknown]".into(),
+    }
+}
+
+/// Dirty indicator, or the observability-lost badge when the repo is
+/// flagged unobservable. Per contract, dirty state is suppressed
+/// while `repo/observable = false`.
+fn format_dirty_or_obs_lost(observable: Option<bool>, dirty: Option<bool>) -> String {
+    if observable == Some(false) {
+        return "[observability lost]".into();
+    }
+    match dirty {
+        Some(true) => "dirty".into(),
+        Some(false) => "clean".into(),
+        None => "".into(),
+    }
+}
+
+/// Truncate a commit SHA for display. `git` uses 7 chars by
+/// convention; the contract's sample rendering shows 8 + ellipsis.
+fn short_sha(sha: &str) -> String {
+    const DISPLAY_CHARS: usize = 8;
+    if sha.len() > DISPLAY_CHARS {
+        format!("{}...", &sha[..DISPLAY_CHARS])
+    } else {
+        sha.to_string()
+    }
+}
+
 fn format_value(v: &FactValue) -> String {
     match v {
         FactValue::Bool(b) => b.to_string(),
@@ -532,5 +703,121 @@ impl Drop for RawModeGuard {
     fn drop(&mut self) {
         let _ = terminal::disable_raw_mode();
         let _ = execute!(stdout(), cursor::Show, terminal::LeaveAlternateScreen,);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use uuid::Uuid;
+    use weaver_core::provenance::Provenance;
+
+    fn mk_fact(entity: EntityRef, attr: &str, value: FactValue) -> FactDisplay {
+        let identity = ActorIdentity::service("git-watcher", Uuid::new_v4()).unwrap();
+        let provenance = Provenance::new(identity, 0, None).unwrap();
+        FactDisplay {
+            fact: Fact {
+                key: FactKey::new(entity, attr),
+                value,
+                provenance,
+            },
+            asserted_at_wall_ns: 0,
+        }
+    }
+
+    fn insert(facts: &mut HashMap<FactKey, FactDisplay>, fd: FactDisplay) {
+        facts.insert(fd.fact.key.clone(), fd);
+    }
+
+    #[test]
+    fn is_repo_fact_attribute_matches_repo_family_only() {
+        assert!(is_repo_fact_attribute("repo/dirty"));
+        assert!(is_repo_fact_attribute("repo/state/on-branch"));
+        assert!(is_repo_fact_attribute("repo/head-commit"));
+        assert!(!is_repo_fact_attribute("buffer/dirty"));
+        assert!(!is_repo_fact_attribute("watcher/status"));
+        assert!(!is_repo_fact_attribute("repository/dirty"));
+    }
+
+    #[test]
+    fn state_badge_renders_each_variant() {
+        assert_eq!(
+            format_state_badge(Some(&RepoStateBadge::OnBranch("main"))),
+            "[on main]"
+        );
+        assert_eq!(
+            format_state_badge(Some(&RepoStateBadge::Detached(
+                "abcdef0123456789abcdef0123456789abcdef01"
+            ))),
+            "[detached abcdef01...]"
+        );
+        assert_eq!(
+            format_state_badge(Some(&RepoStateBadge::Unborn("main"))),
+            "[unborn main]"
+        );
+        assert_eq!(format_state_badge(None), "[state unknown]");
+    }
+
+    #[test]
+    fn dirty_or_obs_lost_prefers_observability_badge() {
+        assert_eq!(
+            format_dirty_or_obs_lost(Some(false), Some(true)),
+            "[observability lost]",
+            "observable=false must suppress dirty state per contract"
+        );
+        assert_eq!(format_dirty_or_obs_lost(Some(true), Some(true)), "dirty");
+        assert_eq!(format_dirty_or_obs_lost(Some(true), Some(false)), "clean");
+        assert_eq!(format_dirty_or_obs_lost(None, Some(true)), "dirty");
+        assert_eq!(format_dirty_or_obs_lost(Some(true), None), "");
+    }
+
+    #[test]
+    fn short_sha_truncates_at_eight_chars() {
+        assert_eq!(short_sha("abcdef0123456789abcdef"), "abcdef01...");
+        // Short strings pass through untouched (defensive — the
+        // watcher always publishes full hex, but an operator running
+        // `weaver status` could see shorter values in the future).
+        assert_eq!(short_sha("abc"), "abc");
+    }
+
+    #[test]
+    fn collect_repo_views_groups_facts_by_entity() {
+        let mut facts = HashMap::new();
+        let e1 = EntityRef::new(10);
+        let e2 = EntityRef::new(20);
+        insert(
+            &mut facts,
+            mk_fact(e1, "repo/path", FactValue::String("/a".into())),
+        );
+        insert(
+            &mut facts,
+            mk_fact(e1, "repo/state/on-branch", FactValue::String("main".into())),
+        );
+        insert(&mut facts, mk_fact(e1, "repo/dirty", FactValue::Bool(true)));
+        insert(
+            &mut facts,
+            mk_fact(e2, "repo/path", FactValue::String("/b".into())),
+        );
+        insert(
+            &mut facts,
+            mk_fact(e2, "repo/observable", FactValue::Bool(false)),
+        );
+        // A non-repo fact must be ignored.
+        insert(
+            &mut facts,
+            mk_fact(EntityRef::new(99), "buffer/dirty", FactValue::Bool(true)),
+        );
+
+        let views = collect_repo_views(&facts);
+        assert_eq!(views.len(), 2);
+        let v0 = &views[0];
+        assert_eq!(v0.path, Some("/a"));
+        assert!(matches!(v0.state, Some(RepoStateBadge::OnBranch("main"))));
+        assert_eq!(v0.dirty, Some(true));
+        assert_eq!(v0.observable, None);
+        assert!(v0.representative.is_some());
+        let v1 = &views[1];
+        assert_eq!(v1.path, Some("/b"));
+        assert_eq!(v1.observable, Some(false));
     }
 }
