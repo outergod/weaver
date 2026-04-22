@@ -38,3 +38,7 @@ path = "e2e/git_watcher.rs"
 [[test]]
 name = "git_watcher_sigkill"
 path = "e2e/git_watcher_sigkill.rs"
+
+[[test]]
+name = "git_watcher_authority_conflict"
+path = "e2e/git_watcher_authority_conflict.rs"

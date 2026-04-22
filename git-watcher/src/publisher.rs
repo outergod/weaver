@@ -14,13 +14,16 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use thiserror::Error;
+use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::select;
 use tokio::signal::unix::{SignalKind, signal};
+use tokio::sync::mpsc;
 use tokio::time::interval;
 use tracing::{debug, info, warn};
 use uuid::Uuid;
 
 use weaver_core::bus::client::{Client, ClientError};
+use weaver_core::bus::codec::{CodecError, read_message, write_message};
 use weaver_core::provenance::{ActorIdentity, Provenance};
 use weaver_core::types::entity_ref::EntityRef;
 use weaver_core::types::fact::{Fact, FactKey, FactValue};
@@ -29,6 +32,24 @@ use weaver_core::types::message::{BusMessage, LifecycleSignal};
 
 use crate::model::WorkingCopyState;
 use crate::observer::{Observation, RepoObserver};
+
+/// Thin wrapper around the write half of a bus connection. Exists so
+/// the publisher's `publish_*` helpers can stay client-agnostic: they
+/// call `BusWriter::send(&BusMessage)` without knowing whether the
+/// stream was split off a `Client` or not. After slice-002's F3 fix
+/// the watcher splits its stream post-handshake so a reader task can
+/// surface server-sent `Error` frames (authority-conflict, not-owner)
+/// to the main loop while writes continue concurrently.
+pub struct BusWriter {
+    writer: OwnedWriteHalf,
+}
+
+impl BusWriter {
+    pub async fn send(&mut self, msg: &BusMessage) -> Result<(), ClientError> {
+        write_message(&mut self.writer, msg).await?;
+        Ok(())
+    }
+}
 
 /// Default bus socket path, matching the core's `cli::config::Config`
 /// default. Overridable via `--socket` on the watcher CLI.
@@ -88,11 +109,20 @@ pub async fn run(
         "weaver-git-watcher starting",
     );
 
-    // T040: handshake.
-    let mut client = Client::connect(&socket, "git-watcher")
+    // T040: handshake via Client, then split the stream so the
+    // reader task can surface server-sent Error frames concurrently
+    // with the write path (F3 review fix).
+    let client = Client::connect(&socket, "git-watcher")
         .await
         .map_err(|source| PublisherError::BusUnavailable { source })?;
     info!("connected to core; bus protocol handshake complete");
+
+    let (reader, writer_half) = client.stream.into_split();
+    let mut writer = BusWriter {
+        writer: writer_half,
+    };
+    let (err_tx, mut err_rx) = mpsc::channel::<ServerSentError>(4);
+    let reader_task = tokio::spawn(reader_loop(reader, err_tx));
 
     // Entity refs for this watcher's publications.
     let repo_entity = repo_entity_ref(observer.path());
@@ -105,7 +135,7 @@ pub async fn run(
     // Status: started → ready after bootstrap.
     debug!("publishing watcher/status Started");
     publish_watcher_status(
-        &mut client,
+        &mut writer,
         watcher_entity,
         &identity,
         LifecycleSignal::Started,
@@ -119,7 +149,7 @@ pub async fn run(
         .map_err(|source| PublisherError::Observer { source })?;
     debug!("observed initial; publishing bootstrap facts");
     publish_observation(
-        &mut client,
+        &mut writer,
         repo_entity,
         observer.path(),
         &identity,
@@ -130,7 +160,7 @@ pub async fn run(
     .await?;
     debug!("published bootstrap; marking observable=true");
     publish_fact(
-        &mut client,
+        &mut writer,
         FactKey::new(repo_entity, "repo/observable"),
         FactValue::Bool(true),
         &identity,
@@ -139,7 +169,7 @@ pub async fn run(
     )
     .await?;
     publish_watcher_status(
-        &mut client,
+        &mut writer,
         watcher_entity,
         &identity,
         LifecycleSignal::Ready,
@@ -152,12 +182,30 @@ pub async fn run(
     );
     last = Some(initial);
 
+    // Fail-fast bootstrap check: if the core rejected any of our
+    // bootstrap FactAsserts with an authority-conflict, the reader
+    // task will have queued a `ServerSentError`. A brief wait here
+    // surfaces the conflict before we enter the poll loop — so w2
+    // exits immediately with code 3 instead of looping silently.
+    if let Ok(Ok(err)) = tokio::time::timeout(Duration::from_millis(250), err_rx.recv())
+        .await
+        .map(|opt| opt.ok_or(()))
+    {
+        reader_task.abort();
+        return Err(translate_server_error(err));
+    }
+
     // Signal handlers for clean shutdown.
     let mut sigterm = signal(SignalKind::terminate()).ok();
     let mut sigint = signal(SignalKind::interrupt()).ok();
 
     let mut ticker = interval(poll_interval);
     ticker.tick().await; // burn the immediate first tick
+
+    // Track whether we're in the Degraded state so recovery re-
+    // publishes observable=true even when the repo state didn't
+    // change across the degraded window (F4 review fix).
+    let mut was_degraded = false;
 
     // T042: poll loop.
     loop {
@@ -171,6 +219,25 @@ pub async fn run(
                 info!("SIGINT received; retracting facts and exiting");
                 break;
             }
+            maybe_err = err_rx.recv() => {
+                match maybe_err {
+                    Some(err) => {
+                        reader_task.abort();
+                        return Err(translate_server_error(err));
+                    }
+                    None => {
+                        // The reader task exited (likely EOF from the
+                        // core). Treat as bus unavailability; surface
+                        // via BusUnavailable for exit-code 2.
+                        return Err(PublisherError::BusUnavailable {
+                            source: ClientError::Codec(CodecError::Io(std::io::Error::new(
+                                std::io::ErrorKind::UnexpectedEof,
+                                "bus connection closed",
+                            ))),
+                        });
+                    }
+                }
+            }
         }
 
         // Attempt observation. On error, enter Degraded (T046).
@@ -178,15 +245,16 @@ pub async fn run(
             Ok(o) => o,
             Err(e) => {
                 warn!(error = %e, "observation failed; entering Degraded");
+                was_degraded = true;
                 let _ = publish_watcher_status(
-                    &mut client,
+                    &mut writer,
                     watcher_entity,
                     &identity,
                     LifecycleSignal::Degraded,
                 )
                 .await;
                 let _ = publish_fact(
-                    &mut client,
+                    &mut writer,
                     FactKey::new(repo_entity, "repo/observable"),
                     FactValue::Bool(false),
                     &identity,
@@ -198,13 +266,37 @@ pub async fn run(
             }
         };
 
+        // F4 review fix: if we were Degraded, publish Ready +
+        // observable=true *unconditionally* on the first successful
+        // observation — not just inside the `prev != obs` branch.
+        if was_degraded {
+            debug!("observation recovered from Degraded; publishing Ready + observable=true");
+            let _ = publish_watcher_status(
+                &mut writer,
+                watcher_entity,
+                &identity,
+                LifecycleSignal::Ready,
+            )
+            .await;
+            let _ = publish_fact(
+                &mut writer,
+                FactKey::new(repo_entity, "repo/observable"),
+                FactValue::Bool(true),
+                &identity,
+                None,
+                &mut tracked,
+            )
+            .await;
+            was_degraded = false;
+        }
+
         if let Some(prev) = &last {
             if prev != &obs {
                 // Synthesize a poll-tick event id so transition
                 // retract+assert share a causal parent.
                 let poll_tick_id = EventId::new(now_ns());
                 diff_publish(
-                    &mut client,
+                    &mut writer,
                     repo_entity,
                     observer.path(),
                     &identity,
@@ -214,24 +306,6 @@ pub async fn run(
                     poll_tick_id,
                 )
                 .await?;
-                // If we were Degraded and observation recovered, return
-                // to Ready + mark observable.
-                let _ = publish_watcher_status(
-                    &mut client,
-                    watcher_entity,
-                    &identity,
-                    LifecycleSignal::Ready,
-                )
-                .await;
-                let _ = publish_fact(
-                    &mut client,
-                    FactKey::new(repo_entity, "repo/observable"),
-                    FactValue::Bool(true),
-                    &identity,
-                    None,
-                    &mut tracked,
-                )
-                .await;
             }
         }
         last = Some(obs);
@@ -239,23 +313,92 @@ pub async fn run(
 
     // T047: shutdown — retract all facts this instance published, then
     // emit Unavailable → Stopped.
-    shutdown_retract(&mut client, &identity, &mut tracked).await;
+    shutdown_retract(&mut writer, &identity, &mut tracked).await;
     let _ = publish_watcher_status(
-        &mut client,
+        &mut writer,
         watcher_entity,
         &identity,
         LifecycleSignal::Unavailable,
     )
     .await;
     let _ = publish_watcher_status(
-        &mut client,
+        &mut writer,
         watcher_entity,
         &identity,
         LifecycleSignal::Stopped,
     )
     .await;
+    reader_task.abort();
     debug!("publisher exiting cleanly");
     Ok(())
+}
+
+/// Reader task: drains server-sent `BusMessage`s, filters for the
+/// `Error` variants that matter to the publisher's control flow, and
+/// forwards them over `err_tx`. Exits cleanly on EOF (drops `err_tx`,
+/// which wakes the main loop's recv arm with `None`).
+async fn reader_loop(mut reader: OwnedReadHalf, err_tx: mpsc::Sender<ServerSentError>) {
+    loop {
+        match read_message(&mut reader).await {
+            Ok(BusMessage::Error(msg)) => {
+                let classified = match msg.category.as_str() {
+                    "authority-conflict" => ServerSentError::AuthorityConflict {
+                        detail: msg.detail.clone(),
+                    },
+                    "not-owner" => ServerSentError::NotOwner {
+                        detail: msg.detail.clone(),
+                    },
+                    _ => ServerSentError::Other {
+                        category: msg.category.clone(),
+                        detail: msg.detail.clone(),
+                    },
+                };
+                // Send-best-effort; if the main loop has already
+                // torn down, dropping is fine.
+                let fatal = matches!(classified, ServerSentError::AuthorityConflict { .. });
+                let _ = err_tx.send(classified).await;
+                if fatal {
+                    return;
+                }
+            }
+            Ok(_) => {
+                // Other server-sent messages (SubscribeAck,
+                // FactAssert from other publishers, etc.) aren't
+                // actionable here; ignore.
+            }
+            Err(_) => {
+                // EOF or codec error. Dropping err_tx here signals
+                // the main loop that the connection is gone.
+                return;
+            }
+        }
+    }
+}
+
+/// Classified server-sent error surfaced from the reader task to the
+/// main poll loop. Other categories are forwarded for diagnostics but
+/// don't necessarily cause publisher exit.
+#[derive(Debug)]
+enum ServerSentError {
+    AuthorityConflict { detail: String },
+    NotOwner { detail: String },
+    Other { category: String, detail: String },
+}
+
+fn translate_server_error(err: ServerSentError) -> PublisherError {
+    match err {
+        ServerSentError::AuthorityConflict { detail } => {
+            PublisherError::AuthorityConflict { detail }
+        }
+        ServerSentError::NotOwner { detail } => PublisherError::AuthorityConflict {
+            detail: format!("not-owner: {detail}"),
+        },
+        ServerSentError::Other { category, detail } => PublisherError::Client {
+            source: ClientError::Codec(CodecError::Io(std::io::Error::other(format!(
+                "server error {category}: {detail}"
+            )))),
+        },
+    }
 }
 
 async fn wait_signal(sig: &mut Option<tokio::signal::unix::Signal>) {
@@ -271,7 +414,7 @@ async fn wait_signal(sig: &mut Option<tokio::signal::unix::Signal>) {
 /// `repo/path`, `repo/dirty`, `repo/head-commit` (if Some), and the
 /// single `repo/state/*` variant matching the observation.
 async fn publish_observation(
-    client: &mut Client,
+    writer: &mut BusWriter,
     repo_entity: EntityRef,
     repo_path: &Path,
     identity: &ActorIdentity,
@@ -280,7 +423,7 @@ async fn publish_observation(
     causal_parent: Option<EventId>,
 ) -> Result<(), PublisherError> {
     publish_fact(
-        client,
+        writer,
         FactKey::new(repo_entity, "repo/path"),
         FactValue::String(repo_path.display().to_string()),
         identity,
@@ -289,7 +432,7 @@ async fn publish_observation(
     )
     .await?;
     publish_fact(
-        client,
+        writer,
         FactKey::new(repo_entity, "repo/dirty"),
         FactValue::Bool(obs.dirty),
         identity,
@@ -299,7 +442,7 @@ async fn publish_observation(
     .await?;
     if let Some(sha) = &obs.head_commit {
         publish_fact(
-            client,
+            writer,
             FactKey::new(repo_entity, "repo/head-commit"),
             FactValue::String(sha.clone()),
             identity,
@@ -310,7 +453,7 @@ async fn publish_observation(
     }
     let (state_attr, state_value) = state_fact(&obs.state);
     publish_fact(
-        client,
+        writer,
         FactKey::new(repo_entity, state_attr),
         state_value,
         identity,
@@ -344,7 +487,7 @@ fn state_fact(state: &WorkingCopyState) -> (&'static str, FactValue) {
 /// matching T043 semantics (mutex invariant preserved).
 #[allow(clippy::too_many_arguments)] // TODO: refactor into a PublisherCtx { client, identity, tracked } + diff(&self, prev, next, ...) in a follow-up.
 async fn diff_publish(
-    client: &mut Client,
+    writer: &mut BusWriter,
     repo_entity: EntityRef,
     repo_path: &Path,
     identity: &ActorIdentity,
@@ -359,7 +502,7 @@ async fn diff_publish(
     if std::mem::discriminant(&prev.state) != std::mem::discriminant(&next.state) {
         let (prev_attr, _) = state_fact(&prev.state);
         retract_fact(
-            client,
+            writer,
             FactKey::new(repo_entity, prev_attr),
             identity,
             causal,
@@ -372,7 +515,7 @@ async fn diff_publish(
     // updates in place.
     let (state_attr, state_value) = state_fact(&next.state);
     publish_fact(
-        client,
+        writer,
         FactKey::new(repo_entity, state_attr),
         state_value,
         identity,
@@ -385,7 +528,7 @@ async fn diff_publish(
     // these are single-value attributes.
     if prev.dirty != next.dirty {
         publish_fact(
-            client,
+            writer,
             FactKey::new(repo_entity, "repo/dirty"),
             FactValue::Bool(next.dirty),
             identity,
@@ -398,7 +541,7 @@ async fn diff_publish(
         match &next.head_commit {
             Some(sha) => {
                 publish_fact(
-                    client,
+                    writer,
                     FactKey::new(repo_entity, "repo/head-commit"),
                     FactValue::String(sha.clone()),
                     identity,
@@ -409,7 +552,7 @@ async fn diff_publish(
             }
             None => {
                 retract_fact(
-                    client,
+                    writer,
                     FactKey::new(repo_entity, "repo/head-commit"),
                     identity,
                     causal,
@@ -426,7 +569,7 @@ async fn diff_publish(
     let path_key = FactKey::new(repo_entity, "repo/path");
     if !tracked.contains(&path_key) {
         publish_fact(
-            client,
+            writer,
             path_key.clone(),
             FactValue::String(path_str),
             identity,
@@ -439,7 +582,7 @@ async fn diff_publish(
 }
 
 async fn publish_watcher_status(
-    client: &mut Client,
+    writer: &mut BusWriter,
     watcher_entity: EntityRef,
     identity: &ActorIdentity,
     signal: LifecycleSignal,
@@ -463,7 +606,7 @@ async fn publish_watcher_status(
         value: FactValue::String(label.into()),
         provenance: prov,
     };
-    client
+    writer
         .send(&BusMessage::FactAssert(fact))
         .await
         .map_err(|source| PublisherError::Client { source })?;
@@ -474,7 +617,7 @@ async fn publish_watcher_status(
 }
 
 async fn publish_fact(
-    client: &mut Client,
+    writer: &mut BusWriter,
     key: FactKey,
     value: FactValue,
     identity: &ActorIdentity,
@@ -488,7 +631,7 @@ async fn publish_fact(
         value,
         provenance: prov,
     };
-    client
+    writer
         .send(&BusMessage::FactAssert(fact))
         .await
         .map_err(|source| PublisherError::Client { source })?;
@@ -497,7 +640,7 @@ async fn publish_fact(
 }
 
 async fn retract_fact(
-    client: &mut Client,
+    writer: &mut BusWriter,
     key: FactKey,
     identity: &ActorIdentity,
     causal_parent: Option<EventId>,
@@ -505,7 +648,7 @@ async fn retract_fact(
 ) -> Result<(), PublisherError> {
     let prov = Provenance::new(identity.clone(), now_ns(), causal_parent)
         .expect("ActorIdentity is always well-formed");
-    client
+    writer
         .send(&BusMessage::FactRetract {
             key: key.clone(),
             provenance: prov,
@@ -517,7 +660,7 @@ async fn retract_fact(
 }
 
 async fn shutdown_retract(
-    client: &mut Client,
+    writer: &mut BusWriter,
     identity: &ActorIdentity,
     tracked: &mut HashSet<FactKey>,
 ) {
@@ -527,7 +670,7 @@ async fn shutdown_retract(
             Ok(p) => p,
             Err(_) => continue,
         };
-        let _ = client
+        let _ = writer
             .send(&BusMessage::FactRetract {
                 key,
                 provenance: prov,
