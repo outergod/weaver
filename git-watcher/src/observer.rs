@@ -99,7 +99,7 @@ impl RepoObserver {
         let state = working_copy_state_from_head(&head)?;
         let head_commit = match &state {
             WorkingCopyState::OnBranch { .. } | WorkingCopyState::Detached { .. } => {
-                self.resolve_head_commit()?
+                Some(self.resolve_head_commit()?)
             }
             WorkingCopyState::Unborn { .. } => None,
         };
@@ -111,13 +111,23 @@ impl RepoObserver {
         })
     }
 
-    /// Resolve `HEAD` to a commit SHA (hex string). `None` for unborn
-    /// branches.
-    fn resolve_head_commit(&self) -> Result<Option<String>, ObserverError> {
-        match self.repo.rev_parse_single("HEAD") {
-            Ok(object_id) => Ok(Some(object_id.to_hex().to_string())),
-            Err(_) => Ok(None),
-        }
+    /// Resolve `HEAD` to a commit SHA (hex string). The caller only
+    /// invokes this after `working_copy_state_from_head` has
+    /// classified HEAD as `OnBranch` or `Detached`, i.e. a commit is
+    /// expected to exist. A failure here therefore indicates real
+    /// repository trouble (corrupt refs, missing object store,
+    /// permission revoked mid-run) and must surface as
+    /// `ObserverError::Observation` so the publisher transitions to
+    /// `Degraded` + `repo/observable=false` rather than publishing
+    /// an apparently-healthy observation with a missing
+    /// `repo/head-commit` (F13 review fix).
+    fn resolve_head_commit(&self) -> Result<String, ObserverError> {
+        self.repo
+            .rev_parse_single("HEAD")
+            .map(|oid| oid.to_hex().to_string())
+            .map_err(|e| ObserverError::Observation {
+                source: Box::new(e),
+            })
     }
 
     /// Working-tree-or-index differs from HEAD (per Clarification Q5).
@@ -292,6 +302,31 @@ mod tests {
             from_root.path(),
             from_subdir.path(),
             "subdirectory input must resolve to the same repo root"
+        );
+    }
+
+    #[test]
+    fn head_resolution_failure_surfaces_as_observation_error() {
+        // F13 regression: a symbolic HEAD pointing at a missing
+        // commit object used to silently collapse into
+        // `head_commit = None` while the overall observe()
+        // returned Ok. Consumers would see apparently-healthy
+        // state with an attribute gap. The fix bubbles such
+        // failures up as ObserverError::Observation so the
+        // publisher flips to Degraded + observable=false.
+        let td = tempfile::tempdir().unwrap();
+        init_repo(td.path());
+        commit_one(td.path(), "a.txt", "hello", "initial");
+        let obs = RepoObserver::open(td.path()).unwrap();
+        // Corrupt the object store after open: HEAD still symbolically
+        // resolves to refs/heads/main (so state classification
+        // succeeds as OnBranch), but rev_parse_single fails because
+        // the target commit object is gone.
+        std::fs::remove_dir_all(td.path().join(".git/objects")).unwrap();
+        let err = obs.observe().unwrap_err();
+        assert!(
+            matches!(err, ObserverError::Observation { .. }),
+            "expected ObserverError::Observation, got {err:?}"
         );
     }
 
