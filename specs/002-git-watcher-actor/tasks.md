@@ -159,7 +159,7 @@ Markers apply in addition to `[P]` and `[Story]`:
 - [X] T056 [P] [US1] E2E test in `tests/e2e/git_watcher_transitions.rs`: start watcher on a repo on `main`; from outside, `git checkout <sha>`; assert the test client observes `FactRetract(repo/state/on-branch)` and `FactAssert(repo/state/detached)` in sequence with a shared `causal_parent` event id. Repeat for the return path (checkout back to `main`) and for unborn→on-branch (initial commit on a fresh repo) **{retraction}**
 - [X] T057 [P] [US1] E2E test in `tests/e2e/git_watcher_dirty.rs`: start watcher on a clean repo; modify a tracked file; assert `repo/dirty=true` observed within SC-002 (500ms). Stage the change; verify `repo/dirty=true` persists. Commit; verify `repo/dirty=false` observed within 500ms. Also verify untracked-only state stays at `repo/dirty=false` per Q5 semantics **{latency:interactive}**
 - [X] T058 [P] [US1] E2E test in `tests/e2e/git_watcher_disconnect.rs`: start watcher; kill watcher process; assert the test client sees `Lifecycle(Unavailable)` + `FactRetract` for every prior `repo/*` fact; `weaver status --output=json` confirms no `repo/*` facts remain asserted **{retraction}**
-- [ ] T059 [US1] E2E test in `tests/e2e/git_watcher_authority_conflict.rs`: start watcher A on repo R; start watcher B on same repo R; assert watcher B receives `Error { category: "authority-conflict", ... }` and exits with code 3 (`WEAVER-GW-003`)
+- [X] T059 [US1] E2E test in `tests/e2e/git_watcher_authority_conflict.rs`: start watcher A on repo R; start watcher B on same repo R; assert watcher B receives `Error { category: "authority-conflict", ... }` and exits with code 3 (`WEAVER-GW-003`) — shipped in commit `0227bdd` (initial e2e); F3 fix wired reader-task + fail-fast bootstrap check in `3f76825`
 
 ### Scenario / property tests (Phase 3)
 
@@ -202,11 +202,11 @@ Markers apply in addition to `[P]` and `[Story]`:
 **Purpose**: Changelog, documentation, quickstart validation.
 
 - [ ] T069 [P] Update `CHANGELOG.md` (extend the Phase-2 entries) with fact-family schema entries: `repo/dirty 0.1.0`, `repo/head-commit 0.1.0`, `repo/state/on-branch 0.1.0`, `repo/state/detached 0.1.0`, `repo/state/unborn 0.1.0`, `repo/observable 0.1.0`, `repo/path 0.1.0`, `watcher/status 0.1.0` per L2 P8 **{surface:fact}**
-- [ ] T070 [P] Ensure `weaver-git-watcher --version` and `weaver --version` and `weaver-tui --version` all report `bus_protocol: "0.2.0"` consistently
+- [X] T070 [P] Ensure `weaver-git-watcher --version` and `weaver --version` and `weaver-tui --version` all report `bus_protocol: "0.2.0"` consistently — all three binaries render from the single `BUS_PROTOCOL_VERSION_STR` constant in `core/src/types/message.rs`; verified with all three binaries emitting `bus protocol: v0.2.0` (2026-04-22)
 - [ ] T071 Update `git-watcher/README.md` with usage example matching `quickstart.md`
-- [ ] T072 Run `cargo lint` + `cargo fmt-check` + `cargo test --workspace` + `scripts/ci.sh` — all green
+- [X] T072 Run `cargo lint` + `cargo fmt-check` + `cargo test --workspace` + `scripts/ci.sh` — all green — pre-commit hooks enforced at every commit throughout the slice; re-verified at reconcile time: `scripts/ci.sh [ci] OK` with 32 test-result lines all passing (2026-04-22)
 - [ ] T073 Run the `quickstart.md` procedure manually end-to-end (the three-terminal walkthrough); confirm each SC-001..SC-006 criterion passes; take notes on any friction for future quickstart revisions
-- [ ] T074 Grep the codebase to confirm zero remaining references to `SourceId::External(`; confirm no `.to_string()` path on any `ActorIdentity` produces an opaque tag in CLI / JSON / trace output
+- [X] T074 Grep the codebase to confirm zero remaining references to `SourceId::External(`; confirm no `.to_string()` path on any `ActorIdentity` produces an opaque tag in CLI / JSON / trace output — no live-code references remain; the two matches in `core/src/provenance.rs` and `core/src/types/message.rs` are `//!` doc comments describing the slice-002 replacement migration and are intentional historical context (2026-04-22)
 
 ---
 
