@@ -58,15 +58,25 @@ impl RepoObserver {
     ///
     /// The identity path (used for `repo/path` and for the `EntityRef`
     /// that keys the authority mutex) is the *discovered* working-tree
-    /// root for non-bare repos, or the `.git` directory for bare repos
-    /// — never the user-typed input. Two watchers pointed at different
-    /// subdirectories of the same repo therefore resolve to the same
-    /// `EntityRef` and FR-009's single-writer rule still holds.
+    /// root — never the user-typed input. Two watchers pointed at
+    /// different subdirectories of the same repo therefore resolve to
+    /// the same `EntityRef` and FR-009's single-writer rule still
+    /// holds (F6 review fix).
+    ///
+    /// Bare repositories are rejected at open time (F9 review fix):
+    /// the watcher's entire data model is working-copy state, which
+    /// has no meaning without a work tree, and `is_dirty` would thrash
+    /// into `Degraded` every poll because `git diff HEAD --quiet`
+    /// refuses to run on a bare repo.
     pub fn open(path: &Path) -> Result<Self, ObserverError> {
         let repo = gix::discover(path).map_err(|_| ObserverError::NotARepository {
             path: path.display().to_string(),
         })?;
-        let root = repo.work_dir().unwrap_or_else(|| repo.git_dir());
+        let root = repo
+            .work_dir()
+            .ok_or_else(|| ObserverError::BareRepositoryUnsupported {
+                path: repo.git_dir().display().to_string(),
+            })?;
         let canon = root
             .canonicalize()
             .map_err(|e| ObserverError::Observation {
@@ -243,6 +253,25 @@ mod tests {
         run_git(td.path(), &["add", "a.txt"]);
         let obs = RepoObserver::open(td.path()).unwrap().observe().unwrap();
         assert!(obs.dirty, "staged change alone should mark the repo dirty");
+    }
+
+    #[test]
+    fn open_rejects_bare_repository() {
+        // F9 regression: bare repos have no working tree; allowing
+        // them would let the dirty-check (`git diff HEAD --quiet`)
+        // fail every poll and trap the watcher in Degraded state.
+        let td = tempfile::tempdir().unwrap();
+        let status = Command::new("git")
+            .args(["init", "--bare", "-q"])
+            .arg(td.path())
+            .status()
+            .expect("git init --bare runs");
+        assert!(status.success());
+        let err = RepoObserver::open(td.path()).unwrap_err();
+        assert!(
+            matches!(err, ObserverError::BareRepositoryUnsupported { .. }),
+            "expected BareRepositoryUnsupported, got {err:?}"
+        );
     }
 
     #[test]

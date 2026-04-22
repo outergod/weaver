@@ -53,6 +53,13 @@ pub enum ObserverError {
     NotARepository { path: String },
 
     #[error(
+        "repository at {path} is bare; weaver-git-watcher observes \
+         working-copy state (repo/dirty, repo/state/*) which has no \
+         meaning without a working tree"
+    )]
+    BareRepositoryUnsupported { path: String },
+
+    #[error(
         "repository at {path} is in a transient operation state unsupported this slice; deferred per Clarification Q4"
     )]
     UnsupportedTransientState { path: String },
