@@ -154,7 +154,26 @@ async fn handle_connection(
     tracing::info!(target: "weaver::bus", client_kind = %client_kind, "client connected");
     write_message(&mut stream, &BusMessage::Lifecycle(LifecycleSignal::Ready)).await?;
 
-    // 2. Multiplexed message loop.
+    // F7 review fix: every exit from the post-handshake loop — clean
+    // EOF, codec error reading, a write failure bubbled up from
+    // `handle_client_message`, or a subscription forward failure —
+    // must release this connection's claims + conn-owned facts.
+    // Earlier the `?` propagation on write-side errors skipped
+    // cleanup entirely, so a client that both published and subscribed
+    // would leak its authority claims on broken-pipe, blocking
+    // replacement publishers until core restart. Funneling the loop
+    // through an inner helper guarantees the cleanup always runs.
+    let result = run_message_loop(conn_id, &mut stream, &dispatcher, &client_kind).await;
+    dispatcher.release_connection(conn_id).await;
+    result
+}
+
+async fn run_message_loop(
+    conn_id: u64,
+    stream: &mut UnixStream,
+    dispatcher: &Arc<Dispatcher>,
+    client_kind: &str,
+) -> Result<(), ListenerError> {
     let mut subscription: Option<SubscriptionHandle> = None;
     loop {
         // If the client is not subscribed yet, just read from the
@@ -163,17 +182,17 @@ async fn handle_connection(
         let next = match subscription.as_mut() {
             Some(sub) => {
                 tokio::select! {
-                    msg = read_message(&mut stream) => Incoming::Client(msg),
+                    msg = read_message(stream) => Incoming::Client(msg),
                     evt = sub.rx.recv() => Incoming::FactEvent(evt),
                 }
             }
-            None => Incoming::Client(read_message(&mut stream).await),
+            None => Incoming::Client(read_message(stream).await),
         };
 
         match next {
             Incoming::Client(Ok(msg)) => {
                 if let Some(new_sub) =
-                    handle_client_message(conn_id, msg, &dispatcher, &mut stream).await?
+                    handle_client_message(conn_id, msg, dispatcher, stream).await?
                 {
                     subscription = Some(new_sub);
                 }
@@ -182,15 +201,11 @@ async fn handle_connection(
                 if e.kind() == std::io::ErrorKind::UnexpectedEof =>
             {
                 tracing::info!(target: "weaver::bus", client_kind = %client_kind, "client disconnected");
-                dispatcher.release_connection(conn_id).await;
                 return Ok(());
             }
-            Incoming::Client(Err(e)) => {
-                dispatcher.release_connection(conn_id).await;
-                return Err(e.into());
-            }
+            Incoming::Client(Err(e)) => return Err(e.into()),
             Incoming::FactEvent(Some(evt)) => {
-                forward_fact_event(evt, &mut stream).await?;
+                forward_fact_event(evt, stream).await?;
             }
             Incoming::FactEvent(None) => {
                 // Subscription channel closed (should not happen in
