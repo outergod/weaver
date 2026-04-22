@@ -138,6 +138,19 @@ pub fn run() -> Result<(), Report> {
             eprintln!("error: {}", outcome.unwrap_err());
             std::process::exit(exit_code::AUTHORITY_CONFLICT);
         }
+        Err(PublisherError::Observer { .. }) => {
+            // F22 review fix: the CLI-level `RepoObserver::open`
+            // catches the common not-a-repo case early, but the
+            // *first* `observe()` inside `publisher::run` can still
+            // fail on permission loss or repository corruption
+            // during bootstrap. That's a startup-environment
+            // problem, not an unclassified internal error — map
+            // to exit 1 per contracts/cli-surfaces.md so operator
+            // automation distinguishes "config/env wrong" from
+            // "core panic / unknown bug".
+            eprintln!("error: {}", outcome.unwrap_err());
+            std::process::exit(exit_code::STARTUP_FAILURE);
+        }
         Err(e) => {
             eprintln!("error: {e}");
             std::process::exit(exit_code::INTERNAL);
