@@ -31,12 +31,18 @@ pub struct TuiClient {
     pub reader_task: JoinHandle<()>,
 }
 
-/// Connect, handshake, subscribe to `buffer/*`, and spawn the background
-/// reader task.
+/// Connect, handshake, subscribe to every fact family the TUI
+/// renders, and spawn the background reader task.
+///
+/// Slice 001 shipped with `buffer/*` only. Slice 002 adds `repo/*`
+/// and `watcher/*` so the git-watcher's facts render in the
+/// Repositories section. `AllFacts` is used instead of multiple
+/// prefix subscriptions — the TUI cares about the full fact space
+/// for rendering and inspection.
 pub async fn connect(socket: &Path) -> miette::Result<TuiClient> {
     let mut client = Client::connect(socket, "tui").await.map_err(map_err)?;
     let _starting_sequence = client
-        .subscribe(SubscribePattern::FamilyPrefix("buffer/".into()))
+        .subscribe(SubscribePattern::AllFacts)
         .await
         .map_err(map_err)?;
 

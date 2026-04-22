@@ -7,12 +7,36 @@ Per-public-surface versioning is per L2 constitution Principle 8 (`.specify/memo
 
 ## Public surfaces tracked
 
-Per L2 Principle 7, each public surface carries its own version. Surfaces introduced in this initial release are at v0.1.0 (initial — no prior to migrate from):
+Per L2 Principle 7, each public surface carries its own version.
 
-- **Bus protocol** v0.1.0 — message categories, delivery classes (lossy / authoritative), CBOR tag scheme entries 1000 (entity-ref) and 1001 (keyword). See `specs/001-hello-fact/contracts/bus-messages.md`.
-- **Fact-family schema `buffer/dirty`** v0.1.0 — boolean fact on a buffer entity indicating unsaved changes.
-- **CLI surface** v0.1.0 — `weaver run`, `weaver --version`, `weaver status`, `weaver inspect`, `weaver simulate-edit`, `weaver simulate-clean`; `weaver-tui` binary; global flags `-v`, `-o`/`--output=<format>`, `--socket=<path>`. See `specs/001-hello-fact/contracts/cli-surfaces.md`.
-- **Configuration schema** v0.1.0 — XDG-based config file with `socket_path`, `log_level` keys; env vars `WEAVER_SOCKET`, `RUST_LOG`.
+- **Bus protocol** v0.2.0 (was v0.1.0) — message categories, delivery classes (lossy / authoritative), CBOR tag scheme entries 1000 (entity-ref), 1001 (keyword), **1002 (structured actor identity, slice 002)**. See `specs/002-git-watcher-actor/contracts/bus-messages.md`.
+- **Fact-family schema `buffer/dirty`** v0.1.0 — unchanged since slice 001.
+- **CLI surface** v0.1.0 — unchanged surface shape; internal rendering of actor identity updated in lockstep with the bus-protocol bump (slice 002 adds `weaver-git-watcher` binary in Phase 3).
+- **Configuration schema** v0.1.0 — unchanged.
+
+## [Unreleased] — slice 002 Phase 2 — Foundational (ActorIdentity migration)
+
+**Breaking bus-protocol change** — version bumps `0.1.0 → 0.2.0`. Slice 001 clients cannot connect to a v0.2.0 core; all in-tree bus clients (core, TUI, CLI, e2e test harness, test client) rebuild together.
+
+### Changed — bus protocol (MAJOR)
+
+- **Provenance `source` shape** changed from opaque `SourceId::External(String)` to structured `ActorIdentity` — one closed enum per actor kind in `docs/01-system-model.md §6`. Variants: `Core`, `Behavior { id }`, `Tui`, `Service { service-id, instance-id }`, `User { id }`, `Host { host-id, hosted-origin }`, `Agent { agent-id, on-behalf-of }`. Wire shape: internally-tagged CBOR/JSON with kebab-case `type` discriminator and kebab-case field names. Closes `docs/07-open-questions.md §25` sub-questions: *shape* (single closed enum) and *migration* (replace, not extend). See `specs/002-git-watcher-actor/` Clarifications Q1, Q2.
+- **New CBOR tag 1002** reserved for structured actor identity (adjacent to the slice-001 tags 1000 and 1001).
+- **`LifecycleSignal`** extended with `Degraded`, `Unavailable`, `Restarting` variants per `docs/05-protocols.md §5`. Slice-001 core continues to emit only `Started` / `Ready` / `Stopped`; the richer states are intended for services that can degrade without exiting.
+- **`Hello.protocol_version`** advances `0x01 → 0x02`. Mismatched clients receive `Error { category: "version-mismatch", ... }` and connection close (unchanged handshake logic; bumped constant).
+
+### Added — core
+
+- `ActorIdentity::service(service_id, instance_id)` constructor with kebab-case validation (L2 Amendment 5); rejects empty identifiers and identifiers containing uppercase, underscores, whitespace, leading/trailing/consecutive hyphens.
+- `ActorIdentity::behavior(id)` / `ActorIdentity::user(id)` convenience constructors.
+- `UserId`, `HostedOrigin` placeholder types — reserved for forward-compat, not emitted this slice.
+- `kind_label()` method on `ActorIdentity` for diagnostic rendering.
+- `uuid` workspace dependency (`v4` feature) per Clarification Q3.
+
+### Added — watcher crate scaffold
+
+- New workspace member `git-watcher/` — produces the `weaver-git-watcher` binary. Phase 1 scaffold only: CLI prints a Phase-1 marker and exits. Real implementation lands in Phase 3 (US1).
+- Workspace deps: `gix = "0.66"` (pure-Rust git; research §1), `humantime = "2"` (for `--poll-interval` in Phase 3).
 
 ## [0.1.0] — 2026-04-20 — slice 001 "Hello, fact"
 

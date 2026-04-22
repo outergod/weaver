@@ -7,7 +7,7 @@
 use weaver_core::behavior::dirty_tracking::DirtyTrackingBehavior;
 use weaver_core::behavior::dispatcher::Dispatcher;
 use weaver_core::fact_space::FactStore;
-use weaver_core::provenance::{Provenance, SourceId};
+use weaver_core::provenance::{ActorIdentity, Provenance};
 use weaver_core::types::entity_ref::EntityRef;
 use weaver_core::types::event::{Event, EventPayload};
 use weaver_core::types::fact::{FactKey, FactValue};
@@ -25,7 +25,7 @@ async fn buffer_edited_asserts_buffer_dirty() {
         name: "buffer/edited".into(),
         target: Some(entity),
         payload: EventPayload::BufferEdited,
-        provenance: Provenance::new(SourceId::Tui, 1_000, None).unwrap(),
+        provenance: Provenance::new(ActorIdentity::Tui, 1_000, None).unwrap(),
     };
 
     dispatcher.process_event(event).await;
@@ -40,7 +40,7 @@ async fn buffer_edited_asserts_buffer_dirty() {
     assert_eq!(fact.value, FactValue::Bool(true));
     assert_eq!(
         fact.provenance.source,
-        SourceId::Behavior(BehaviorId::new(DirtyTrackingBehavior::ID)),
+        ActorIdentity::behavior(BehaviorId::new(DirtyTrackingBehavior::ID)),
     );
     assert_eq!(fact.provenance.causal_parent, Some(event_id));
     assert!(fact.provenance.timestamp_ns > 0);

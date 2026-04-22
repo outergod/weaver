@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["core", "tests", "tui", "ui"]
+members = ["core", "git-watcher", "tests", "tui", "ui"]
 
 [workspace.package]
 version = "0.1.0"
@@ -35,7 +35,7 @@ thiserror = "2"
 
 # Observability per L2 P13.
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json"] }
 
 # Property-based testing per L2 P9.
 proptest = "1"
@@ -48,3 +48,19 @@ toml = "0.8"
 
 # TUI rendering — minimal; ratatui deferred per research §4.
 crossterm = "0.28"
+
+# Structured actor identity per slice 002 (Clarification Q3; L2 P7/P8).
+uuid = { version = "1", default-features = false, features = ["v4", "serde"] }
+
+# Pure-Rust git observation library per slice 002 research §1 —
+# replaces shelling out / libgit2 FFI. Pinned on a minor for stability
+# per L2 P19.
+gix = { version = "0.66", default-features = false, features = [
+  "max-performance-safe",
+  "revision",
+  "status",
+] }
+
+# Human-readable duration parsing for --poll-interval per slice 002
+# contracts/cli-surfaces.md.
+humantime = "2"

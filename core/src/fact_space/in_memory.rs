@@ -86,7 +86,7 @@ impl FactStore for InMemoryFactStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::provenance::SourceId;
+    use crate::provenance::ActorIdentity;
     use crate::types::entity_ref::EntityRef;
     use crate::types::fact::FactValue;
     use proptest::prelude::*;
@@ -95,12 +95,12 @@ mod tests {
         Fact {
             key: FactKey::new(EntityRef::new(entity), attr),
             value: FactValue::Bool(value),
-            provenance: Provenance::new(SourceId::Core, 1000, None).unwrap(),
+            provenance: Provenance::new(ActorIdentity::Core, 1000, None).unwrap(),
         }
     }
 
     fn core_prov() -> Provenance {
-        Provenance::new(SourceId::Core, 2000, None).unwrap()
+        Provenance::new(ActorIdentity::Core, 2000, None).unwrap()
     }
 
     #[test]

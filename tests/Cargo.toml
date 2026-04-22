@@ -16,6 +16,7 @@ publish = false
 weaver_core = { path = "../core" }
 tokio.workspace = true
 ciborium.workspace = true
+uuid.workspace = true
 libc = "0.2"
 
 [[test]]
@@ -29,3 +30,19 @@ path = "e2e/disconnect.rs"
 [[test]]
 name = "subscribe_snapshot"
 path = "e2e/subscribe_snapshot.rs"
+
+[[test]]
+name = "git_watcher"
+path = "e2e/git_watcher.rs"
+
+[[test]]
+name = "git_watcher_sigkill"
+path = "e2e/git_watcher_sigkill.rs"
+
+[[test]]
+name = "git_watcher_authority_conflict"
+path = "e2e/git_watcher_authority_conflict.rs"
+
+[[test]]
+name = "fact_assert_identity_guard"
+path = "e2e/fact_assert_identity_guard.rs"

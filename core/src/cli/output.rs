@@ -66,6 +66,9 @@ fn lifecycle_label(lifecycle: LifecycleSignal) -> &'static str {
     match lifecycle {
         LifecycleSignal::Started => "started",
         LifecycleSignal::Ready => "ready",
+        LifecycleSignal::Degraded => "degraded",
+        LifecycleSignal::Unavailable => "unavailable",
+        LifecycleSignal::Restarting => "restarting",
         LifecycleSignal::Stopped => "stopped",
     }
 }
@@ -136,20 +139,26 @@ fn format_value(v: &crate::types::fact::FactValue) -> String {
     }
 }
 
-fn format_source(src: &crate::provenance::SourceId) -> String {
-    use crate::provenance::SourceId;
+fn format_source(src: &crate::provenance::ActorIdentity) -> String {
+    use crate::provenance::ActorIdentity;
     match src {
-        SourceId::Core => "core".into(),
-        SourceId::Behavior(id) => format!("behavior:{id}"),
-        SourceId::Tui => "tui".into(),
-        SourceId::External(tag) => format!("external:{tag}"),
+        ActorIdentity::Core => "core".into(),
+        ActorIdentity::Behavior { id } => format!("behavior:{id}"),
+        ActorIdentity::Tui => "tui".into(),
+        ActorIdentity::Service {
+            service_id,
+            instance_id,
+        } => format!("service:{service_id}:{instance_id}"),
+        ActorIdentity::User { id } => format!("user:{id}"),
+        ActorIdentity::Host { host_id, .. } => format!("host:{host_id}"),
+        ActorIdentity::Agent { agent_id, .. } => format!("agent:{agent_id}"),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::provenance::{Provenance, SourceId};
+    use crate::provenance::{ActorIdentity, Provenance};
     use crate::types::entity_ref::EntityRef;
     use crate::types::fact::{FactKey, FactValue};
     use crate::types::ids::{BehaviorId, EventId};
@@ -162,7 +171,7 @@ mod tests {
                 key: FactKey::new(EntityRef::new(1), "buffer/dirty"),
                 value: FactValue::Bool(true),
                 provenance: Provenance::new(
-                    SourceId::Behavior(BehaviorId::new("core/dirty-tracking")),
+                    ActorIdentity::behavior(BehaviorId::new("core/dirty-tracking")),
                     12_340_000_000,
                     Some(EventId::new(42)),
                 )

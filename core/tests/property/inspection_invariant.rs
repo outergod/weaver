@@ -12,7 +12,7 @@ use weaver_core::behavior::dirty_tracking::DirtyTrackingBehavior;
 use weaver_core::behavior::dispatcher::Dispatcher;
 use weaver_core::fact_space::FactStore;
 use weaver_core::inspect::inspect_fact;
-use weaver_core::provenance::{Provenance, SourceId};
+use weaver_core::provenance::{ActorIdentity, Provenance};
 use weaver_core::types::entity_ref::EntityRef;
 use weaver_core::types::event::{Event, EventPayload};
 use weaver_core::types::fact::FactKey;
@@ -39,7 +39,8 @@ fn run(events: &[bool]) -> Option<(String, u64, usize)> {
                 name: name.into(),
                 target: Some(entity),
                 payload,
-                provenance: Provenance::new(SourceId::Tui, (i as u64 + 1) * 1_000, None).unwrap(),
+                provenance: Provenance::new(ActorIdentity::Tui, (i as u64 + 1) * 1_000, None)
+                    .unwrap(),
             })
             .await;
         }
@@ -53,7 +54,14 @@ fn run(events: &[bool]) -> Option<(String, u64, usize)> {
         let key = FactKey::new(entity, "buffer/dirty");
         match inspect_fact(&snapshot, &trace, &key) {
             Ok(detail) => Some((
-                detail.asserting_behavior.as_str().to_string(),
+                // Slice 002: asserting_behavior is Option<BehaviorId>;
+                // this property tests the dirty-tracking behavior path
+                // so expect Some(_) for asserted facts.
+                detail
+                    .asserting_behavior
+                    .as_ref()
+                    .map(|b| b.as_str().to_string())
+                    .unwrap_or_default(),
                 detail.trace_sequence,
                 trace.len(),
             )),

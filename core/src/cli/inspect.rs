@@ -39,11 +39,22 @@ pub enum InspectCliError {
     },
 }
 
+/// JSON shape of a successful `weaver inspect` response. Fields mirror
+/// `specs/002-git-watcher-actor/contracts/cli-surfaces.md`:
+/// `asserting_behavior` for behavior-authored facts (slice 001);
+/// `asserting_service` + `asserting_instance` for service-authored
+/// facts (slice 002). At most one of those field groups is populated
+/// per response.
 #[derive(Debug, Serialize)]
 struct FoundJson {
     fact: FactKeyJson,
     source_event: u64,
-    asserting_behavior: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    asserting_behavior: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    asserting_service: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    asserting_instance: Option<String>,
     asserted_at_ns: u64,
     trace_sequence: u64,
 }
@@ -196,7 +207,15 @@ fn render(
 fn print_found_human(key: &FactKey, d: &InspectionDetail) {
     println!("fact: ({}, {})", key.entity, key.attribute);
     println!("  source_event:       {}", d.source_event);
-    println!("  asserting_behavior: {}", d.asserting_behavior);
+    if let Some(b) = &d.asserting_behavior {
+        println!("  asserting_behavior: {b}");
+    }
+    if let Some(svc) = &d.asserting_service {
+        println!("  asserting_service:  {svc}");
+    }
+    if let Some(inst) = &d.asserting_instance {
+        println!("  asserting_instance: {inst}");
+    }
     println!("  asserted_at_ns:     {}", d.asserted_at_ns);
     println!("  trace_sequence:     {}", d.trace_sequence);
 }
@@ -208,7 +227,9 @@ fn print_found_json(key: &FactKey, d: &InspectionDetail) -> miette::Result<()> {
             attribute: key.attribute.clone(),
         },
         source_event: d.source_event.as_u64(),
-        asserting_behavior: d.asserting_behavior.to_string(),
+        asserting_behavior: d.asserting_behavior.as_ref().map(|b| b.to_string()),
+        asserting_service: d.asserting_service.clone(),
+        asserting_instance: d.asserting_instance.map(|u| u.to_string()),
         asserted_at_ns: d.asserted_at_ns,
         trace_sequence: d.trace_sequence,
     };

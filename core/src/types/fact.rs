@@ -72,7 +72,7 @@ pub struct Fact {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::provenance::SourceId;
+    use crate::provenance::ActorIdentity;
 
     #[test]
     fn family_split() {
@@ -91,7 +91,7 @@ mod tests {
         let f = Fact {
             key: FactKey::new(EntityRef::new(1), "buffer/dirty"),
             value: FactValue::Bool(true),
-            provenance: Provenance::new(SourceId::Core, 123, None).unwrap(),
+            provenance: Provenance::new(ActorIdentity::Core, 123, None).unwrap(),
         };
         let s = serde_json::to_string(&f).unwrap();
         let back: Fact = serde_json::from_str(&s).unwrap();
@@ -103,7 +103,7 @@ mod tests {
         let f = Fact {
             key: FactKey::new(EntityRef::new(7), "buffer/dirty"),
             value: FactValue::Bool(false),
-            provenance: Provenance::new(SourceId::Tui, 456, None).unwrap(),
+            provenance: Provenance::new(ActorIdentity::Tui, 456, None).unwrap(),
         };
         let mut buf = Vec::new();
         ciborium::into_writer(&f, &mut buf).unwrap();

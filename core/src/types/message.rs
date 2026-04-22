@@ -9,15 +9,23 @@ use crate::types::fact::{Fact, FactKey};
 use crate::types::ids::{BehaviorId, EventId};
 use serde::{Deserialize, Serialize};
 
-/// Bus protocol version — slice 001 ships v0.1.0 as `0x01`.
+/// Bus protocol version.
+///
+/// - `0x01` / `0.1.0` — slice 001 shipped this with opaque
+///   `SourceId::External(String)` in provenance.
+/// - `0x02` / `0.2.0` — **current**, slice 002. Breaking wire change:
+///   provenance carries structured [`crate::provenance::ActorIdentity`]
+///   (new CBOR tag 1002), and [`LifecycleSignal`] gains
+///   `Degraded` / `Unavailable` / `Restarting` variants. See
+///   `specs/002-git-watcher-actor/contracts/bus-messages.md`.
 ///
 /// Public surface per L2 P7. Increments follow the policy in
-/// `specs/001-hello-fact/contracts/bus-messages.md` §Versioning.
-pub const BUS_PROTOCOL_VERSION: u8 = 0x01;
+/// `specs/002-git-watcher-actor/contracts/bus-messages.md` §Versioning.
+pub const BUS_PROTOCOL_VERSION: u8 = 0x02;
 
 /// Semver-style string representation of [`BUS_PROTOCOL_VERSION`].
 /// Used in CLI output (e.g., `weaver --version`).
-pub const BUS_PROTOCOL_VERSION_STR: &str = "0.1.0";
+pub const BUS_PROTOCOL_VERSION_STR: &str = "0.2.0";
 
 /// The top-level enum of bus messages.
 ///
@@ -96,11 +104,25 @@ impl SubscribePattern {
     }
 }
 
+/// Service-lifecycle signal carried over the bus.
+///
+/// Slice 001 shipped `Started` / `Ready` / `Stopped` for the core's
+/// own lifecycle. Slice 002 extends the enum with `Degraded` /
+/// `Unavailable` / `Restarting` per `docs/05-protocols.md §5`; these
+/// are emitted by services that can degrade without exiting (e.g.,
+/// `weaver-git-watcher` losing observation of its repository
+/// transiently).
+///
+/// The core continues to emit only `Started` / `Ready` / `Stopped`
+/// this slice; the richer transitions are service-kind-specific.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum LifecycleSignal {
     Started,
     Ready,
+    Degraded,
+    Unavailable,
+    Restarting,
     Stopped,
 }
 
@@ -111,12 +133,95 @@ pub struct ErrorMsg {
     pub context: Option<String>,
 }
 
+/// Provenance detail returned by an `InspectRequest`.
+///
+/// Slice 002 extends the shape so service-authored facts render
+/// alongside behavior-authored ones. The invariant is: exactly one of
+/// the `asserting_*` field groups is populated per response.
+///
+/// - **Behavior-authored** (slice 001 shape): `asserting_behavior` is
+///   `Some(id)`; `asserting_service` / `asserting_instance` are
+///   `None`. Used when a registered in-core behavior fires and asserts
+///   the fact through the dispatcher.
+/// - **Service-authored** (slice 002, e.g. `weaver-git-watcher`):
+///   `asserting_service` is `Some("git-watcher")` and
+///   `asserting_instance` is `Some(<uuid-v4>)`; `asserting_behavior`
+///   is `None`. Used when the fact arrives via a bare `FactAssert`
+///   from an external service on the bus.
+/// - **Other actor kinds** (`Core` / `Tui` / `User` / `Host` /
+///   `Agent`): all three `asserting_*` fields are `None`, indicating
+///   the fact is attributable to an actor whose identity doesn't
+///   naturally reduce to "behavior" or "service" semantics. Rendering
+///   falls back on `source_event` + the trace entry.
+///
+/// JSON wire shape uses `#[serde(skip_serializing_if = "Option::is_none")]`
+/// so each variant renders as a flat object without the other
+/// variant's fields — matches `specs/002-git-watcher-actor/contracts/cli-surfaces.md`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InspectionDetail {
     pub source_event: EventId,
-    pub asserting_behavior: BehaviorId,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub asserting_behavior: Option<BehaviorId>,
+    #[serde(skip_serializing_if = "Option::is_none", rename = "asserting_service")]
+    pub asserting_service: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", rename = "asserting_instance")]
+    pub asserting_instance: Option<uuid::Uuid>,
     pub asserted_at_ns: u64,
     pub trace_sequence: u64,
+}
+
+impl InspectionDetail {
+    /// Build an `InspectionDetail` for a behavior-authored fact.
+    /// Slice-001 shape. All `asserting_service` / `asserting_instance`
+    /// fields are `None`.
+    pub fn behavior(
+        source_event: EventId,
+        asserting_behavior: BehaviorId,
+        asserted_at_ns: u64,
+        trace_sequence: u64,
+    ) -> Self {
+        Self {
+            source_event,
+            asserting_behavior: Some(asserting_behavior),
+            asserting_service: None,
+            asserting_instance: None,
+            asserted_at_ns,
+            trace_sequence,
+        }
+    }
+
+    /// Build an `InspectionDetail` for a service-authored fact.
+    /// Slice-002 shape. The `asserting_behavior` field is `None`.
+    pub fn service(
+        source_event: EventId,
+        service_id: String,
+        instance_id: uuid::Uuid,
+        asserted_at_ns: u64,
+        trace_sequence: u64,
+    ) -> Self {
+        Self {
+            source_event,
+            asserting_behavior: None,
+            asserting_service: Some(service_id),
+            asserting_instance: Some(instance_id),
+            asserted_at_ns,
+            trace_sequence,
+        }
+    }
+
+    /// Build an `InspectionDetail` for a fact whose actor kind does
+    /// not reduce to behavior or service (e.g. Core-authored or other
+    /// reserved variants). All three `asserting_*` fields are `None`.
+    pub fn opaque(source_event: EventId, asserted_at_ns: u64, trace_sequence: u64) -> Self {
+        Self {
+            source_event,
+            asserting_behavior: None,
+            asserting_service: None,
+            asserting_instance: None,
+            asserted_at_ns,
+            trace_sequence,
+        }
+    }
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -129,7 +234,7 @@ pub enum InspectionError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::provenance::SourceId;
+    use crate::provenance::ActorIdentity;
     use crate::types::entity_ref::EntityRef;
     use crate::types::event::EventPayload;
     use crate::types::fact::FactValue;
@@ -139,7 +244,7 @@ mod tests {
             key: FactKey::new(EntityRef::new(1), "buffer/dirty"),
             value: FactValue::Bool(true),
             provenance: Provenance::new(
-                SourceId::Behavior(BehaviorId::new("core/dirty-tracking")),
+                ActorIdentity::behavior(BehaviorId::new("core/dirty-tracking")),
                 1000,
                 Some(EventId::new(42)),
             )
@@ -153,7 +258,7 @@ mod tests {
             name: "buffer/edited".into(),
             target: Some(EntityRef::new(1)),
             payload: EventPayload::BufferEdited,
-            provenance: Provenance::new(SourceId::Tui, 999, None).unwrap(),
+            provenance: Provenance::new(ActorIdentity::Tui, 999, None).unwrap(),
         }
     }
 
@@ -167,7 +272,7 @@ mod tests {
             BusMessage::FactAssert(sample_fact()),
             BusMessage::FactRetract {
                 key: FactKey::new(EntityRef::new(1), "buffer/dirty"),
-                provenance: Provenance::new(SourceId::Core, 2000, None).unwrap(),
+                provenance: Provenance::new(ActorIdentity::Core, 2000, None).unwrap(),
             },
             BusMessage::Subscribe(SubscribePattern::FamilyPrefix("buffer/".into())),
             BusMessage::Subscribe(SubscribePattern::AllFacts),
@@ -178,12 +283,12 @@ mod tests {
             },
             BusMessage::InspectResponse {
                 request_id: 7,
-                result: Ok(InspectionDetail {
-                    source_event: EventId::new(42),
-                    asserting_behavior: BehaviorId::new("core/dirty-tracking"),
-                    asserted_at_ns: 1000,
-                    trace_sequence: 17,
-                }),
+                result: Ok(InspectionDetail::behavior(
+                    EventId::new(42),
+                    BehaviorId::new("core/dirty-tracking"),
+                    1000,
+                    17,
+                )),
             },
             BusMessage::InspectResponse {
                 request_id: 8,

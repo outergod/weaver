@@ -148,7 +148,7 @@ impl Default for TraceStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::provenance::{Provenance, SourceId};
+    use crate::provenance::{ActorIdentity, Provenance};
     use crate::trace::entry::TracePayload;
     use crate::types::entity_ref::EntityRef;
     use crate::types::event::{Event, EventPayload};
@@ -163,7 +163,7 @@ mod tests {
             name: "buffer/edited".into(),
             target: Some(EntityRef::new(1)),
             payload: EventPayload::BufferEdited,
-            provenance: Provenance::new(SourceId::Tui, 100, None).unwrap(),
+            provenance: Provenance::new(ActorIdentity::Tui, 100, None).unwrap(),
         };
         let seq = store.append(
             100,
@@ -192,7 +192,7 @@ mod tests {
                     name: "buffer/edited".into(),
                     target: Some(EntityRef::new(1)),
                     payload: EventPayload::BufferEdited,
-                    provenance: Provenance::new(SourceId::Tui, 100, None).unwrap(),
+                    provenance: Provenance::new(ActorIdentity::Tui, 100, None).unwrap(),
                 },
             },
         );
@@ -200,8 +200,12 @@ mod tests {
         let fact = Fact {
             key: fact_key.clone(),
             value: FactValue::Bool(true),
-            provenance: Provenance::new(SourceId::Behavior(behavior.clone()), 200, Some(event_id))
-                .unwrap(),
+            provenance: Provenance::new(
+                ActorIdentity::behavior(behavior.clone()),
+                200,
+                Some(event_id),
+            )
+            .unwrap(),
         };
         let assert_seq = store.append(200, TracePayload::FactAsserted { fact });
         // Behavior firing record
@@ -232,8 +236,12 @@ mod tests {
         let fact = Fact {
             key: fact_key.clone(),
             value: FactValue::Bool(true),
-            provenance: Provenance::new(SourceId::Behavior(behavior.clone()), 200, Some(event_id))
-                .unwrap(),
+            provenance: Provenance::new(
+                ActorIdentity::behavior(behavior.clone()),
+                200,
+                Some(event_id),
+            )
+            .unwrap(),
         };
         store.append(200, TracePayload::FactAsserted { fact });
         store.append(
@@ -252,7 +260,7 @@ mod tests {
             300,
             TracePayload::FactRetracted {
                 key: fact_key.clone(),
-                provenance: Provenance::new(SourceId::Core, 300, None).unwrap(),
+                provenance: Provenance::new(ActorIdentity::Core, 300, None).unwrap(),
             },
         );
         assert!(store.fact_inspection(&fact_key).is_none());

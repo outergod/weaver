@@ -103,6 +103,11 @@ pub async fn serve(listener: UnixListener, dispatcher: Arc<Dispatcher>) {
     }
 }
 
+/// Monotonic connection-id counter used by the authority-conflict
+/// mechanism (FR-009). Each handled connection gets a unique id so
+/// authority claims can be released on disconnect.
+static CONN_ID_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
 /// Per-connection task: handshake, then loop multiplexing inbound
 /// client messages and outbound fact-space events until the stream
 /// closes on either side.
@@ -110,6 +115,7 @@ async fn handle_connection(
     mut stream: UnixStream,
     dispatcher: Arc<Dispatcher>,
 ) -> Result<(), ListenerError> {
+    let conn_id = CONN_ID_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     // 1. Handshake: expect Hello.
     let client_kind = match read_message(&mut stream).await? {
         BusMessage::Hello(HelloMsg {
@@ -148,7 +154,26 @@ async fn handle_connection(
     tracing::info!(target: "weaver::bus", client_kind = %client_kind, "client connected");
     write_message(&mut stream, &BusMessage::Lifecycle(LifecycleSignal::Ready)).await?;
 
-    // 2. Multiplexed message loop.
+    // F7 review fix: every exit from the post-handshake loop — clean
+    // EOF, codec error reading, a write failure bubbled up from
+    // `handle_client_message`, or a subscription forward failure —
+    // must release this connection's claims + conn-owned facts.
+    // Earlier the `?` propagation on write-side errors skipped
+    // cleanup entirely, so a client that both published and subscribed
+    // would leak its authority claims on broken-pipe, blocking
+    // replacement publishers until core restart. Funneling the loop
+    // through an inner helper guarantees the cleanup always runs.
+    let result = run_message_loop(conn_id, &mut stream, &dispatcher, &client_kind).await;
+    dispatcher.release_connection(conn_id).await;
+    result
+}
+
+async fn run_message_loop(
+    conn_id: u64,
+    stream: &mut UnixStream,
+    dispatcher: &Arc<Dispatcher>,
+    client_kind: &str,
+) -> Result<(), ListenerError> {
     let mut subscription: Option<SubscriptionHandle> = None;
     loop {
         // If the client is not subscribed yet, just read from the
@@ -157,16 +182,18 @@ async fn handle_connection(
         let next = match subscription.as_mut() {
             Some(sub) => {
                 tokio::select! {
-                    msg = read_message(&mut stream) => Incoming::Client(msg),
+                    msg = read_message(stream) => Incoming::Client(msg),
                     evt = sub.rx.recv() => Incoming::FactEvent(evt),
                 }
             }
-            None => Incoming::Client(read_message(&mut stream).await),
+            None => Incoming::Client(read_message(stream).await),
         };
 
         match next {
             Incoming::Client(Ok(msg)) => {
-                if let Some(new_sub) = handle_client_message(msg, &dispatcher, &mut stream).await? {
+                if let Some(new_sub) =
+                    handle_client_message(conn_id, msg, dispatcher, stream).await?
+                {
                     subscription = Some(new_sub);
                 }
             }
@@ -178,7 +205,7 @@ async fn handle_connection(
             }
             Incoming::Client(Err(e)) => return Err(e.into()),
             Incoming::FactEvent(Some(evt)) => {
-                forward_fact_event(evt, &mut stream).await?;
+                forward_fact_event(evt, stream).await?;
             }
             Incoming::FactEvent(None) => {
                 // Subscription channel closed (should not happen in
@@ -197,6 +224,7 @@ enum Incoming {
 
 /// Returns `Some(handle)` when a new subscription was established.
 async fn handle_client_message(
+    conn_id: u64,
     msg: BusMessage,
     dispatcher: &Arc<Dispatcher>,
     writer: &mut UnixStream,
@@ -212,6 +240,22 @@ async fn handle_client_message(
             Ok(None)
         }
         BusMessage::Event(event) => {
+            // F15 review fix: Events carry client-supplied provenance
+            // and land in the trace unchanged via `process_event`.
+            // Without a structural check here a deserialized
+            // `ActorIdentity::Service` with an empty or non-kebab
+            // `service_id` would poison inspection output. Validate
+            // before dispatch — same error shape as the FactAssert
+            // path (F12) so clients get a consistent diagnostic.
+            if let Err(e) = event.provenance.source.validate() {
+                let err = BusMessage::Error(ErrorMsg {
+                    category: "invalid-identity".into(),
+                    detail: format!("event provenance rejected: {e}"),
+                    context: None,
+                });
+                write_message(writer, &err).await?;
+                return Ok(None);
+            }
             dispatcher.process_event(event).await;
             Ok(None)
         }
@@ -281,9 +325,122 @@ async fn handle_client_message(
             .await?;
             Ok(None)
         }
-        BusMessage::FactAssert(_)
-        | BusMessage::FactRetract { .. }
-        | BusMessage::SubscribeAck { .. }
+        BusMessage::FactAssert(fact) => {
+            // Slice 002: only services publish authoritative facts
+            // over the bus. Behaviors publish via the in-process
+            // dispatcher; core asserts its own lifecycle facts
+            // directly. Reject any other provenance up front —
+            // otherwise a client could impersonate a behavior or
+            // write into families (e.g. `buffer/*`) that core or
+            // behaviors own, bypassing the single-writer rule
+            // (F8 review fix).
+            //
+            // FR-009: first claim wins per (family, entity); a second
+            // actor asserting into the same pair receives a structured
+            // `authority-conflict` error.
+            use crate::behavior::dispatcher::ServicePublishOutcome;
+            use crate::provenance::ActorIdentity;
+            if !matches!(fact.provenance.source, ActorIdentity::Service { .. }) {
+                let err = BusMessage::Error(ErrorMsg {
+                    category: "unauthorized".into(),
+                    detail: format!(
+                        "bus FactAssert requires ActorIdentity::Service provenance; got {}",
+                        fact.provenance.source.kind_label(),
+                    ),
+                    context: None,
+                });
+                write_message(writer, &err).await?;
+                return Ok(None);
+            }
+            // F12 review fix: wire deserialization bypasses
+            // `ActorIdentity::service`'s kebab-case/non-empty
+            // check, so a malformed `service_id` on the wire
+            // would reach the trace + authority map unaltered.
+            // Revalidate here — the constructor path was already
+            // safe via `Provenance::new`.
+            if let Err(e) = fact.provenance.source.validate() {
+                let err = BusMessage::Error(ErrorMsg {
+                    category: "invalid-identity".into(),
+                    detail: format!("service identity rejected: {e}"),
+                    context: None,
+                });
+                write_message(writer, &err).await?;
+                return Ok(None);
+            }
+            match dispatcher.publish_from_service(conn_id, fact).await {
+                ServicePublishOutcome::Asserted => {}
+                ServicePublishOutcome::AuthorityConflict {
+                    family,
+                    entity,
+                    existing,
+                } => {
+                    let detail = format!(
+                        "{family}/* for entity {} already claimed by {}",
+                        entity.as_u64(),
+                        existing.kind_label(),
+                    );
+                    let err = BusMessage::Error(ErrorMsg {
+                        category: "authority-conflict".into(),
+                        detail,
+                        context: None,
+                    });
+                    write_message(writer, &err).await?;
+                }
+                ServicePublishOutcome::IdentityDrift { bound, attempted } => {
+                    // F14: this connection already published under a
+                    // different identity; refuse to let the second
+                    // attribution silently overwrite the first.
+                    let err = BusMessage::Error(ErrorMsg {
+                        category: "identity-drift".into(),
+                        detail: format!(
+                            "connection bound to {}; refusing FactAssert as {}",
+                            bound.kind_label(),
+                            attempted.kind_label(),
+                        ),
+                        context: None,
+                    });
+                    write_message(writer, &err).await?;
+                }
+            }
+            Ok(None)
+        }
+        BusMessage::FactRetract { key, provenance } => {
+            // F2 review fix: a connection may only retract facts it
+            // previously asserted. The dispatcher checks ownership
+            // and returns NotOwned when another actor holds the
+            // claim; we surface that as a structured bus Error so
+            // the offending client can distinguish this from a
+            // silent idempotent no-op (`NotPresent`).
+            //
+            // F11 review fix: the client-supplied `provenance.source`
+            // and `.timestamp_ns` are intentionally ignored. The
+            // dispatcher synthesizes retraction attribution server-
+            // side from the asserting actor's stored identity;
+            // accepting the client's source would let an owner forge
+            // trace/audit attribution (e.g. retract while claiming
+            // to be `ActorIdentity::Core`). The `causal_parent`
+            // survives as a correlation hint so consumers can still
+            // group a retract+assert pair describing one transition
+            // (L2 P11).
+            use crate::behavior::dispatcher::ServiceRetractOutcome;
+            let outcome = dispatcher
+                .retract_from_service(conn_id, key.clone(), provenance.causal_parent)
+                .await;
+            if matches!(outcome, ServiceRetractOutcome::NotOwned) {
+                let err = BusMessage::Error(ErrorMsg {
+                    category: "not-owner".into(),
+                    detail: format!(
+                        "cannot retract fact ({}, {}): claim held by a different connection",
+                        key.entity.as_u64(),
+                        key.attribute,
+                    ),
+                    context: None,
+                });
+                write_message(writer, &err).await?;
+            }
+            Ok(None)
+        }
+        BusMessage::SubscribeAck { .. }
         | BusMessage::InspectResponse { .. }
         | BusMessage::Lifecycle(_)
         | BusMessage::Error(_)

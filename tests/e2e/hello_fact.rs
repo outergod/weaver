@@ -13,8 +13,9 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use tokio::time::{sleep, timeout};
 
+use uuid::Uuid;
 use weaver_core::bus::client::Client;
-use weaver_core::provenance::{Provenance, SourceId};
+use weaver_core::provenance::{ActorIdentity, Provenance};
 use weaver_core::types::entity_ref::EntityRef;
 use weaver_core::types::event::{Event, EventPayload};
 use weaver_core::types::fact::{FactKey, FactValue};
@@ -64,7 +65,7 @@ async fn buffer_edited_then_cleaned_round_trips_via_bus() {
             assert_eq!(fact.value, FactValue::Bool(true));
             assert_eq!(
                 fact.provenance.source,
-                SourceId::Behavior(BehaviorId::new("core/dirty-tracking")),
+                ActorIdentity::behavior(BehaviorId::new("core/dirty-tracking")),
             );
             assert_eq!(fact.provenance.causal_parent, Some(edit_event_id));
         }
@@ -137,7 +138,12 @@ fn build_event(id: EventId, payload: EventPayload, name: &str) -> Event {
         name: name.into(),
         target: Some(EntityRef::new(1)),
         payload,
-        provenance: Provenance::new(SourceId::External("e2e".into()), id.as_u64(), None).unwrap(),
+        provenance: Provenance::new(
+            ActorIdentity::service("e2e-publisher", Uuid::new_v4()).unwrap(),
+            id.as_u64(),
+            None,
+        )
+        .unwrap(),
     }
 }
 

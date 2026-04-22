@@ -13,7 +13,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::io::AsyncWrite;
 
 use weaver_core::bus::codec::{CodecError, write_message};
-use weaver_core::provenance::{Provenance, SourceId};
+use weaver_core::provenance::{ActorIdentity, Provenance};
 use weaver_core::types::entity_ref::EntityRef;
 use weaver_core::types::event::{Event, EventPayload};
 use weaver_core::types::fact::FactKey;
@@ -45,7 +45,7 @@ impl SimulateKind {
 
 /// Publish a simulated buffer event on the bus via `writer`.
 ///
-/// The event carries `SourceId::Tui` provenance per the data model and
+/// The event carries `ActorIdentity::Tui` provenance per the data model and
 /// uses a wall-clock-nanosecond `EventId` to avoid collisions across
 /// rapid keystrokes.
 pub async fn publish<W>(
@@ -63,7 +63,7 @@ where
         name: kind.name().into(),
         target: Some(target),
         payload: kind.payload(),
-        provenance: Provenance::new(SourceId::Tui, now_ns, None)
+        provenance: Provenance::new(ActorIdentity::Tui, now_ns, None)
             .expect("Tui source is never rejected"),
     };
     write_message(writer, &BusMessage::Event(event)).await?;

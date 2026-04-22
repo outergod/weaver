@@ -16,11 +16,12 @@ use crate::bus::client::{Client, ClientError};
 use crate::cli::args::OutputFormat;
 use crate::cli::config::Config;
 use crate::cli::errors::{WeaverCliError, exit_code, render_error};
-use crate::provenance::{Provenance, SourceId};
+use crate::provenance::{ActorIdentity, Provenance};
 use crate::types::entity_ref::EntityRef;
 use crate::types::event::{Event, EventPayload};
 use crate::types::ids::EventId;
 use crate::types::message::BusMessage;
+use uuid::Uuid;
 
 /// The event kinds the CLI can simulate in slice 001.
 #[derive(Copy, Clone, Debug)]
@@ -97,8 +98,16 @@ pub fn run(
             name: kind.event_name().into(),
             target: Some(target),
             payload: kind.payload(),
-            provenance: Provenance::new(SourceId::External("cli".into()), submitted_at_ns, None)
-                .map_err(|e| miette!("{e}"))?,
+            // Slice 002: the CLI acts as a bus client with a service-
+            // shaped structured identity. Each `simulate-edit` /
+            // `simulate-clean` invocation is its own short-lived
+            // instance per Clarification Q3 (fresh UUID v4).
+            provenance: Provenance::new(
+                ActorIdentity::service("weaver-cli", Uuid::new_v4()).map_err(|e| miette!("{e}"))?,
+                submitted_at_ns,
+                None,
+            )
+            .map_err(|e| miette!("{e}"))?,
         };
         let event_id_u64 = event.id.as_u64();
         client
