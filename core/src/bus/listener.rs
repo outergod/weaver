@@ -370,6 +370,21 @@ async fn handle_client_message(
                     });
                     write_message(writer, &err).await?;
                 }
+                ServicePublishOutcome::IdentityDrift { bound, attempted } => {
+                    // F14: this connection already published under a
+                    // different identity; refuse to let the second
+                    // attribution silently overwrite the first.
+                    let err = BusMessage::Error(ErrorMsg {
+                        category: "identity-drift".into(),
+                        detail: format!(
+                            "connection bound to {}; refusing FactAssert as {}",
+                            bound.kind_label(),
+                            attempted.kind_label(),
+                        ),
+                        context: None,
+                    });
+                    write_message(writer, &err).await?;
+                }
             }
             Ok(None)
         }

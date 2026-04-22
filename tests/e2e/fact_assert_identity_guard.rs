@@ -200,6 +200,101 @@ async fn rejects_behavior_provenance_fact_assert() {
 }
 
 #[tokio::test]
+async fn rejects_identity_drift_on_same_connection() {
+    // F14 regression: once a connection publishes under an
+    // ActorIdentity, every subsequent publish on that connection
+    // must match. A client claiming `svc-a`, then publishing as
+    // `svc-b` in the same session — whether on the same key or a
+    // new (family, entity) slot — would otherwise forge attribution
+    // without tripping any authority-conflict path.
+    let socket = unique_socket_path();
+    let _guard = ChildGuard::new(spawn_weaver(&socket));
+    wait_for_socket(&socket).await;
+
+    let mut client = Client::connect(&socket, "e2e-drifter")
+        .await
+        .expect("connect");
+
+    let instance_a = Uuid::new_v4();
+    let id_a = ActorIdentity::service("svc-a", instance_a).expect("valid");
+
+    // First publish binds the connection to svc-a.
+    let f1 = Fact {
+        key: FactKey::new(EntityRef::new(1), "test/marker"),
+        value: FactValue::Bool(true),
+        provenance: Provenance::new(id_a.clone(), now_ns(), None).unwrap(),
+    };
+    client
+        .send(&BusMessage::FactAssert(f1))
+        .await
+        .expect("send");
+
+    // Drift 1 — a new (family, entity) claim under a different
+    // identity must be rejected. The AuthorityMap's per-(f,e) claim
+    // wouldn't catch this: the slot is free.
+    let id_b = ActorIdentity::service("svc-b", Uuid::new_v4()).expect("valid");
+    let f2 = Fact {
+        key: FactKey::new(EntityRef::new(2), "other/marker"),
+        value: FactValue::Bool(true),
+        provenance: Provenance::new(id_b.clone(), now_ns(), None).unwrap(),
+    };
+    client
+        .send(&BusMessage::FactAssert(f2))
+        .await
+        .expect("send");
+
+    let err = wait_for_error(&mut client).await;
+    match err {
+        BusMessage::Error(e) => assert_eq!(e.category, "identity-drift", "got {e:?}"),
+        other => panic!("expected identity-drift, got {other:?}"),
+    }
+
+    // Drift 2 — re-asserting the ORIGINAL key with a new identity.
+    // AuthorityMap's same-conn fast path admits the re-assert; only
+    // the conn-bound identity check catches the attribution forge.
+    let f3 = Fact {
+        key: FactKey::new(EntityRef::new(1), "test/marker"),
+        value: FactValue::Bool(false),
+        provenance: Provenance::new(id_b, now_ns(), None).unwrap(),
+    };
+    client
+        .send(&BusMessage::FactAssert(f3))
+        .await
+        .expect("send");
+    let err = wait_for_error(&mut client).await;
+    match err {
+        BusMessage::Error(e) => assert_eq!(e.category, "identity-drift", "got {e:?}"),
+        other => panic!("expected identity-drift, got {other:?}"),
+    }
+
+    // Publishing again under the BOUND identity still succeeds:
+    // the guard rejects drift, not normal operation.
+    let f4 = Fact {
+        key: FactKey::new(EntityRef::new(1), "test/marker"),
+        value: FactValue::Bool(false),
+        provenance: Provenance::new(id_a, now_ns(), None).unwrap(),
+    };
+    client
+        .send(&BusMessage::FactAssert(f4))
+        .await
+        .expect("send");
+    // No error frame should arrive for this one — confirm via a short
+    // quiet window.
+    let window = sleep(Duration::from_millis(150));
+    tokio::pin!(window);
+    loop {
+        tokio::select! {
+            () = &mut window => break,
+            msg = client.recv() => {
+                if let Ok(BusMessage::Error(e)) = msg {
+                    panic!("same-identity re-assert must succeed, got Error: {e:?}");
+                }
+            }
+        }
+    }
+}
+
+#[tokio::test]
 async fn rejects_service_identity_with_malformed_service_id() {
     // F12 regression: wire deserialization bypasses
     // `ActorIdentity::service`'s kebab-case validation, so a

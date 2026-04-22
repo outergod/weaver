@@ -36,6 +36,17 @@ pub enum ServicePublishOutcome {
         entity: EntityRef,
         existing: ActorIdentity,
     },
+    /// F14 review fix: once a connection publishes its first fact,
+    /// the dispatcher binds that `ActorIdentity` for the lifetime of
+    /// the connection. Later publishes that carry a different
+    /// identity (same-key re-assert or a new `(family, entity)`
+    /// claim) are rejected — otherwise a client could mint
+    /// `authority-conflict`-free attribution drift within a single
+    /// session and forge audit trails.
+    IdentityDrift {
+        bound: ActorIdentity,
+        attempted: ActorIdentity,
+    },
 }
 
 /// Outcome of a service-originated fact retraction. A connection may
@@ -147,6 +158,12 @@ pub struct Dispatcher {
     /// `retract_from_service` can reject attempts to delete another
     /// actor's facts (F2 review fix).
     conn_facts: Arc<Mutex<HashMap<u64, HashSet<FactKey>>>>,
+    /// Slice-002 connection → first ActorIdentity that ever
+    /// published over this connection (F14 review fix). Every
+    /// subsequent publish on the same connection must carry the
+    /// same identity; any drift is rejected as IdentityDrift.
+    /// Cleared on `release_connection`.
+    conn_identity: Arc<Mutex<HashMap<u64, ActorIdentity>>>,
 }
 
 impl Dispatcher {
@@ -159,6 +176,7 @@ impl Dispatcher {
             started_at_ns: now_ns(),
             authority: Arc::new(Mutex::new(AuthorityMap::default())),
             conn_facts: Arc::new(Mutex::new(HashMap::new())),
+            conn_identity: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -274,6 +292,31 @@ impl Dispatcher {
     pub async fn publish_from_service(&self, conn_id: u64, fact: Fact) -> ServicePublishOutcome {
         let family = family_of(&fact.key).to_string();
         let entity = fact.key.entity;
+        // F14 review fix: bind one ActorIdentity per connection.
+        // First publish records the identity; every subsequent
+        // publish on the same conn_id must match. This catches
+        // attribution drift that AuthorityMap's conn-keyed claim
+        // would otherwise admit — e.g. publishing a fresh
+        // (family, entity) under a different identity on the same
+        // connection, or re-asserting the same key with a forged
+        // source.
+        {
+            let mut conn_identity = self.conn_identity.lock().await;
+            match conn_identity.get(&conn_id) {
+                Some(bound) if bound != &fact.provenance.source => {
+                    return ServicePublishOutcome::IdentityDrift {
+                        bound: bound.clone(),
+                        attempted: fact.provenance.source.clone(),
+                    };
+                }
+                Some(_) => {
+                    // Matches — proceed without touching the map.
+                }
+                None => {
+                    conn_identity.insert(conn_id, fact.provenance.source.clone());
+                }
+            }
+        }
         {
             let mut auth = self.authority.lock().await;
             if let Err(existing) = auth.claim(conn_id, &fact.provenance.source, &family, entity) {
@@ -422,8 +465,14 @@ impl Dispatcher {
         }
         // Release the authority claims after the retractions so that
         // a replacement publisher can re-claim without races.
-        let mut auth = self.authority.lock().await;
-        auth.release_connection(conn_id);
+        {
+            let mut auth = self.authority.lock().await;
+            auth.release_connection(conn_id);
+        }
+        // Drop the conn-bound identity (F14) so the same conn_id
+        // slot — if ever reused by a future monotonic counter
+        // wrap — starts fresh.
+        self.conn_identity.lock().await.remove(&conn_id);
     }
 }
 
