@@ -171,6 +171,29 @@ impl ActorIdentity {
             Self::Agent { .. } => "agent",
         }
     }
+
+    /// Validate any structural invariants an identity variant carries.
+    ///
+    /// Serde's derived `Deserialize` bypasses the per-variant
+    /// constructors ([`ActorIdentity::service`] et al.), so a wire
+    /// frame can carry a `Service` whose `service_id` is empty or
+    /// non-kebab-case. This method re-checks those invariants and
+    /// is the single place callers use to guard wire-derived
+    /// identities (F12 review fix). [`Provenance::new`] also routes
+    /// through here so in-process construction is safe too.
+    pub fn validate(&self) -> Result<(), ProvenanceError> {
+        match self {
+            Self::Service { service_id, .. } => validate_kebab_case(service_id),
+            // Reserved / infra variants have no extra invariants
+            // beyond their type-level structure.
+            Self::Core
+            | Self::Behavior { .. }
+            | Self::Tui
+            | Self::User { .. }
+            | Self::Host { .. }
+            | Self::Agent { .. } => Ok(()),
+        }
+    }
 }
 
 fn validate_kebab_case(id: &str) -> Result<(), ProvenanceError> {
@@ -190,18 +213,22 @@ fn validate_kebab_case(id: &str) -> Result<(), ProvenanceError> {
 }
 
 impl Provenance {
-    /// Construct a `Provenance`.
+    /// Construct a `Provenance` after re-validating the actor
+    /// identity's per-variant invariants (F12 review fix).
     ///
-    /// Returns `Result` for backward compatibility with existing call
-    /// sites; all well-formed [`ActorIdentity`] variants produce `Ok`.
-    /// Invalid service identifiers are rejected at
-    /// [`ActorIdentity::service`] construction, before reaching this
-    /// constructor.
+    /// Wire deserialization bypasses [`ActorIdentity::service`]'s
+    /// kebab-case check, so a caller that rebuilds a `Provenance`
+    /// around a deserialized identity here is the last checkpoint
+    /// before the value reaches the trace / fact store / authority
+    /// map. Listener-side bus handlers additionally call
+    /// [`ActorIdentity::validate`] directly on inbound fact frames
+    /// (defense in depth).
     pub fn new(
         source: ActorIdentity,
         timestamp_ns: u64,
         causal_parent: Option<EventId>,
     ) -> Result<Self, ProvenanceError> {
+        source.validate()?;
         Ok(Self {
             source,
             timestamp_ns,

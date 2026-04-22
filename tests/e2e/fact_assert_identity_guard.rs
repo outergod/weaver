@@ -199,6 +199,52 @@ async fn rejects_behavior_provenance_fact_assert() {
     }
 }
 
+#[tokio::test]
+async fn rejects_service_identity_with_malformed_service_id() {
+    // F12 regression: wire deserialization bypasses
+    // `ActorIdentity::service`'s kebab-case validation, so a
+    // hand-crafted Service variant with an empty/non-kebab
+    // service-id must be rejected at the listener's bus-inbound
+    // edge — otherwise it would land in trace/inspect with a
+    // malformed identity.
+    let socket = unique_socket_path();
+    let _guard = ChildGuard::new(spawn_weaver(&socket));
+    wait_for_socket(&socket).await;
+
+    let mut client = Client::connect(&socket, "e2e-impersonator")
+        .await
+        .expect("connect to bus");
+
+    // Skip Provenance::new (which would validate) — build the
+    // struct literal directly to mirror what a deserialized wire
+    // frame can carry.
+    let malformed_source = ActorIdentity::Service {
+        service_id: "Not_Kebab".into(),
+        instance_id: Uuid::new_v4(),
+    };
+    let forged = Fact {
+        key: FactKey::new(EntityRef::new(1), "repo/dirty"),
+        value: FactValue::Bool(true),
+        provenance: weaver_core::provenance::Provenance {
+            source: malformed_source,
+            timestamp_ns: now_ns(),
+            causal_parent: None,
+        },
+    };
+    client
+        .send(&BusMessage::FactAssert(forged))
+        .await
+        .expect("send malformed FactAssert");
+
+    let err = wait_for_error(&mut client).await;
+    match err {
+        BusMessage::Error(e) => {
+            assert_eq!(e.category, "invalid-identity", "got {e:?}");
+        }
+        other => panic!("expected Error, got {other:?}"),
+    }
+}
+
 async fn wait_for_error(client: &mut Client) -> BusMessage {
     let deadline = Duration::from_secs(5);
     timeout(deadline, async {

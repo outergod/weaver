@@ -336,6 +336,21 @@ async fn handle_client_message(
                 write_message(writer, &err).await?;
                 return Ok(None);
             }
+            // F12 review fix: wire deserialization bypasses
+            // `ActorIdentity::service`'s kebab-case/non-empty
+            // check, so a malformed `service_id` on the wire
+            // would reach the trace + authority map unaltered.
+            // Revalidate here — the constructor path was already
+            // safe via `Provenance::new`.
+            if let Err(e) = fact.provenance.source.validate() {
+                let err = BusMessage::Error(ErrorMsg {
+                    category: "invalid-identity".into(),
+                    detail: format!("service identity rejected: {e}"),
+                    context: None,
+                });
+                write_message(writer, &err).await?;
+                return Ok(None);
+            }
             match dispatcher.publish_from_service(conn_id, fact).await {
                 ServicePublishOutcome::Asserted => {}
                 ServicePublishOutcome::AuthorityConflict {
