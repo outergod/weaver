@@ -55,11 +55,19 @@ impl std::fmt::Debug for RepoObserver {
 impl RepoObserver {
     /// Open a repository at `path`. Fails fast if `path` is not a git
     /// repository (FR-005 / exit code 1 path).
+    ///
+    /// The identity path (used for `repo/path` and for the `EntityRef`
+    /// that keys the authority mutex) is the *discovered* working-tree
+    /// root for non-bare repos, or the `.git` directory for bare repos
+    /// — never the user-typed input. Two watchers pointed at different
+    /// subdirectories of the same repo therefore resolve to the same
+    /// `EntityRef` and FR-009's single-writer rule still holds.
     pub fn open(path: &Path) -> Result<Self, ObserverError> {
         let repo = gix::discover(path).map_err(|_| ObserverError::NotARepository {
             path: path.display().to_string(),
         })?;
-        let canon = path
+        let root = repo.work_dir().unwrap_or_else(|| repo.git_dir());
+        let canon = root
             .canonicalize()
             .map_err(|e| ObserverError::Observation {
                 source: Box::new(e),
@@ -235,6 +243,27 @@ mod tests {
         run_git(td.path(), &["add", "a.txt"]);
         let obs = RepoObserver::open(td.path()).unwrap().observe().unwrap();
         assert!(obs.dirty, "staged change alone should mark the repo dirty");
+    }
+
+    #[test]
+    fn identity_path_is_repo_root_even_when_opened_from_subdirectory() {
+        // F6 regression: pointing the watcher at a subdirectory must
+        // still key by the discovered working-tree root. Otherwise two
+        // watchers on the same repo would hash to distinct entities
+        // and both claim authority for `repo/*`, bypassing FR-009.
+        let td = tempfile::tempdir().unwrap();
+        init_repo(td.path());
+        commit_one(td.path(), "a.txt", "hello", "initial");
+        let subdir = td.path().join("nested/deep");
+        std::fs::create_dir_all(&subdir).unwrap();
+
+        let from_root = RepoObserver::open(td.path()).unwrap();
+        let from_subdir = RepoObserver::open(&subdir).unwrap();
+        assert_eq!(
+            from_root.path(),
+            from_subdir.path(),
+            "subdirectory input must resolve to the same repo root"
+        );
     }
 
     #[test]
