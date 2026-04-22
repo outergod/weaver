@@ -98,7 +98,7 @@ pub fn run() -> Result<(), Report> {
         return Ok(());
     }
 
-    init_tracing(cli.verbose);
+    init_tracing(cli.verbose, &cli.output);
 
     let poll_interval = parse_duration(&cli.poll_interval).into_diagnostic()?;
     let repo_path = cli
@@ -156,7 +156,7 @@ fn parse_duration(input: &str) -> Result<Duration, CliError> {
     Ok(parsed)
 }
 
-fn init_tracing(verbose: u8) {
+fn init_tracing(verbose: u8, output: &str) {
     use tracing_subscriber::filter::EnvFilter;
     use tracing_subscriber::fmt;
     let default_level = match verbose {
@@ -166,10 +166,19 @@ fn init_tracing(verbose: u8) {
     };
     let filter = EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| EnvFilter::new(format!("weaver_git_watcher={default_level}")));
-    let _ = fmt()
-        .with_env_filter(filter)
-        .with_writer(std::io::stderr)
-        .try_init();
+    // F17 review fix: `--output` advertises control over both
+    // `--version` rendering AND runtime logs, but init_tracing
+    // previously hardcoded the human formatter, so scripted
+    // consumers asking for JSON still received human lines.
+    // Route the value here to honour the contract.
+    let builder = fmt().with_env_filter(filter).with_writer(std::io::stderr);
+    let _ = match output {
+        "json" => builder.json().try_init(),
+        // Unknown formats fall back to human, matching `print_version`'s
+        // lenient policy so `--output=garbage` still produces useful
+        // output rather than a startup error.
+        _ => builder.try_init(),
+    };
 }
 
 // Keep the constant referenced so future plumbing adopts the default.

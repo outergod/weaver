@@ -35,7 +35,7 @@ thiserror = "2"
 
 # Observability per L2 P13.
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json"] }
 
 # Property-based testing per L2 P9.
 proptest = "1"
