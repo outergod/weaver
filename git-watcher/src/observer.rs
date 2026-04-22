@@ -109,7 +109,7 @@ impl RepoObserver {
         let head = self.repo.head().map_err(|e| ObserverError::Observation {
             source: Box::new(e),
         })?;
-        let state = working_copy_state_from_head(&head)?;
+        let state = working_copy_state_from_head(&head, &self.path)?;
         let head_commit = match &state {
             WorkingCopyState::OnBranch { .. } | WorkingCopyState::Detached { .. } => {
                 Some(self.resolve_head_commit()?)
@@ -316,6 +316,31 @@ mod tests {
             from_subdir.path(),
             "subdirectory input must resolve to the same repo root"
         );
+    }
+
+    #[test]
+    fn symbolic_head_outside_refs_heads_is_reported_unsupported() {
+        // F26 regression: the WorkingCopyState::OnBranch contract is
+        // specifically for HEAD -> refs/heads/<name>. A symbolic HEAD
+        // pointing at a tag-ref (or any other ref family) must NOT
+        // silently produce OnBranch; it should surface as
+        // UnsupportedHeadShape so the publisher flips to Degraded.
+        let td = tempfile::tempdir().unwrap();
+        init_repo(td.path());
+        commit_one(td.path(), "a.txt", "hello", "initial");
+        run_git(td.path(), &["tag", "v1"]);
+        // Point HEAD at refs/tags/v1 symbolically. `git symbolic-ref`
+        // enforces that the target starts with `refs/`, which
+        // `refs/tags/v1` satisfies.
+        run_git(td.path(), &["symbolic-ref", "HEAD", "refs/tags/v1"]);
+        let obs = RepoObserver::open(td.path()).unwrap();
+        let err = obs.observe().unwrap_err();
+        match err {
+            ObserverError::UnsupportedHeadShape { ref_name, .. } => {
+                assert_eq!(ref_name, "refs/tags/v1");
+            }
+            other => panic!("expected UnsupportedHeadShape, got {other:?}"),
+        }
     }
 
     #[test]

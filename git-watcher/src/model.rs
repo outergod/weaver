@@ -64,6 +64,12 @@ pub enum ObserverError {
     )]
     UnsupportedTransientState { path: String },
 
+    #[error(
+        "repository at {path} has an unsupported HEAD shape: symbolic ref points at {ref_name:?}, \
+         but this slice's WorkingCopyState::OnBranch is reserved for refs/heads/<name>"
+    )]
+    UnsupportedHeadShape { path: String, ref_name: String },
+
     #[error("repository observation failed: {source}")]
     Observation {
         #[source]
@@ -82,17 +88,35 @@ pub enum ObserverError {
 /// - `Ok(Detached { commit })` when HEAD points directly at a commit.
 /// - `Ok(Unborn { intended_branch_name })` when HEAD is symbolic but
 ///   points to a ref that does not yet exist (new repo).
+/// - `Err(ObserverError::UnsupportedHeadShape)` when HEAD is
+///   symbolic but points outside `refs/heads/` (e.g. a tag-ref).
+///   The slice's data-model contract reserves `OnBranch` for
+///   branch refs only (F26 review fix); anomalous HEAD shapes
+///   flip the watcher to `Degraded` rather than silently mis-
+///   reporting branch state.
 /// - `Err(ObserverError::Observation)` for any underlying `gix` error.
 pub fn working_copy_state_from_head(
     head: &gix::Head<'_>,
+    repo_path: &Path,
 ) -> Result<WorkingCopyState, ObserverError> {
     use gix::head::Kind;
     match &head.kind {
         Kind::Symbolic(inner) => {
-            // Symbolic ref with at least one commit — `OnBranch`.
-            let full = inner.name.as_bstr();
-            let name = strip_heads_prefix(full.to_string());
-            Ok(WorkingCopyState::OnBranch { name })
+            // Symbolic ref — only accept `refs/heads/<name>` as
+            // OnBranch. A symbolic HEAD targeting refs/tags/,
+            // refs/remotes/, or anything else is an unsupported
+            // shape for this slice's observation model.
+            let full = inner.name.as_bstr().to_string();
+            if let Some(name) = full.strip_prefix("refs/heads/") {
+                Ok(WorkingCopyState::OnBranch {
+                    name: name.to_string(),
+                })
+            } else {
+                Err(ObserverError::UnsupportedHeadShape {
+                    path: repo_path.display().to_string(),
+                    ref_name: full,
+                })
+            }
         }
         Kind::Detached { target, .. } => Ok(WorkingCopyState::Detached {
             commit: target.to_hex().to_string(),
