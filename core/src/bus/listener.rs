@@ -310,14 +310,32 @@ async fn handle_client_message(
             Ok(None)
         }
         BusMessage::FactAssert(fact) => {
-            // Slice 002: services can publish authoritative facts
-            // directly. The dispatcher stores + broadcasts; the
-            // fact's `ActorIdentity::Service` provenance is preserved.
+            // Slice 002: only services publish authoritative facts
+            // over the bus. Behaviors publish via the in-process
+            // dispatcher; core asserts its own lifecycle facts
+            // directly. Reject any other provenance up front —
+            // otherwise a client could impersonate a behavior or
+            // write into families (e.g. `buffer/*`) that core or
+            // behaviors own, bypassing the single-writer rule
+            // (F8 review fix).
             //
             // FR-009: first claim wins per (family, entity); a second
             // actor asserting into the same pair receives a structured
             // `authority-conflict` error.
             use crate::behavior::dispatcher::ServicePublishOutcome;
+            use crate::provenance::ActorIdentity;
+            if !matches!(fact.provenance.source, ActorIdentity::Service { .. }) {
+                let err = BusMessage::Error(ErrorMsg {
+                    category: "unauthorized".into(),
+                    detail: format!(
+                        "bus FactAssert requires ActorIdentity::Service provenance; got {}",
+                        fact.provenance.source.kind_label(),
+                    ),
+                    context: None,
+                });
+                write_message(writer, &err).await?;
+                return Ok(None);
+            }
             match dispatcher.publish_from_service(conn_id, fact).await {
                 ServicePublishOutcome::Asserted => {}
                 ServicePublishOutcome::AuthorityConflict {
