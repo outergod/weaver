@@ -34,3 +34,7 @@ path = "e2e/subscribe_snapshot.rs"
 [[test]]
 name = "git_watcher"
 path = "e2e/git_watcher.rs"
+
+[[test]]
+name = "git_watcher_sigkill"
+path = "e2e/git_watcher_sigkill.rs"

@@ -8,7 +8,7 @@
 //! registered — events are appended to the trace and otherwise ignored.
 //! The dirty-tracking behavior is registered in Phase 3 (T042).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::Mutex;
@@ -36,6 +36,17 @@ pub enum ServicePublishOutcome {
         entity: EntityRef,
         existing: ActorIdentity,
     },
+}
+
+/// Outcome of a service-originated fact retraction. A connection may
+/// only retract facts it previously asserted; retracting a
+/// different-owner fact returns [`Self::NotOwned`]. Retracting a
+/// never-asserted fact is an idempotent no-op ([`Self::NotPresent`]).
+#[derive(Debug)]
+pub enum ServiceRetractOutcome {
+    Retracted,
+    NotOwned,
+    NotPresent,
 }
 
 /// Maps `(family_prefix, entity)` → `(connection_id, claiming actor)`.
@@ -124,6 +135,12 @@ pub struct Dispatcher {
     /// Slice-002 authority map — tracks `(family, entity) →
     /// (connection, actor)` claims for service-published facts.
     authority: Arc<Mutex<AuthorityMap>>,
+    /// Slice-002 connection → set of fact keys it asserted. Paired
+    /// with `authority` so `release_connection` can retract every
+    /// fact a crashing publisher left behind (F1 review fix) and
+    /// `retract_from_service` can reject attempts to delete another
+    /// actor's facts (F2 review fix).
+    conn_facts: Arc<Mutex<HashMap<u64, HashSet<FactKey>>>>,
 }
 
 impl Dispatcher {
@@ -135,6 +152,7 @@ impl Dispatcher {
             behaviors: Vec::new(),
             started_at_ns: now_ns(),
             authority: Arc::new(Mutex::new(AuthorityMap::default())),
+            conn_facts: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -262,19 +280,64 @@ impl Dispatcher {
         }
         let now = now_ns();
         let _ = self.sequence.next();
-        let mut fact_store = self.fact_store.lock().await;
-        let mut trace = self.trace.lock().await;
-        trace.append(now, TracePayload::FactAsserted { fact: fact.clone() });
-        fact_store.assert(fact);
+        let key = fact.key.clone();
+        {
+            let mut fact_store = self.fact_store.lock().await;
+            let mut trace = self.trace.lock().await;
+            trace.append(now, TracePayload::FactAsserted { fact: fact.clone() });
+            fact_store.assert(fact);
+        }
+        // Record ownership only *after* the assert succeeds, so a
+        // release-on-disconnect retract never overshoots into keys
+        // that weren't actually stored.
+        self.conn_facts
+            .lock()
+            .await
+            .entry(conn_id)
+            .or_default()
+            .insert(key);
         ServicePublishOutcome::Asserted
     }
 
     /// Service-originated fact retraction. Slice 002: counterpart to
-    /// [`Self::publish_from_service`]. Does not consult the authority
-    /// map — a connection can retract anything it previously asserted;
-    /// retracting a fact it didn't assert is a no-op at the fact-store
-    /// level (the key isn't present).
-    pub async fn retract_from_service(&self, key: FactKey, provenance: Provenance) {
+    /// [`Self::publish_from_service`].
+    ///
+    /// Ownership rule (F2 review fix): a connection may only retract
+    /// facts it previously asserted. Attempting to retract a fact
+    /// owned by a different connection returns
+    /// [`ServiceRetractOutcome::NotOwned`] — the listener surfaces
+    /// this as an `Error { category: "not-owner", ... }` to the
+    /// offending client. Retracting a fact that isn't currently
+    /// asserted (never-published, or already-retracted) is an
+    /// idempotent no-op ([`ServiceRetractOutcome::NotPresent`]).
+    pub async fn retract_from_service(
+        &self,
+        conn_id: u64,
+        key: FactKey,
+        provenance: Provenance,
+    ) -> ServiceRetractOutcome {
+        // Ownership check: the retraction is valid only if this
+        // connection is the current owner of the key in `conn_facts`.
+        {
+            let mut conn_facts = self.conn_facts.lock().await;
+            match conn_facts.get_mut(&conn_id) {
+                Some(set) if set.contains(&key) => {
+                    set.remove(&key);
+                }
+                _ => {
+                    // Determine which outcome to return: NotOwned if
+                    // the fact is currently asserted (by someone
+                    // else), NotPresent if it isn't in the fact store
+                    // at all.
+                    let present = self.fact_store.lock().await.query(&key).is_some();
+                    return if present {
+                        ServiceRetractOutcome::NotOwned
+                    } else {
+                        ServiceRetractOutcome::NotPresent
+                    };
+                }
+            }
+        }
         let now = now_ns();
         let _ = self.sequence.next();
         let mut fact_store = self.fact_store.lock().await;
@@ -287,13 +350,48 @@ impl Dispatcher {
             },
         );
         fact_store.retract(&key, provenance);
+        ServiceRetractOutcome::Retracted
     }
 
-    /// Release every authority claim held by `conn_id`. Called by the
-    /// listener when a bus connection drops, so a re-launched service
-    /// with the same identity (or a different service claiming the
-    /// same family) can take over without the prior claim blocking.
+    /// Release every authority claim held by `conn_id` AND retract
+    /// every fact it asserted (F1 review fix). Called by the listener
+    /// when a bus connection drops — whether cleanly or via crash —
+    /// so the fact store doesn't accumulate stale authoritative facts
+    /// from dead publishers.
+    ///
+    /// Synthetic retractions carry `ActorIdentity::Core` as their
+    /// source, with a short `<diagnostic-context>` attached via the
+    /// trace entry. The original asserter's identity survives in the
+    /// trace entry that recorded the assert; the retraction marks
+    /// the *core* as the cleanup actor.
     pub async fn release_connection(&self, conn_id: u64) {
+        // Extract and drop the ownership map entry first so no
+        // concurrent retract_from_service can re-enter the same keys.
+        let keys: Vec<FactKey> = {
+            let mut conn_facts = self.conn_facts.lock().await;
+            conn_facts
+                .remove(&conn_id)
+                .map(|set| set.into_iter().collect())
+                .unwrap_or_default()
+        };
+        if !keys.is_empty() {
+            let mut fact_store = self.fact_store.lock().await;
+            let mut trace = self.trace.lock().await;
+            for key in keys {
+                let prov =
+                    Provenance::new(ActorIdentity::Core, now_ns(), None).expect("Core is valid");
+                trace.append(
+                    now_ns(),
+                    TracePayload::FactRetracted {
+                        key: key.clone(),
+                        provenance: prov.clone(),
+                    },
+                );
+                fact_store.retract(&key, prov);
+            }
+        }
+        // Release the authority claims after the retractions so that
+        // a replacement publisher can re-claim without races.
         let mut auth = self.authority.lock().await;
         auth.release_connection(conn_id);
     }

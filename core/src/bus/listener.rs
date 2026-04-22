@@ -326,7 +326,28 @@ async fn handle_client_message(
             Ok(None)
         }
         BusMessage::FactRetract { key, provenance } => {
-            dispatcher.retract_from_service(key, provenance).await;
+            // F2 review fix: a connection may only retract facts it
+            // previously asserted. The dispatcher checks ownership
+            // and returns NotOwned when another actor holds the
+            // claim; we surface that as a structured bus Error so
+            // the offending client can distinguish this from a
+            // silent idempotent no-op (`NotPresent`).
+            use crate::behavior::dispatcher::ServiceRetractOutcome;
+            let outcome = dispatcher
+                .retract_from_service(conn_id, key.clone(), provenance)
+                .await;
+            if matches!(outcome, ServiceRetractOutcome::NotOwned) {
+                let err = BusMessage::Error(ErrorMsg {
+                    category: "not-owner".into(),
+                    detail: format!(
+                        "cannot retract fact ({}, {}): claim held by a different connection",
+                        key.entity.as_u64(),
+                        key.attribute,
+                    ),
+                    context: None,
+                });
+                write_message(writer, &err).await?;
+            }
             Ok(None)
         }
         BusMessage::SubscribeAck { .. }
