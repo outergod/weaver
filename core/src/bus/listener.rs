@@ -240,6 +240,22 @@ async fn handle_client_message(
             Ok(None)
         }
         BusMessage::Event(event) => {
+            // F15 review fix: Events carry client-supplied provenance
+            // and land in the trace unchanged via `process_event`.
+            // Without a structural check here a deserialized
+            // `ActorIdentity::Service` with an empty or non-kebab
+            // `service_id` would poison inspection output. Validate
+            // before dispatch — same error shape as the FactAssert
+            // path (F12) so clients get a consistent diagnostic.
+            if let Err(e) = event.provenance.source.validate() {
+                let err = BusMessage::Error(ErrorMsg {
+                    category: "invalid-identity".into(),
+                    detail: format!("event provenance rejected: {e}"),
+                    context: None,
+                });
+                write_message(writer, &err).await?;
+                return Ok(None);
+            }
             dispatcher.process_event(event).await;
             Ok(None)
         }

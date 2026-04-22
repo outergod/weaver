@@ -340,6 +340,53 @@ async fn rejects_service_identity_with_malformed_service_id() {
     }
 }
 
+#[tokio::test]
+async fn rejects_event_with_malformed_service_identity() {
+    // F15 regression: the Event path previously skipped identity
+    // validation, so a deserialized `ActorIdentity::Service` with
+    // an empty / non-kebab `service_id` could land in the trace
+    // via `process_event`. The listener now runs the same
+    // `ActorIdentity::validate` check as the FactAssert edge.
+    use weaver_core::types::event::{Event, EventPayload};
+    use weaver_core::types::ids::EventId;
+
+    let socket = unique_socket_path();
+    let _guard = ChildGuard::new(spawn_weaver(&socket));
+    wait_for_socket(&socket).await;
+
+    let mut client = Client::connect(&socket, "e2e-event-impersonator")
+        .await
+        .expect("connect to bus");
+
+    let malformed_source = ActorIdentity::Service {
+        service_id: "Not_Kebab".into(),
+        instance_id: Uuid::new_v4(),
+    };
+    let event = Event {
+        id: EventId::new(now_ns()),
+        name: "buffer/edited".into(),
+        target: Some(EntityRef::new(1)),
+        payload: EventPayload::BufferEdited,
+        provenance: weaver_core::provenance::Provenance {
+            source: malformed_source,
+            timestamp_ns: now_ns(),
+            causal_parent: None,
+        },
+    };
+    client
+        .send(&BusMessage::Event(event))
+        .await
+        .expect("send malformed Event");
+
+    let err = wait_for_error(&mut client).await;
+    match err {
+        BusMessage::Error(e) => {
+            assert_eq!(e.category, "invalid-identity", "got {e:?}");
+        }
+        other => panic!("expected Error, got {other:?}"),
+    }
+}
+
 async fn wait_for_error(client: &mut Client) -> BusMessage {
     let deadline = Duration::from_secs(5);
     timeout(deadline, async {
