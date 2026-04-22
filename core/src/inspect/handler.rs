@@ -47,62 +47,90 @@ pub fn inspect_fact(
         return Err(InspectionError::FactNotFound);
     };
 
-    // Behavior-authored fact (slice-001 path): the behavior dispatcher
-    // recorded a `BehaviorFired` entry whose asserted-set contains
-    // this key.
-    if let Some((source_event, asserting_behavior, trace_sequence)) = trace.fact_inspection(key) {
-        let entry = trace
-            .get(trace_sequence)
-            .ok_or(InspectionError::NoProvenance)?;
-        return Ok(InspectionDetail::behavior(
-            source_event,
-            asserting_behavior,
-            entry.timestamp_ns,
-            trace_sequence.as_u64(),
-        ));
+    // F23 review fix: derive the inspection shape from the LIVE fact's
+    // provenance, not from the `fact_inspection` behavior index.
+    // The behavior index is only cleared on retraction, so if a
+    // behavior asserted K and a service later overwrote K, the
+    // index still points at the behavior — handing back stale
+    // attribution. The live fact's `provenance.source` is always
+    // current (overwrites replace it), so it's the authoritative
+    // source for deciding which `InspectionDetail` variant to
+    // return.
+    match &fact.provenance.source {
+        ActorIdentity::Behavior { .. } => {
+            // Behavior-authored (slice-001 path): use the trace
+            // index to recover the triggering event + behavior id
+            // that were recorded in the matching `BehaviorFired`
+            // entry. Because the live fact confirms behavior
+            // authorship, the index must be current here.
+            let (source_event, asserting_behavior, trace_sequence) = trace
+                .fact_inspection(key)
+                .ok_or(InspectionError::NoProvenance)?;
+            let entry = trace
+                .get(trace_sequence)
+                .ok_or(InspectionError::NoProvenance)?;
+            Ok(InspectionDetail::behavior(
+                source_event,
+                asserting_behavior,
+                entry.timestamp_ns,
+                trace_sequence.as_u64(),
+            ))
+        }
+        ActorIdentity::Service {
+            service_id,
+            instance_id,
+        } => {
+            let (asserted_at_ns, trace_sequence, source_event) =
+                resolve_live_assert(trace, key, fact)?;
+            Ok(InspectionDetail::service(
+                source_event,
+                service_id.clone(),
+                *instance_id,
+                asserted_at_ns,
+                trace_sequence.as_u64(),
+            ))
+        }
+        // Core / Tui / User / Host / Agent: render the opaque shape.
+        // The trace entry still names the full actor identity; the
+        // inspection detail only omits it because the slice's
+        // InspectionDetail shape reserves structured rendering for
+        // Behavior and Service.
+        _ => {
+            let (asserted_at_ns, trace_sequence, source_event) =
+                resolve_live_assert(trace, key, fact)?;
+            Ok(InspectionDetail::opaque(
+                source_event,
+                asserted_at_ns,
+                trace_sequence.as_u64(),
+            ))
+        }
     }
+}
 
-    // Service-authored fact (slice-002): no behavior firing linked the
-    // fact, but the fact itself is currently asserted with structured
-    // provenance. Walk back to the assert's trace entry for timestamp +
-    // sequence.
+/// Resolve the live-assert trace entry's timestamp + sequence +
+/// causal-parent for a currently-asserted fact. The trace entry is
+/// the authoritative source for provenance detail; the snapshot's
+/// `Fact` is a safety net if the trace payload is unexpectedly
+/// non-`FactAsserted` (shouldn't happen — `find_fact_assert` only
+/// returns sequences of `FactAsserted` payloads).
+fn resolve_live_assert(
+    trace: &TraceStore,
+    key: &FactKey,
+    fact: &crate::types::fact::Fact,
+) -> Result<(u64, crate::trace::entry::TraceSequence, EventId), InspectionError> {
     let trace_sequence = trace
         .find_fact_assert(key)
         .ok_or(InspectionError::NoProvenance)?;
     let entry = trace
         .get(trace_sequence)
         .ok_or(InspectionError::NoProvenance)?;
-    let asserted_at_ns = entry.timestamp_ns;
-    // Re-read the fact from the trace-entry payload for the exact
-    // provenance of the asserting call (defensive — the snapshot's
-    // provenance is the same object, but trace is authoritative).
-    let (source_event_opt, source) = match &entry.payload {
-        TracePayload::FactAsserted { fact: f } => {
-            (f.provenance.causal_parent, &f.provenance.source)
-        }
-        _ => (fact.provenance.causal_parent, &fact.provenance.source),
+    let source_event_opt = match &entry.payload {
+        TracePayload::FactAsserted { fact: f } => f.provenance.causal_parent,
+        _ => fact.provenance.causal_parent,
     };
-    let source_event = source_event_opt.unwrap_or(EventId::ZERO);
-    match source {
-        ActorIdentity::Service {
-            service_id,
-            instance_id,
-        } => Ok(InspectionDetail::service(
-            source_event,
-            service_id.clone(),
-            *instance_id,
-            asserted_at_ns,
-            trace_sequence.as_u64(),
-        )),
-        // Core / Tui / User / Host / Agent / Behavior-without-trace-index:
-        // render the opaque shape. A `Behavior` variant without a
-        // matching BehaviorFired entry is an anomaly; surfacing the
-        // generic shape is honest rather than fabricating a Behavior
-        // detail that has no backing trace.
-        _ => Ok(InspectionDetail::opaque(
-            source_event,
-            asserted_at_ns,
-            trace_sequence.as_u64(),
-        )),
-    }
+    Ok((
+        entry.timestamp_ns,
+        trace_sequence,
+        source_event_opt.unwrap_or(EventId::ZERO),
+    ))
 }

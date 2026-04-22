@@ -65,6 +65,10 @@ name = "inspect_inspection_not_found"
 path = "tests/inspect/inspection_not_found.rs"
 
 [[test]]
+name = "inspect_inspection_overwrite"
+path = "tests/inspect/inspection_overwrite.rs"
+
+[[test]]
 name = "property_inspection_invariant"
 path = "tests/property/inspection_invariant.rs"
 
