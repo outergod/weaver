@@ -241,27 +241,40 @@ pub async fn run(
         }
 
         // Attempt observation. On error, enter Degraded (T046).
+        //
+        // F21 review fix: only emit the Degraded lifecycle and
+        // `repo/observable=false` on the healthy→degraded
+        // transition. Republishing every failed poll during a
+        // prolonged outage floods the trace and bus broadcast
+        // with identical authoritative assertions; subscribers
+        // already observed the first one, and the mutex-invariant
+        // fact is still in the store. Subsequent failures stay at
+        // debug log level.
         let obs = match observer.observe() {
             Ok(o) => o,
             Err(e) => {
-                warn!(error = %e, "observation failed; entering Degraded");
-                was_degraded = true;
-                let _ = publish_watcher_status(
-                    &mut writer,
-                    watcher_entity,
-                    &identity,
-                    LifecycleSignal::Degraded,
-                )
-                .await;
-                let _ = publish_fact(
-                    &mut writer,
-                    FactKey::new(repo_entity, "repo/observable"),
-                    FactValue::Bool(false),
-                    &identity,
-                    None,
-                    &mut tracked,
-                )
-                .await;
+                if was_degraded {
+                    debug!(error = %e, "observation still failing; remaining Degraded");
+                } else {
+                    warn!(error = %e, "observation failed; entering Degraded");
+                    was_degraded = true;
+                    let _ = publish_watcher_status(
+                        &mut writer,
+                        watcher_entity,
+                        &identity,
+                        LifecycleSignal::Degraded,
+                    )
+                    .await;
+                    let _ = publish_fact(
+                        &mut writer,
+                        FactKey::new(repo_entity, "repo/observable"),
+                        FactValue::Bool(false),
+                        &identity,
+                        None,
+                        &mut tracked,
+                    )
+                    .await;
+                }
                 continue;
             }
         };
