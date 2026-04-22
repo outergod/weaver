@@ -93,6 +93,19 @@ impl RepoObserver {
 
     /// Read one observation of the repository.
     pub fn observe(&self) -> Result<Observation, ObserverError> {
+        // F18 review fix: transient operations (rebase / merge /
+        // cherry-pick / revert / bisect) are deferred per spec
+        // Clarification Q4. Without this check a repo mid-rebase
+        // would keep publishing `repo/state/on-branch` —
+        // misleading consumers who rely on the state family to
+        // signal a stable working copy. Surface as
+        // `UnsupportedTransientState` so the publisher flips to
+        // `Degraded` + `repo/observable=false`.
+        if self.repo.state().is_some() {
+            return Err(ObserverError::UnsupportedTransientState {
+                path: self.path.display().to_string(),
+            });
+        }
         let head = self.repo.head().map_err(|e| ObserverError::Observation {
             source: Box::new(e),
         })?;
@@ -302,6 +315,37 @@ mod tests {
             from_root.path(),
             from_subdir.path(),
             "subdirectory input must resolve to the same repo root"
+        );
+    }
+
+    #[test]
+    fn transient_merge_state_is_reported_unsupported() {
+        // F18 regression: create a repo with a pending merge so
+        // `.git/MERGE_HEAD` exists, then confirm `observe()` refuses
+        // to publish OnBranch and surfaces UnsupportedTransientState
+        // instead. Using MERGE_HEAD rather than rebase state keeps
+        // the test hermetic — no need to conflict-engineer two
+        // branches.
+        let td = tempfile::tempdir().unwrap();
+        init_repo(td.path());
+        commit_one(td.path(), "a.txt", "hello", "initial");
+        let head_sha = String::from_utf8(
+            Command::new("git")
+                .current_dir(td.path())
+                .args(["rev-parse", "HEAD"])
+                .output()
+                .unwrap()
+                .stdout,
+        )
+        .unwrap()
+        .trim()
+        .to_string();
+        std::fs::write(td.path().join(".git/MERGE_HEAD"), format!("{head_sha}\n")).unwrap();
+        let obs = RepoObserver::open(td.path()).unwrap();
+        let err = obs.observe().unwrap_err();
+        assert!(
+            matches!(err, ObserverError::UnsupportedTransientState { .. }),
+            "expected UnsupportedTransientState, got {err:?}"
         );
     }
 
