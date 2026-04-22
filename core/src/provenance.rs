@@ -126,6 +126,13 @@ pub enum ProvenanceError {
 
     #[error("service identifier {0:?} must be kebab-case (L2 Amendment 5)")]
     NonKebabCaseServiceId(String),
+
+    #[error(
+        "{field} must be non-empty — wire-derived identity payloads are \
+         validated uniformly so malformed frames cannot poison \
+         trace/inspection output (F19 review fix)"
+    )]
+    EmptyIdentityField { field: &'static str },
 }
 
 impl ActorIdentity {
@@ -181,17 +188,62 @@ impl ActorIdentity {
     /// is the single place callers use to guard wire-derived
     /// identities (F12 review fix). [`Provenance::new`] also routes
     /// through here so in-process construction is safe too.
+    ///
+    /// F19 review fix: every identity-carrying variant gets a
+    /// non-empty check on its payload fields. The reserved
+    /// variants (`User`, `Host`, `Agent`) aren't emitted this
+    /// slice, but [`validate`] is now the single wire gate — so
+    /// malformed frames carrying empty strings must not slip
+    /// through into trace/inspection. Kebab-case validation stays
+    /// scoped to `Service` since that's the only variant whose
+    /// identifier vocabulary the slice commits to. Nested
+    /// identities (`Agent::on_behalf_of`) are recursively
+    /// validated so a chain with a malformed delegator is
+    /// caught at the top.
     pub fn validate(&self) -> Result<(), ProvenanceError> {
         match self {
             Self::Service { service_id, .. } => validate_kebab_case(service_id),
-            // Reserved / infra variants have no extra invariants
-            // beyond their type-level structure.
-            Self::Core
-            | Self::Behavior { .. }
-            | Self::Tui
-            | Self::User { .. }
-            | Self::Host { .. }
-            | Self::Agent { .. } => Ok(()),
+            Self::User { id } => {
+                if id.as_str().is_empty() {
+                    Err(ProvenanceError::EmptyIdentityField { field: "user-id" })
+                } else {
+                    Ok(())
+                }
+            }
+            Self::Host {
+                host_id,
+                hosted_origin,
+            } => {
+                if host_id.is_empty() {
+                    return Err(ProvenanceError::EmptyIdentityField { field: "host-id" });
+                }
+                if hosted_origin.file.is_empty() {
+                    return Err(ProvenanceError::EmptyIdentityField {
+                        field: "hosted-origin.file",
+                    });
+                }
+                if hosted_origin.runtime_version.is_empty() {
+                    return Err(ProvenanceError::EmptyIdentityField {
+                        field: "hosted-origin.runtime-version",
+                    });
+                }
+                Ok(())
+            }
+            Self::Agent {
+                agent_id,
+                on_behalf_of,
+            } => {
+                if agent_id.is_empty() {
+                    return Err(ProvenanceError::EmptyIdentityField { field: "agent-id" });
+                }
+                if let Some(inner) = on_behalf_of {
+                    inner.validate()?;
+                }
+                Ok(())
+            }
+            // Payload-less variants have no further invariants to
+            // check beyond their type-level structure.
+            Self::Core | Self::Behavior { .. } | Self::Tui => Ok(()),
         }
     }
 }
@@ -266,6 +318,120 @@ mod tests {
         assert!(ActorIdentity::service("a", Uuid::nil()).is_ok());
         assert!(ActorIdentity::service("weaver-cli", Uuid::nil()).is_ok());
         assert!(ActorIdentity::service("abc-123-xyz", Uuid::nil()).is_ok());
+    }
+
+    #[test]
+    fn validate_rejects_empty_user_id() {
+        let id = ActorIdentity::User {
+            id: UserId::new(""),
+        };
+        assert_eq!(
+            id.validate().unwrap_err(),
+            ProvenanceError::EmptyIdentityField { field: "user-id" }
+        );
+    }
+
+    #[test]
+    fn validate_rejects_empty_host_id() {
+        let id = ActorIdentity::Host {
+            host_id: "".into(),
+            hosted_origin: HostedOrigin {
+                file: "script.lua".into(),
+                location: None,
+                runtime_version: "5.4.7".into(),
+            },
+        };
+        assert_eq!(
+            id.validate().unwrap_err(),
+            ProvenanceError::EmptyIdentityField { field: "host-id" }
+        );
+    }
+
+    #[test]
+    fn validate_rejects_empty_hosted_origin_file() {
+        let id = ActorIdentity::Host {
+            host_id: "lua".into(),
+            hosted_origin: HostedOrigin {
+                file: "".into(),
+                location: None,
+                runtime_version: "5.4.7".into(),
+            },
+        };
+        assert_eq!(
+            id.validate().unwrap_err(),
+            ProvenanceError::EmptyIdentityField {
+                field: "hosted-origin.file"
+            }
+        );
+    }
+
+    #[test]
+    fn validate_rejects_empty_hosted_runtime_version() {
+        let id = ActorIdentity::Host {
+            host_id: "lua".into(),
+            hosted_origin: HostedOrigin {
+                file: "script.lua".into(),
+                location: None,
+                runtime_version: "".into(),
+            },
+        };
+        assert_eq!(
+            id.validate().unwrap_err(),
+            ProvenanceError::EmptyIdentityField {
+                field: "hosted-origin.runtime-version"
+            }
+        );
+    }
+
+    #[test]
+    fn validate_rejects_empty_agent_id() {
+        let id = ActorIdentity::Agent {
+            agent_id: "".into(),
+            on_behalf_of: None,
+        };
+        assert_eq!(
+            id.validate().unwrap_err(),
+            ProvenanceError::EmptyIdentityField { field: "agent-id" }
+        );
+    }
+
+    #[test]
+    fn validate_recurses_into_agent_on_behalf_of() {
+        // Outer agent is well-formed; the delegator carries an
+        // empty service_id that should trip validation.
+        let malformed_delegator = ActorIdentity::Service {
+            service_id: "".into(),
+            instance_id: Uuid::new_v4(),
+        };
+        let id = ActorIdentity::Agent {
+            agent_id: "researcher".into(),
+            on_behalf_of: Some(Box::new(malformed_delegator)),
+        };
+        assert_eq!(id.validate().unwrap_err(), ProvenanceError::EmptyServiceId);
+    }
+
+    #[test]
+    fn validate_accepts_well_formed_reserved_variants() {
+        let user = ActorIdentity::User {
+            id: UserId::new("alice"),
+        };
+        assert!(user.validate().is_ok());
+        let host = ActorIdentity::Host {
+            host_id: "lua".into(),
+            hosted_origin: HostedOrigin {
+                file: "script.lua".into(),
+                location: Some("line 7".into()),
+                runtime_version: "5.4.7".into(),
+            },
+        };
+        assert!(host.validate().is_ok());
+        let agent = ActorIdentity::Agent {
+            agent_id: "researcher".into(),
+            on_behalf_of: Some(Box::new(ActorIdentity::User {
+                id: UserId::new("alice"),
+            })),
+        };
+        assert!(agent.validate().is_ok());
     }
 
     #[test]
