@@ -76,6 +76,12 @@ pub enum CliError {
         #[source]
         source: humantime::DurationError,
     },
+
+    #[error(
+        "--poll-interval must be > 0: `humantime` accepts `0ms`, but \
+         `tokio::time::interval` panics on a zero period. Use e.g. `1ms`."
+    )]
+    ZeroPollInterval,
 }
 
 /// Parse the CLI, initialize tracing, and run the publisher until the
@@ -136,8 +142,18 @@ pub fn run() -> Result<(), Report> {
 }
 
 /// Parse a humantime-style duration string (e.g. `250ms`, `1s`).
+///
+/// F16 review fix: `humantime` parses `0ms` as `Duration::ZERO`,
+/// which would otherwise reach `tokio::time::interval` and panic
+/// at runtime. Reject zero up front so the CLI fails via the
+/// documented startup-error path (exit 1) instead.
 fn parse_duration(input: &str) -> Result<Duration, CliError> {
-    humantime::parse_duration(input).map_err(|source| CliError::BadPollInterval { source })
+    let parsed =
+        humantime::parse_duration(input).map_err(|source| CliError::BadPollInterval { source })?;
+    if parsed.is_zero() {
+        return Err(CliError::ZeroPollInterval);
+    }
+    Ok(parsed)
 }
 
 fn init_tracing(verbose: u8) {
@@ -158,3 +174,34 @@ fn init_tracing(verbose: u8) {
 
 // Keep the constant referenced so future plumbing adopts the default.
 const _: Duration = DEFAULT_POLL_INTERVAL;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_duration_accepts_valid_humantime() {
+        assert_eq!(parse_duration("250ms").unwrap(), Duration::from_millis(250));
+        assert_eq!(parse_duration("1s").unwrap(), Duration::from_secs(1));
+    }
+
+    #[test]
+    fn parse_duration_rejects_zero() {
+        assert!(matches!(
+            parse_duration("0ms").unwrap_err(),
+            CliError::ZeroPollInterval
+        ));
+        assert!(matches!(
+            parse_duration("0s").unwrap_err(),
+            CliError::ZeroPollInterval
+        ));
+    }
+
+    #[test]
+    fn parse_duration_rejects_garbage() {
+        assert!(matches!(
+            parse_duration("not-a-duration").unwrap_err(),
+            CliError::BadPollInterval { .. }
+        ));
+    }
+}
