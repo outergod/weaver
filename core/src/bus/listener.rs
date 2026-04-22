@@ -365,9 +365,20 @@ async fn handle_client_message(
             // claim; we surface that as a structured bus Error so
             // the offending client can distinguish this from a
             // silent idempotent no-op (`NotPresent`).
+            //
+            // F11 review fix: the client-supplied `provenance.source`
+            // and `.timestamp_ns` are intentionally ignored. The
+            // dispatcher synthesizes retraction attribution server-
+            // side from the asserting actor's stored identity;
+            // accepting the client's source would let an owner forge
+            // trace/audit attribution (e.g. retract while claiming
+            // to be `ActorIdentity::Core`). The `causal_parent`
+            // survives as a correlation hint so consumers can still
+            // group a retract+assert pair describing one transition
+            // (L2 P11).
             use crate::behavior::dispatcher::ServiceRetractOutcome;
             let outcome = dispatcher
-                .retract_from_service(conn_id, key.clone(), provenance)
+                .retract_from_service(conn_id, key.clone(), provenance.causal_parent)
                 .await;
             if matches!(outcome, ServiceRetractOutcome::NotOwned) {
                 let err = BusMessage::Error(ErrorMsg {

@@ -15,6 +15,7 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use tokio::time::{sleep, timeout};
+use uuid::Uuid;
 
 use weaver_core::bus::client::Client;
 use weaver_core::provenance::{ActorIdentity, Provenance};
@@ -75,6 +76,95 @@ async fn rejects_core_provenance_fact_assert() {
             }
         }
     }
+}
+
+#[tokio::test]
+async fn retract_provenance_is_synthesized_server_side() {
+    // F11 regression: a legitimate owner retracting their own fact
+    // must not be able to forge the retraction's attribution. The
+    // dispatcher synthesizes `source` and `timestamp_ns` from the
+    // fact's stored provenance; only `causal_parent` is retained
+    // from the client frame (as a correlation hint).
+    let socket = unique_socket_path();
+    let _guard = ChildGuard::new(spawn_weaver(&socket));
+    wait_for_socket(&socket).await;
+
+    // Client A: publish as a service.
+    let mut publisher = Client::connect(&socket, "e2e-publisher")
+        .await
+        .expect("connect publisher");
+    let instance = Uuid::new_v4();
+    let svc_identity =
+        ActorIdentity::service("test-publisher", instance).expect("valid service identity");
+    let key = FactKey::new(EntityRef::new(42), "test/marker");
+    let fact = Fact {
+        key: key.clone(),
+        value: FactValue::Bool(true),
+        provenance: Provenance::new(svc_identity.clone(), now_ns(), None).unwrap(),
+    };
+    publisher
+        .send(&BusMessage::FactAssert(fact))
+        .await
+        .expect("send FactAssert");
+
+    // Client B: subscribe so we can observe the retract provenance.
+    let mut observer = Client::connect(&socket, "e2e-observer")
+        .await
+        .expect("connect observer");
+    observer
+        .subscribe(SubscribePattern::FamilyPrefix("test/".into()))
+        .await
+        .expect("subscribe");
+    // Drain the snapshot.
+    loop {
+        let msg = timeout(Duration::from_millis(500), observer.recv())
+            .await
+            .expect("snapshot timeout")
+            .expect("snapshot recv");
+        if let BusMessage::FactAssert(f) = msg {
+            if f.key == key {
+                break;
+            }
+        }
+    }
+
+    // Publisher retracts with forged Core provenance.
+    let forged_parent = weaver_core::types::ids::EventId::new(0xDEADBEEF);
+    let forged_retract_prov =
+        Provenance::new(ActorIdentity::Core, now_ns(), Some(forged_parent)).unwrap();
+    publisher
+        .send(&BusMessage::FactRetract {
+            key: key.clone(),
+            provenance: forged_retract_prov,
+        })
+        .await
+        .expect("send FactRetract");
+
+    // Observe the broadcast retract: its source must be the original
+    // asserter's Service identity, NOT the forged Core. The
+    // causal_parent hint is allowed to survive.
+    let retract = timeout(Duration::from_secs(5), async {
+        loop {
+            let msg = observer.recv().await.expect("recv");
+            if let BusMessage::FactRetract { key: k, provenance } = msg {
+                if k == key {
+                    return provenance;
+                }
+            }
+        }
+    })
+    .await
+    .expect("deadline waiting for retract");
+
+    assert_eq!(
+        retract.source, svc_identity,
+        "retract provenance.source must be server-synthesized from the original asserter"
+    );
+    assert_eq!(
+        retract.causal_parent,
+        Some(forged_parent),
+        "causal_parent is a correlation hint and survives",
+    );
 }
 
 #[tokio::test]

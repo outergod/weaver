@@ -72,7 +72,13 @@ impl AuthorityMap {
                 Ok(())
             }
             Some((existing_conn, existing_identity)) => {
-                if *existing_conn == conn_id || existing_identity == identity {
+                // F10 review fix: authority is conn-keyed, NOT
+                // identity-keyed. ActorIdentity is client-supplied and
+                // visible on the wire in subscribed FactAssert frames —
+                // a second connection could otherwise forge the first
+                // publisher's identity and bypass FR-009. Only the
+                // original connection may re-assert.
+                if *existing_conn == conn_id {
                     Ok(())
                 } else {
                     Err(existing_identity.clone())
@@ -310,11 +316,24 @@ impl Dispatcher {
     /// offending client. Retracting a fact that isn't currently
     /// asserted (never-published, or already-retracted) is an
     /// idempotent no-op ([`ServiceRetractOutcome::NotPresent`]).
+    /// F11 review fix: the retract provenance's **attribution
+    /// fields** (`source`, `timestamp_ns`) are synthesized
+    /// server-side, NOT accepted from the client. The only piece
+    /// the client still contributes is the `causal_parent` event
+    /// id — a correlation hint identifying the event that triggered
+    /// the retraction, which consumers need to group a retract+assert
+    /// pair describing one transition (L2 P11). Everything else would
+    /// let a legitimate owner forge attribution (e.g. retract while
+    /// claiming to be `ActorIdentity::Core`).
+    ///
+    /// After ownership is verified via `conn_id`, the dispatcher
+    /// looks up the fact's stored `provenance.source` (validated on
+    /// the assert path) and attributes the retraction to that actor.
     pub async fn retract_from_service(
         &self,
         conn_id: u64,
         key: FactKey,
-        provenance: Provenance,
+        causal_parent: Option<crate::types::ids::EventId>,
     ) -> ServiceRetractOutcome {
         // Ownership check: the retraction is valid only if this
         // connection is the current owner of the key in `conn_facts`.
@@ -342,14 +361,25 @@ impl Dispatcher {
         let _ = self.sequence.next();
         let mut fact_store = self.fact_store.lock().await;
         let mut trace = self.trace.lock().await;
+        // Attribute the retraction to the original asserter's identity
+        // (which the assert path validated as ActorIdentity::Service
+        // and bound to this conn_id). If the fact has vanished between
+        // the ownership check and this lookup — shouldn't happen since
+        // we hold conn_facts — fall back to Core as a safe default.
+        let attributed_source = fact_store
+            .query(&key)
+            .map(|f| f.provenance.source.clone())
+            .unwrap_or(ActorIdentity::Core);
+        let synthesized = Provenance::new(attributed_source, now, causal_parent)
+            .expect("validated source yields well-formed provenance");
         trace.append(
             now,
             TracePayload::FactRetracted {
                 key: key.clone(),
-                provenance: provenance.clone(),
+                provenance: synthesized.clone(),
             },
         );
-        fact_store.retract(&key, provenance);
+        fact_store.retract(&key, synthesized);
         ServiceRetractOutcome::Retracted
     }
 
@@ -427,6 +457,36 @@ mod tests {
     use crate::types::entity_ref::EntityRef;
     use crate::types::event::EventPayload;
     use crate::types::ids::EventId;
+
+    #[test]
+    fn authority_claim_rejects_identity_replay_from_other_connection() {
+        // F10 regression: a second connection must not bypass the
+        // single-writer guard by forging the first publisher's
+        // client-supplied ActorIdentity. Authority is conn-keyed.
+        use uuid::Uuid;
+        let instance = Uuid::new_v4();
+        let identity =
+            ActorIdentity::service("git-watcher", instance).expect("valid service identity");
+        let entity = EntityRef::new(1);
+
+        let mut map = AuthorityMap::default();
+        // Conn A claims.
+        assert!(map.claim(1, &identity, "repo", entity).is_ok());
+        // Conn A re-asserting the same key is idempotent.
+        assert!(map.claim(1, &identity, "repo", entity).is_ok());
+        // Conn B replays the same identity → must be rejected.
+        let err = map
+            .claim(2, &identity, "repo", entity)
+            .expect_err("replay must be rejected");
+        assert_eq!(err, identity);
+        // Conn B with a distinct identity → still rejected, receives
+        // the original claimant's identity as diagnostic payload.
+        let other = ActorIdentity::service("other-watcher", Uuid::new_v4()).unwrap();
+        let err = map
+            .claim(2, &other, "repo", entity)
+            .expect_err("different identity from other conn must be rejected");
+        assert_eq!(err, identity);
+    }
 
     #[tokio::test]
     async fn process_event_with_no_behaviors_appends_to_trace() {
