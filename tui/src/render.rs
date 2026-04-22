@@ -597,8 +597,20 @@ fn collect_repo_views(facts: &HashMap<FactKey, FactDisplay>) -> Vec<RepoView<'_>
             }
             _ => {}
         }
-        if entry.representative.is_none() {
-            entry.representative = Some((&fd.fact, fd.asserted_at_wall_ns));
+        // F27 review fix: use the freshest repo/* fact as the
+        // representative for the annotation line. Prior revision
+        // took the first fact encountered in HashMap iteration
+        // order, which could be `repo/path` — asserted once at
+        // startup and never refreshed — while
+        // `repo/state/*`/`repo/dirty` tick every poll. Operators
+        // watching the elapsed age as a freshness signal would
+        // see a frozen clock even though the watcher was healthy.
+        match entry.representative {
+            None => entry.representative = Some((&fd.fact, fd.asserted_at_wall_ns)),
+            Some((_, prev_ns)) if fd.asserted_at_wall_ns > prev_ns => {
+                entry.representative = Some((&fd.fact, fd.asserted_at_wall_ns));
+            }
+            _ => {}
         }
     }
     grouped.into_values().collect()
@@ -629,12 +641,21 @@ fn format_dirty_or_obs_lost(observable: Option<bool>, dirty: Option<bool>) -> St
 
 /// Truncate a commit SHA for display. `git` uses 7 chars by
 /// convention; the contract's sample rendering shows 8 + ellipsis.
+///
+/// F28 review fix: bus fact strings are not type-constrained to
+/// ASCII, so byte-slicing `&sha[..DISPLAY_CHARS]` would panic on
+/// a non-ASCII string whose 8th byte lands mid-codepoint. Use a
+/// char iterator that peeks one past the truncation point to
+/// decide whether to append the ellipsis — O(DISPLAY_CHARS) in
+/// the common case, and safe on any UTF-8 input.
 fn short_sha(sha: &str) -> String {
     const DISPLAY_CHARS: usize = 8;
-    if sha.len() > DISPLAY_CHARS {
-        format!("{}...", &sha[..DISPLAY_CHARS])
+    let mut iter = sha.chars();
+    let prefix: String = iter.by_ref().take(DISPLAY_CHARS).collect();
+    if iter.next().is_some() {
+        format!("{prefix}...")
     } else {
-        sha.to_string()
+        prefix
     }
 }
 
@@ -713,6 +734,10 @@ mod tests {
     use weaver_core::provenance::Provenance;
 
     fn mk_fact(entity: EntityRef, attr: &str, value: FactValue) -> FactDisplay {
+        mk_fact_at(entity, attr, value, 0)
+    }
+
+    fn mk_fact_at(entity: EntityRef, attr: &str, value: FactValue, ts: u64) -> FactDisplay {
         let identity = ActorIdentity::service("git-watcher", Uuid::new_v4()).unwrap();
         let provenance = Provenance::new(identity, 0, None).unwrap();
         FactDisplay {
@@ -721,7 +746,7 @@ mod tests {
                 value,
                 provenance,
             },
-            asserted_at_wall_ns: 0,
+            asserted_at_wall_ns: ts,
         }
     }
 
@@ -778,6 +803,58 @@ mod tests {
         // watcher always publishes full hex, but an operator running
         // `weaver status` could see shorter values in the future).
         assert_eq!(short_sha("abc"), "abc");
+    }
+
+    #[test]
+    fn short_sha_handles_utf8_without_panic() {
+        // F28 regression: bus fact strings are not type-constrained
+        // to ASCII. A malformed or future-nonstandard publisher
+        // could send a multi-byte codepoint whose byte position 8
+        // lands mid-codepoint; byte-slicing would panic. Char-
+        // iterator-based truncation must not panic and must
+        // produce a valid UTF-8 string.
+        let four_byte = "𝔸"; // 4-byte codepoint
+        let input = four_byte.repeat(12); // 48 bytes, 12 chars
+        let out = short_sha(&input);
+        // 8 chars of 𝔸 + ellipsis.
+        assert_eq!(out, format!("{}...", four_byte.repeat(8)));
+        // Short string passes through.
+        assert_eq!(short_sha("ß"), "ß");
+    }
+
+    #[test]
+    fn collect_repo_views_picks_freshest_fact_as_representative() {
+        // F27 regression: `representative` must be the fact with
+        // the highest `asserted_at_wall_ns`, not whichever one
+        // happened to iterate first. Prior logic could pick
+        // `repo/path` (asserted once at startup) over
+        // `repo/state/*` (refreshed every poll).
+        let mut facts = HashMap::new();
+        let e = EntityRef::new(1);
+        // Old startup fact.
+        insert(
+            &mut facts,
+            mk_fact_at(e, "repo/path", FactValue::String("/x".into()), 100),
+        );
+        // Fresh state fact — must win.
+        insert(
+            &mut facts,
+            mk_fact_at(
+                e,
+                "repo/state/on-branch",
+                FactValue::String("main".into()),
+                900,
+            ),
+        );
+        insert(
+            &mut facts,
+            mk_fact_at(e, "repo/dirty", FactValue::Bool(false), 500),
+        );
+        let views = collect_repo_views(&facts);
+        assert_eq!(views.len(), 1);
+        let (fact, ts) = views[0].representative.unwrap();
+        assert_eq!(ts, 900);
+        assert_eq!(fact.key.attribute, "repo/state/on-branch");
     }
 
     #[test]
