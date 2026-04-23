@@ -11,7 +11,15 @@ Per L2 Principle 7, each public surface carries its own version.
 
 - **Bus protocol** v0.2.0 (was v0.1.0) — message categories, delivery classes (lossy / authoritative), CBOR tag scheme entries 1000 (entity-ref), 1001 (keyword), **1002 (structured actor identity, slice 002)**. See `specs/002-git-watcher-actor/contracts/bus-messages.md`.
 - **Fact-family schema `buffer/dirty`** v0.1.0 — unchanged since slice 001.
-- **CLI surface** v0.1.0 — unchanged surface shape; internal rendering of actor identity updated in lockstep with the bus-protocol bump (slice 002 adds `weaver-git-watcher` binary in Phase 3).
+- **Fact-family schema `repo/dirty`** v0.1.0 (slice 002, new) — `FactValue::Bool`; asserted by `weaver-git-watcher` per Clarification Q5 (index-or-working-tree differs from HEAD; untracked-only is clean). See `specs/002-git-watcher-actor/data-model.md`.
+- **Fact-family schema `repo/head-commit`** v0.1.0 (slice 002, new) — `FactValue::String` holding the lowercase hex-encoded object id from `gix::rev_parse_single("HEAD")` — 40 chars for SHA-1 repositories, 64 for SHA-256. Retracted in the `Unborn` state.
+- **Fact-family schema `repo/state/on-branch`** v0.1.0 (slice 002, new) — `FactValue::String` (branch name). Asserted iff HEAD points at `refs/heads/<name>`.
+- **Fact-family schema `repo/state/detached`** v0.1.0 (slice 002, new) — `FactValue::String` (detached HEAD commit SHA).
+- **Fact-family schema `repo/state/unborn`** v0.1.0 (slice 002, new) — `FactValue::String` (intended branch name for an empty repository).
+- **Fact-family schema `repo/observable`** v0.1.0 (slice 002, new) — `FactValue::Bool`. `false` during watcher-`Degraded`; flips `true` on recovery. Suppresses dirty rendering in the TUI when `false` per `contracts/cli-surfaces.md`.
+- **Fact-family schema `repo/path`** v0.1.0 (slice 002, new) — `FactValue::String` (canonical working-tree root). The three `repo/state/*` attributes obey a mutex invariant: at most one asserted per repository entity at any trace prefix (`docs/07-open-questions.md §26`).
+- **Fact-family schema `watcher/status`** v0.1.0 (slice 002, new) — `FactValue::String` mirroring `LifecycleSignal` (`started` / `ready` / `degraded` / …). Keyed by the watcher's per-invocation instance-UUID entity, not the repository.
+- **CLI surface** v0.1.0 — shape unchanged; `weaver inspect --output=json` gains an always-present `asserting_kind` discriminator (MINOR additive per cli-surfaces.md §wire compatibility). Slice 002 also adds the new `weaver-git-watcher` binary — its own versioning tracks the crate's `Cargo.toml` (`0.1.0`).
 - **Configuration schema** v0.1.0 — unchanged.
 
 ## [Unreleased] — slice 002 Phase 2 — Foundational (ActorIdentity migration)
@@ -37,6 +45,45 @@ Per L2 Principle 7, each public surface carries its own version.
 
 - New workspace member `git-watcher/` — produces the `weaver-git-watcher` binary. Phase 1 scaffold only: CLI prints a Phase-1 marker and exits. Real implementation lands in Phase 3 (US1).
 - Workspace deps: `gix = "0.66"` (pure-Rust git; research §1), `humantime = "2"` (for `--poll-interval` in Phase 3).
+
+### Added — Phase 3: `weaver-git-watcher` end-to-end (US1)
+
+- **Observer**: `RepoObserver` opens a repository via `gix::discover`, keys the watcher by the **discovered working-tree root** (never the user-typed input path — prevents two watchers on different subpaths from bypassing the authority mutex). Bare repositories are rejected at `open()` with a dedicated `BareRepositoryUnsupported` variant; in-progress transient operations (rebase / merge / cherry-pick / revert / bisect) surface as `UnsupportedTransientState` so the watcher flips to `Degraded` rather than misreporting branch state. Symbolic HEAD outside `refs/heads/` (e.g. pointing at a tag) surfaces as `UnsupportedHeadShape`. HEAD-resolve failures on an `OnBranch` / `Detached` state propagate as `ObserverError::Observation`. Dirty check uses `git diff HEAD --quiet` via shell-out (documented deviation from research §1); SHA resolution uses `gix`.
+- **Publisher**: one `weaver-git-watcher` process asserts authority over `repo/*` for a single repo entity via an `ActorIdentity::Service` with a fresh UUID v4 per invocation (Clarification Q3). The publisher splits its bus stream post-handshake so a reader task can surface server-sent `Error` frames (`authority-conflict`, `identity-drift`, `not-owner`, `invalid-identity`) to the main loop, exiting with the documented code path (`2` bus-unavailable, `3` authority-conflict, `10` internal). Degraded-state emission is **edge-triggered**: the `Lifecycle(Degraded)` + `repo/observable=false` pair fires only on the healthy→degraded transition, not every failed poll.
+- **Authority-conflict mechanism** (core): new `AuthorityMap` + `ServicePublishOutcome` + `ServiceRetractOutcome` in `core/src/behavior/dispatcher.rs`. Claims are **conn-keyed** (identity alone is client-forgeable on the wire) and a connection binds its `ActorIdentity` on first publish — any subsequent publish under a different identity returns `ServicePublishOutcome::IdentityDrift`, surfaced over the bus as `Error { category: "identity-drift" }`. Retract attribution is synthesized server-side (client-supplied `source` and `timestamp_ns` are ignored; only `causal_parent` survives as a correlation hint).
+- **Connection-owned fact tracking**: every service-asserted fact is recorded against its owning connection; `release_connection` retracts everything the connection published when the stream closes, so SIGKILL of a watcher leaves no stale `repo/*` facts in the store.
+- **CLI surface (new binary)** — `weaver-git-watcher <REPOSITORY-PATH> [--poll-interval=250ms] [--socket=<path>] [--output=json|human] [-v/-vv/-vvv] [--version]`. `--socket` folds `WEAVER_SOCKET` env var (parity with `weaver`). `--output=json` switches both `--version` rendering AND runtime tracing to JSON. `--poll-interval=0ms` is rejected at parse time (would panic `tokio::time::interval`). Documented exit codes: 0 clean, 1 startup failure (including bootstrap `observe()` errors), 2 bus unavailable, 3 authority conflict, 10 internal.
+
+### Added — Phase 3: TUI Repositories section
+
+- `tui/src/render.rs` renders a dedicated **Repositories** section below the existing Facts section. State badges: `[on <name>]`, `[detached <sha>]`, `[unborn <name>]`, or `[state unknown]`. The `[observability lost]` badge replaces the dirty indicator when `repo/observable = false`; `[stale]` is appended per-row when the TUI loses its core subscription. Authoring-actor line reuses the shared `annotation` helper to render `by service <id> (inst <short-uuid>), event <id>, <t>s ago`. Facts and Repositories sections both order facts deterministically by `(entity, attribute)` so `[i]nspect` always targets the visually-first fact.
+
+### Added — Phase 4: structured-identity inspection
+
+- `InspectionDetail` gains an always-present `asserting_kind: String` discriminator — `"behavior" | "service" | "core" | "tui" | "user" | "host" | "agent"` (see `ActorIdentity::kind_label`). Identifier fields are populated only for the slice's emitted kinds (`behavior`, `service`). Core / Tui / reserved variants carry the kind alone. Additive per cli-surfaces.md §wire compatibility.
+- Backward-compatible deserialization via `InspectionDetailRepr` + `#[serde(from = ...)]`: mixed-version deployments continue to work — a new client decoding a pre-slice response infers `asserting_kind` from the populated identifier fields (`behavior` / `service` / fallback `core`).
+- Inspection routes through the **live fact's provenance**, not the `TraceStore::fact_inspection` index, so a service overwriting a behavior-authored fact is now attributed correctly (the behavior index isn't cleared on overwrite — only on retraction — and the inspect handler no longer relies on it for authoritative attribution).
+
+### Added — Phase 4: wire-edge identity validation
+
+- `ActorIdentity::validate()` is the **single gate for wire-derived provenance**. Called from `Provenance::new` (in-process safety) and listener-side for both `BusMessage::FactAssert` and `BusMessage::Event`. Rejects empty `service-id`, `behavior-id`, `user-id`, `host-id`, `hosted-origin.{file,runtime-version}`, `agent-id`; recursively validates `Agent.on_behalf_of`. `Service` identifiers additionally must be kebab-case (Amendment 5). Malformed wire frames receive `Error { category: "invalid-identity" }`. Non-`Service` provenance on `FactAssert` is rejected with `Error { category: "unauthorized" }` (behaviors publish in-core; only services publish over the bus).
+
+### Changed — bus dispatcher
+
+- Lock-order across the dispatcher standardized: `publish_from_service` and `retract_from_service` now both acquire `fact_store` before `conn_facts`; the retract path releases the `conn_facts` guard before awaiting `fact_store.lock()` (the inverse held prior and admitted a deadlock under concurrent publish + non-owner retract traffic).
+- `listener.rs::handle_connection` funnels every post-handshake exit through a single `dispatcher.release_connection(conn_id)` call — a forwarding-write failure on a publisher-subscriber connection no longer leaks authority claims or conn-owned facts.
+
+### Fixed — miscellaneous polish
+
+- `weaver-git-watcher --version` honours `--output=json|human` per the CLI contract; three binaries (`weaver`, `weaver-git-watcher`, `weaver-tui`) all report `bus_protocol: "0.2.0"` from the same constant.
+- TUI `short_sha` truncation is UTF-8 safe (char-iterator-based); the repo-view representative fact uses the freshest `asserted_at_wall_ns` so the rendered age reflects the watcher's most recent publication, not a startup-only one.
+
+### Added — Phase 3 & 4 test coverage
+
+- `git-watcher/tests/mutex_invariant.rs` (T060) — property test over 1–20-observation random sequences proves the discriminated-union `repo/state/*` mutex invariant holds at every trace prefix.
+- `git-watcher/tests/transition_causal.rs` (T061) — six scenario tests exhausting the variant-pair matrix; retract and assert of every transition share a `causal_parent` EventId equal to the triggering poll tick.
+- `core/tests/inspect/behavior_authored.rs` (T065), `tests/e2e/git_watcher_inspect.rs` (T066), `core/tests/inspect/structured_always.rs` (T067), `core/tests/inspect/causal_walkback.rs` (T067a), `core/tests/property/inspect_identity.rs` (T068) — Phase-4 inspection coverage: CLI-level attribution for behavior- and service-authored facts, structured-always invariant across fact families, multi-hop causal-chain identity check, round-trip property for every emitted kind.
+- `tests/e2e/{git_watcher, git_watcher_sigkill, git_watcher_authority_conflict, fact_assert_identity_guard}.rs` — end-to-end three-process coverage.
 
 ## [0.1.0] — 2026-04-20 — slice 001 "Hello, fact"
 
