@@ -46,34 +46,34 @@ description: "Task list for Slice 003 — Buffer Service implementation"
 
 - [X] T008 {surface:bus} {surface:fact} Add `FactValue::U64(u64)` variant to `core/src/types/fact.rs` under the existing `#[serde(tag = "type", content = "value", rename_all = "kebab-case")]` adjacent-tag; wire form `{"type":"u64","value":<n>}`
 - [X] T009 [P] {surface:bus} Update `core/src/types/fact.rs` unit tests to cover `FactValue::U64` round-trip (JSON + CBOR via `ciborium`)
-- [ ] T010 {surface:bus} Remove `EventPayload::BufferEdited` and `EventPayload::BufferCleaned` from `core/src/types/event.rs`; remove any downstream unit tests that construct them
-- [ ] T011 {surface:bus} Add `EventPayload::BufferOpen { path: String }` to `core/src/types/event.rs`; wire form `{"type":"buffer-open","payload":{"path":"<p>"}}`; kebab-case variant tag per Amendment 5
-- [ ] T012 [P] {surface:bus} Update `core/src/types/event.rs` unit tests: remove `BufferEdited` / `BufferCleaned` round-trip coverage; add `BufferOpen` round-trip coverage (JSON + CBOR)
-- [ ] T013 {surface:bus} Bump `Hello.protocol_version` constant from `0x02` to `0x03` wherever it is defined in `core/src/bus/`; update the version-mismatch handshake test to assert the new "bus protocol 0x03 required; received 0x02" detail string
+- [X] T010 {surface:bus} Remove `EventPayload::BufferEdited` and `EventPayload::BufferCleaned` from `core/src/types/event.rs`; remove any downstream unit tests that construct them
+- [X] T011 {surface:bus} Add `EventPayload::BufferOpen { path: String }` to `core/src/types/event.rs`; wire form `{"type":"buffer-open","payload":{"path":"<p>"}}`; kebab-case variant tag per Amendment 5
+- [X] T012 [P] {surface:bus} Update `core/src/types/event.rs` unit tests: remove `BufferEdited` / `BufferCleaned` round-trip coverage; add `BufferOpen` round-trip coverage (JSON + CBOR)
+- [X] T013 {surface:bus} Bump `Hello.protocol_version` constant from `0x02` to `0x03` wherever it is defined in `core/src/bus/`; update the version-mismatch handshake test to assert the new "bus protocol 0x03 required; received 0x02" detail string
 
 ### Behavior and CLI removals
 
-- [ ] T014 Delete `core/src/behavior/dirty_tracking.rs`; remove the module declaration from `core/src/behavior/mod.rs`; remove the registration call from `core/src/cli/run.rs` (or wherever the dispatcher's behavior list is constructed)
-- [ ] T015 [P] Remove unit tests that exercise the deleted `DirtyTrackingBehavior` from `core/src/behavior/`
-- [ ] T016 {surface:cli} Delete `core/src/cli/simulate.rs`; remove the `simulate-edit` / `simulate-clean` subcommand registrations from `core/src/cli/mod.rs` and any `clap` subcommand enum that lists them
-- [ ] T017 [P] {surface:cli} Remove the `simulate_edit_*` / `simulate_clean_*` CLI unit tests from `core/src/cli/simulate.rs`'s test module (deleted with T016) and from `core/src/cli/mod.rs`'s integration tests if present
+- [X] T014 Delete `core/src/behavior/dirty_tracking.rs`; remove the module declaration from `core/src/behavior/mod.rs`; remove the registration call from `core/src/cli/run.rs` (or wherever the dispatcher's behavior list is constructed)
+- [X] T015 [P] Remove unit tests that exercise the deleted `DirtyTrackingBehavior` from `core/src/behavior/`
+- [X] T016 {surface:cli} Delete `core/src/cli/simulate.rs`; remove the `simulate-edit` / `simulate-clean` subcommand registrations from `core/src/cli/mod.rs` and any `clap` subcommand enum that lists them
+- [X] T017 [P] {surface:cli} Remove the `simulate_edit_*` / `simulate_clean_*` CLI unit tests from `core/src/cli/simulate.rs`'s test module (deleted with T016) and from `core/src/cli/mod.rs`'s integration tests if present
 
 ### Version-string bumps
 
-- [ ] T018 [P] {surface:cli} Update `weaver --version` output: human form shows `bus protocol: v0.3.0`; JSON form field `bus_protocol` is `"0.3.0"`. Source in `core/src/cli/` (wherever the version constant or build-info rendering lives)
-- [ ] T019 [P] {surface:cli} Same update for `weaver-tui --version` in `tui/src/cli.rs` (or equivalent path)
-- [ ] T020 [P] {surface:cli} Same update for `weaver-git-watcher --version` in `git-watcher/src/main.rs` or its cli module
+- [X] T018 [P] {surface:cli} Update `weaver --version` output: human form shows `bus protocol: v0.3.0`; JSON form field `bus_protocol` is `"0.3.0"`. Source in `core/src/cli/` (wherever the version constant or build-info rendering lives)
+- [X] T019 [P] {surface:cli} Same update for `weaver-tui --version` in `tui/src/cli.rs` (or equivalent path)
+- [X] T020 [P] {surface:cli} Same update for `weaver-git-watcher --version` in `git-watcher/src/main.rs` or its cli module
 
 ### Foundational buffer-crate skeleton
 
-- [ ] T021 [P] Add `buffer_entity_ref(path: &Path) -> EntityRef` to `buffers/src/model.rs` reserving bit 61 per `data-model.md §Entity-id derivation`; include unit tests for reserved-bit invariants (bit 61 set, bits 62/63 cleared) and for path-canonicalization idempotence
-- [ ] T022 [P] Add `watcher_instance_entity_ref(instance: &Uuid) -> EntityRef` to `buffers/src/model.rs` mirroring slice 002's derivation (bit 62 reserved); include unit tests
-- [ ] T023 [P] Add `BufferState` struct to `buffers/src/model.rs` with private fields (`path`, `entity`, `content`, `memory_digest`, `last_dirty`, `last_observable`); expose a single constructor that reads the file, computes `memory_digest`, and sets initial `last_dirty=false` / `last_observable=true`; include unit tests asserting `memory_digest == sha256(content)` invariant
-- [ ] T024 [P] Add `BufferObservation` struct and `ObserverError` enum to `buffers/src/model.rs` per `data-model.md §Internal types`
+- [X] T021 [P] Add `buffer_entity_ref(path: &Path) -> EntityRef` to `buffers/src/model.rs` reserving bit 61 per `data-model.md §Entity-id derivation`; include unit tests for reserved-bit invariants (bit 61 set, bits 62/63 cleared) and for path-canonicalization idempotence
+- [X] T022 [P] Add `watcher_instance_entity_ref(instance: &Uuid) -> EntityRef` to `buffers/src/model.rs` mirroring slice 002's derivation (bit 62 reserved); include unit tests
+- [X] T023 [P] Add `BufferState` struct to `buffers/src/model.rs` with private fields (`path`, `entity`, `content`, `memory_digest`, `last_dirty`, `last_observable`); expose a single constructor that reads the file, computes `memory_digest`, and sets initial `last_dirty=false` / `last_observable=true`; include unit tests asserting `memory_digest == sha256(content)` invariant
+- [X] T024 [P] Add `BufferObservation` struct and `ObserverError` enum to `buffers/src/model.rs` per `data-model.md §Internal types`
 
 ### CHANGELOG scaffolding
 
-- [ ] T025 {surface:bus} {schema-migration} Update `CHANGELOG.md` Public Surfaces Tracked section: bus protocol v0.3.0 (was v0.2.0); new fact families `buffer/path`, `buffer/byte-size`, `buffer/dirty`, `buffer/observable` at v0.1.0; CLI MAJOR for `simulate-edit` / `simulate-clean` removal; new `weaver-buffers` binary at 0.1.0. Body section left blank for per-story tasks to fill.
+- [X] T025 {surface:bus} {schema-migration} Update `CHANGELOG.md` Public Surfaces Tracked section: bus protocol v0.3.0 (was v0.2.0); new fact families `buffer/path`, `buffer/byte-size`, `buffer/dirty`, `buffer/observable` at v0.1.0; CLI MAJOR for `simulate-edit` / `simulate-clean` removal; new `weaver-buffers` binary at 0.1.0. Body section left blank for per-story tasks to fill.
 
 **Checkpoint**: Foundation ready. Wire v0x03 is live; `simulate-edit` / `simulate-clean` are gone; `core/dirty-tracking` behavior is gone; `FactValue::U64` and `EventPayload::BufferOpen` are on the wire; the `buffers` crate has compile-ready types for what US1 will build on. No user-facing behavior observable yet.
 
