@@ -9,8 +9,11 @@ Per-public-surface versioning is per L2 constitution Principle 8 (`.specify/memo
 
 Per L2 Principle 7, each public surface carries its own version.
 
-- **Bus protocol** v0.2.0 (was v0.1.0) — message categories, delivery classes (lossy / authoritative), CBOR tag scheme entries 1000 (entity-ref), 1001 (keyword), **1002 (structured actor identity, slice 002)**. See `specs/002-git-watcher-actor/contracts/bus-messages.md`.
-- **Fact-family schema `buffer/dirty`** v0.1.0 — unchanged since slice 001.
+- **Bus protocol** v0.3.0 (was v0.2.0) — message categories, delivery classes (lossy / authoritative), CBOR tag scheme entries 1000 (entity-ref), 1001 (keyword), 1002 (structured actor identity, slice 002). Slice 003 wire changes: `EventPayload::BufferEdited` / `BufferCleaned` removed; `EventPayload::BufferOpen { path }` added; `FactValue::U64(u64)` added. `Hello.protocol_version` advances `0x02 → 0x03`. See `specs/003-buffer-service/contracts/bus-messages.md`.
+- **Fact-family schema `buffer/dirty`** v0.1.0 — wire shape unchanged from slice 001. **Authority transferred** from the `core/dirty-tracking` behavior to the `weaver-buffers` service in slice 003; the shipped core no longer registers an embedded producer.
+- **Fact-family schema `buffer/path`** v0.1.0 (slice 003, new) — `FactValue::String` (canonical absolute path). Bootstrap fact asserted once per opened buffer; never updated (path change ≡ entity change). Authored by `weaver-buffers`.
+- **Fact-family schema `buffer/byte-size`** v0.1.0 (slice 003, new) — `FactValue::U64` (the new variant lands under the bus-protocol MAJOR bump). Byte count of the service's in-memory content. Authored by `weaver-buffers`.
+- **Fact-family schema `buffer/observable`** v0.1.0 (slice 003, new) — `FactValue::Bool`. Per-buffer file observability; `false` during transient unreadability, `true` on recovery. Edge-triggered per slice-002 F21. Authored by `weaver-buffers`.
 - **Fact-family schema `repo/dirty`** v0.1.0 (slice 002, new) — `FactValue::Bool`; asserted by `weaver-git-watcher` per Clarification Q5 (index-or-working-tree differs from HEAD; untracked-only is clean). See `specs/002-git-watcher-actor/data-model.md`.
 - **Fact-family schema `repo/head-commit`** v0.1.0 (slice 002, new) — `FactValue::String` holding the lowercase hex-encoded object id from `gix::rev_parse_single("HEAD")` — 40 chars for SHA-1 repositories, 64 for SHA-256. Retracted in the `Unborn` state.
 - **Fact-family schema `repo/state/on-branch`** v0.1.0 (slice 002, new) — `FactValue::String` (branch name). Asserted iff HEAD points at `refs/heads/<name>`.
@@ -19,10 +22,25 @@ Per L2 Principle 7, each public surface carries its own version.
 - **Fact-family schema `repo/observable`** v0.1.0 (slice 002, new) — `FactValue::Bool`. `false` during watcher-`Degraded`; flips `true` on recovery. Suppresses dirty rendering in the TUI when `false` per `contracts/cli-surfaces.md`.
 - **Fact-family schema `repo/path`** v0.1.0 (slice 002, new) — `FactValue::String` (canonical working-tree root). The three `repo/state/*` attributes obey a mutex invariant: at most one asserted per repository entity at any trace prefix (`docs/07-open-questions.md §26`).
 - **Fact-family schema `watcher/status`** v0.1.0 (slice 002, new) — `FactValue::String` mirroring `LifecycleSignal` (`started` / `ready` / `degraded` / …). Keyed by the watcher's per-invocation instance-UUID entity, not the repository.
-- **CLI surface** v0.1.0 — shape unchanged; `weaver inspect --output=json` gains an always-present `asserting_kind` discriminator (MINOR additive per cli-surfaces.md §wire compatibility). Slice 002 also adds the new `weaver-git-watcher` binary — its own versioning tracks the crate's `Cargo.toml` (`0.1.0`).
+- **CLI surface `weaver`** v0.2.0 — MAJOR bump. Slice 003 removes the `simulate-edit` and `simulate-clean` subcommands (the events they produced are no longer on the wire). `weaver inspect --output=json` gains an always-present `asserting_kind` discriminator (slice 002 MINOR additive, carried into v0.2.0); behavior-authored inspection was removed from the shipped surface as a consequence of retiring `core/dirty-tracking`.
+- **CLI surface `weaver-buffers`** v0.1.0 (slice 003, new) — `weaver-buffers <PATH>... [--poll-interval=<duration>] [--socket=<path>] [--output=human|json] [-v/-vv/-vvv] [--version]`. Exit codes 0/1/2/3/10 per `specs/003-buffer-service/contracts/cli-surfaces.md`.
+- **CLI surface `weaver-git-watcher`** v0.1.0 — shape unchanged; `--version` JSON field `bus_protocol` advances `"0.2.0" → "0.3.0"` as a by-product of the protocol bump (constant-driven, not a CLI-surface change).
+- **CLI surface `weaver-tui`** v0.1.0 — MINOR additive. Slice 003 adds a Buffers render section below the existing Repositories section; no new keybindings. The `e`/`c` simulate-edit/simulate-clean keystrokes are removed (their target events are gone from the protocol); the command bar now shows `Commands: [i]nspect  [q]uit`. (NB: this is keybinding removal, which under `cli-surfaces.md §Versioning policy` is reserved for a future MAJOR — handled here as a slice-coordinated simultaneous removal with the wire variants rather than as a standalone TUI break.)
 - **Configuration schema** v0.1.0 — unchanged.
 
-## [Unreleased] — slice 002 Phase 2 — Foundational (ActorIdentity migration)
+## [Unreleased] — slice 003 — Buffer Service
+
+**Breaking bus-protocol change** — version advances `0.2.0 → 0.3.0`. Slice-002 clients cannot connect to a v0.3.0 core; every in-tree bus client (core, TUI, git-watcher, new `weaver-buffers`, e2e test harness) rebuilds together. CLI `weaver` surface bumps MAJOR for the `simulate-edit` / `simulate-clean` removal. New `weaver-buffers` binary ships at 0.1.0.
+
+Body sections for slice 003 land in T065 (Phase 6 polish); this scaffold records only the public-surface version bumps the foundational commits already made observable. Enumerated changes so far:
+
+- Bus protocol `Hello.protocol_version` 0x02 → 0x03; `EventPayload::BufferEdited` + `BufferCleaned` removed; `EventPayload::BufferOpen { path }` added; `FactValue::U64(u64)` added.
+- `core/dirty-tracking` behavior removed from the shipped core; `buffer/dirty` is now service-authored only.
+- `weaver simulate-edit` / `simulate-clean` CLI subcommands removed.
+- TUI `e`/`c` keystrokes removed; command bar shows `[i]nspect  [q]uit`.
+- `weaver-buffers` binary scaffold in place; entity-id derivation + `BufferState` / `BufferObservation` / `ObserverError` types landed.
+
+## [0.2.0] — 2026-04-23 — slice 002 "Git-Watcher Actor"
 
 **Breaking bus-protocol change** — version bumps `0.1.0 → 0.2.0`. Slice 001 clients cannot connect to a v0.2.0 core; all in-tree bus clients (core, TUI, CLI, e2e test harness, test client) rebuild together.
 
