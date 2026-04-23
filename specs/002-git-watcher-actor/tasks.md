@@ -163,8 +163,8 @@ Markers apply in addition to `[P]` and `[Story]`:
 
 ### Scenario / property tests (Phase 3)
 
-- [ ] T060 [P] [US1] Property test in `git-watcher/tests/mutex_invariant.rs`: for any trace prefix produced by the watcher's poll loop, at any repository entity, the count of asserted `repo/state/*` facts MUST be ≤ 1. Uses `proptest` to generate arbitrary sequences of `WorkingCopyState` transitions **{retraction}**
-- [ ] T061 [P] [US1] Scenario test in `git-watcher/tests/transition_causal.rs`: for every synthetic transition, the retract and the subsequent assert carry the same `causal_parent` EventId
+- [X] T060 [P] [US1] Property test in `git-watcher/tests/mutex_invariant.rs`: for any trace prefix produced by the watcher's poll loop, at any repository entity, the count of asserted `repo/state/*` facts MUST be ≤ 1. Uses `proptest` to generate arbitrary sequences of `WorkingCopyState` transitions **{retraction}**
+- [X] T061 [P] [US1] Scenario test in `git-watcher/tests/transition_causal.rs`: for every synthetic transition, the retract and the subsequent assert carry the same `causal_parent` EventId
 
 **Checkpoint**: US1 independently shippable. Three-process system works end-to-end. Watcher disconnect retracts cleanly. Authority conflict correctly rejects second instance.
 
