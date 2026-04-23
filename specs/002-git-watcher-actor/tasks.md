@@ -201,9 +201,9 @@ Markers apply in addition to `[P]` and `[Story]`:
 
 **Purpose**: Changelog, documentation, quickstart validation.
 
-- [ ] T069 [P] Update `CHANGELOG.md` (extend the Phase-2 entries) with fact-family schema entries: `repo/dirty 0.1.0`, `repo/head-commit 0.1.0`, `repo/state/on-branch 0.1.0`, `repo/state/detached 0.1.0`, `repo/state/unborn 0.1.0`, `repo/observable 0.1.0`, `repo/path 0.1.0`, `watcher/status 0.1.0` per L2 P8 **{surface:fact}**
+- [X] T069 [P] Update `CHANGELOG.md` (extend the Phase-2 entries) with fact-family schema entries: `repo/dirty 0.1.0`, `repo/head-commit 0.1.0`, `repo/state/on-branch 0.1.0`, `repo/state/detached 0.1.0`, `repo/state/unborn 0.1.0`, `repo/observable 0.1.0`, `repo/path 0.1.0`, `watcher/status 0.1.0` per L2 P8 **{surface:fact}**
 - [X] T070 [P] Ensure `weaver-git-watcher --version` and `weaver --version` and `weaver-tui --version` all report `bus_protocol: "0.2.0"` consistently — all three binaries render from the single `BUS_PROTOCOL_VERSION_STR` constant in `core/src/types/message.rs`; verified with all three binaries emitting `bus protocol: v0.2.0` (2026-04-22)
-- [ ] T071 Update `git-watcher/README.md` with usage example matching `quickstart.md`
+- [X] T071 Update `git-watcher/README.md` with usage example matching `quickstart.md`
 - [X] T072 Run `cargo lint` + `cargo fmt-check` + `cargo test --workspace` + `scripts/ci.sh` — all green — pre-commit hooks enforced at every commit throughout the slice; re-verified at reconcile time: `scripts/ci.sh [ci] OK` with 32 test-result lines all passing (2026-04-22)
 - [ ] T073 Run the `quickstart.md` procedure manually end-to-end (the three-terminal walkthrough); confirm each SC-001..SC-006 criterion passes; take notes on any friction for future quickstart revisions
 - [X] T074 Grep the codebase to confirm zero remaining references to `SourceId::External(`; confirm no `.to_string()` path on any `ActorIdentity` produces an opaque tag in CLI / JSON / trace output — no live-code references remain; the two matches in `core/src/provenance.rs` and `core/src/types/message.rs` are `//!` doc comments describing the slice-002 replacement migration and are intentional historical context (2026-04-22)
