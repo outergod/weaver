@@ -60,3 +60,7 @@ path = "e2e/buffer_open_bootstrap.rs"
 [[test]]
 name = "buffer_external_mutation"
 path = "e2e/buffer_external_mutation.rs"
+
+[[test]]
+name = "buffer_sigkill"
+path = "e2e/buffer_sigkill.rs"
