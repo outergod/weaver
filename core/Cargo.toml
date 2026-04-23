@@ -54,6 +54,10 @@ name = "inspect_inspection_overwrite"
 path = "tests/inspect/inspection_overwrite.rs"
 
 [[test]]
+name = "inspect_buffer_behavior_service_overwrite"
+path = "tests/inspect/buffer_behavior_service_overwrite.rs"
+
+[[test]]
 name = "inspect_structured_always"
 path = "tests/inspect/structured_always.rs"
 
