@@ -293,8 +293,13 @@ async fn handle_key_when_ready(key: &KeyEvent, state: &mut AppState, client: &mu
             state.mark_unavailable(format!("write failed: {e} (press `r` to reconnect)"));
         }
     } else if is_inspect_key(key) {
-        // Inspect the first displayed fact, if any.
-        if let Some(target_key) = state.facts.keys().next().cloned() {
+        // F29 review fix: `[i]` must inspect the fact that is
+        // visually first in the rendered output. Prior logic used
+        // `state.facts.keys().next()` — HashMap iteration order —
+        // so after the Facts / Repositories split the inspected
+        // fact could be anywhere on screen (or in the Repositories
+        // section) while the operator looked at something else.
+        if let Some(target_key) = inspect_target(state) {
             match commands::inspect(&mut client.writer, target_key.clone()).await {
                 Ok(request_id) => {
                     state.pending_inspection = Some((request_id, target_key));
@@ -380,10 +385,12 @@ fn draw<W: Write>(w: &mut W, state: &AppState) -> std::io::Result<()> {
     emit(w, &mut row, format!("│ {label}"))?;
     // Only non-repo facts land here; repositories get their own
     // section below per contracts/cli-surfaces.md §Repositories.
-    let non_repo: Vec<_> = state
-        .facts
-        .values()
-        .filter(|fd| !is_repo_fact_attribute(&fd.fact.key.attribute))
+    // Ordering is deterministic so the Facts section doesn't
+    // shuffle between ticks and `[i]` always targets the visually-
+    // first fact (F29 review fix).
+    let non_repo: Vec<&FactDisplay> = non_repo_fact_keys_sorted(state)
+        .iter()
+        .filter_map(|k| state.facts.get(k))
         .collect();
     if non_repo.is_empty() {
         emit(w, &mut row, "│   (none)".into())?;
@@ -507,6 +514,41 @@ fn draw<W: Write>(w: &mut W, state: &AppState) -> std::io::Result<()> {
 
     w.flush()?;
     Ok(())
+}
+
+/// Render order for non-repo fact keys: sort by `(entity, attribute)`
+/// so the Facts section is deterministic across ticks (F29 review
+/// fix — `HashMap` iteration would otherwise shuffle the rendered
+/// order between runs and the `[i]` target wouldn't match what the
+/// operator sees first).
+fn non_repo_fact_keys_sorted(state: &AppState) -> Vec<FactKey> {
+    let mut keys: Vec<FactKey> = state
+        .facts
+        .keys()
+        .filter(|k| !is_repo_fact_attribute(&k.attribute))
+        .cloned()
+        .collect();
+    keys.sort_by(|a, b| {
+        a.entity
+            .as_u64()
+            .cmp(&b.entity.as_u64())
+            .then_with(|| a.attribute.cmp(&b.attribute))
+    });
+    keys
+}
+
+/// The fact key that `[i]nspect` should target: the first rendered
+/// fact, preferring non-repo facts (Facts section is above
+/// Repositories) and falling through to the representative fact of
+/// the first repository when only repo facts exist.
+fn inspect_target(state: &AppState) -> Option<FactKey> {
+    if let Some(k) = non_repo_fact_keys_sorted(state).into_iter().next() {
+        return Some(k);
+    }
+    collect_repo_views(&state.facts)
+        .into_iter()
+        .next()
+        .and_then(|v| v.representative.map(|(f, _)| f.key.clone()))
 }
 
 /// Does `attribute` belong to the `repo/*` family? Used to split the
@@ -855,6 +897,90 @@ mod tests {
         let (fact, ts) = views[0].representative.unwrap();
         assert_eq!(ts, 900);
         assert_eq!(fact.key.attribute, "repo/state/on-branch");
+    }
+
+    #[test]
+    fn non_repo_keys_sort_by_entity_then_attribute() {
+        let mut state = AppState::new();
+        insert(
+            &mut state.facts,
+            mk_fact(EntityRef::new(2), "buffer/dirty", FactValue::Bool(true)),
+        );
+        insert(
+            &mut state.facts,
+            mk_fact(EntityRef::new(1), "buffer/dirty", FactValue::Bool(false)),
+        );
+        insert(
+            &mut state.facts,
+            mk_fact(EntityRef::new(1), "watcher/status", FactValue::Bool(true)),
+        );
+        // repo/* must be filtered out entirely.
+        insert(
+            &mut state.facts,
+            mk_fact(EntityRef::new(1), "repo/dirty", FactValue::Bool(false)),
+        );
+        let keys = non_repo_fact_keys_sorted(&state);
+        let attrs: Vec<&str> = keys.iter().map(|k| k.attribute.as_str()).collect();
+        assert_eq!(
+            attrs,
+            vec!["buffer/dirty", "watcher/status", "buffer/dirty"]
+        );
+        assert_eq!(keys[0].entity.as_u64(), 1);
+        assert_eq!(keys[1].entity.as_u64(), 1);
+        assert_eq!(keys[2].entity.as_u64(), 2);
+    }
+
+    #[test]
+    fn inspect_target_prefers_first_non_repo_fact() {
+        let mut state = AppState::new();
+        insert(
+            &mut state.facts,
+            mk_fact(EntityRef::new(5), "buffer/dirty", FactValue::Bool(true)),
+        );
+        insert(
+            &mut state.facts,
+            mk_fact(
+                EntityRef::new(9),
+                "repo/state/on-branch",
+                FactValue::String("main".into()),
+            ),
+        );
+        let k = inspect_target(&state).expect("some target");
+        assert_eq!(k.attribute, "buffer/dirty");
+        assert_eq!(k.entity.as_u64(), 5);
+    }
+
+    #[test]
+    fn inspect_target_falls_through_to_first_repo_representative() {
+        let mut state = AppState::new();
+        // Only repo facts present.
+        insert(
+            &mut state.facts,
+            mk_fact_at(
+                EntityRef::new(42),
+                "repo/state/on-branch",
+                FactValue::String("main".into()),
+                900,
+            ),
+        );
+        insert(
+            &mut state.facts,
+            mk_fact_at(
+                EntityRef::new(42),
+                "repo/path",
+                FactValue::String("/x".into()),
+                100,
+            ),
+        );
+        let k = inspect_target(&state).expect("some target");
+        // The freshest (state fact at t=900) is the representative.
+        assert_eq!(k.attribute, "repo/state/on-branch");
+    }
+
+    #[test]
+    fn inspect_target_none_when_empty() {
+        let state = AppState::new();
+        assert!(inspect_target(&state).is_none());
     }
 
     #[test]
