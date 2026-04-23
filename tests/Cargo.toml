@@ -69,3 +69,7 @@ path = "e2e/buffer_sigkill.rs"
 [[test]]
 name = "buffer_inspect_attribution"
 path = "e2e/buffer_inspect_attribution.rs"
+
+[[test]]
+name = "buffer_simulate_removed"
+path = "e2e/buffer_simulate_removed.rs"
