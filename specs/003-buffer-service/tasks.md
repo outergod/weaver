@@ -24,13 +24,13 @@ description: "Task list for Slice 003 — Buffer Service implementation"
 
 **Purpose**: Scaffold the new `buffers` workspace member and wire up the shared dependencies.
 
-- [ ] T001 Add `buffers` to the `members` list in the workspace `Cargo.toml`
-- [ ] T002 [P] Add `sha2` to `[workspace.dependencies]` in the workspace `Cargo.toml`, pinned to a minor version per `research.md §1`
-- [ ] T003 [P] Create `buffers/Cargo.toml` declaring the `weaver-buffers` binary, `license.workspace = true`, runtime dependencies (`tokio`, `clap` with `derive`, `miette`, `thiserror`, `tracing`, `tracing-subscriber`, `uuid`, `sha2`, `humantime`, `serde`, `ciborium`, path dep on `weaver-core`), and `[dev-dependencies]` with `tempfile.workspace = true` + `proptest.workspace = true` (A2 fix from `/speckit-analyze`: `tempfile` is already a workspace dep — slice 002 uses it via `git-watcher` and `tests/` — but must be inherited explicitly by this crate)
-- [ ] T004 [P] Create `buffers/src/main.rs` with a clap stub that prints a Phase-1 marker (`"weaver-buffers (slice 003 scaffold)"`) and exits
-- [ ] T005 [P] Create `buffers/src/lib.rs` with module declarations for `model`, `observer`, `publisher` (each module stubbed with `// TODO: slice 003` comment)
-- [ ] T006 [P] Create `buffers/README.md` — role (content-backed service), usage snippet, link to `specs/003-buffer-service/spec.md` and `plan.md`
-- [ ] T007 Verify `cargo build --workspace` passes end-to-end with the new crate compiled; verify `scripts/ci.sh` green (clippy + fmt-check + test). No functional behavior yet — this just confirms the scaffold compiles under the workspace gates.
+- [X] T001 Add `buffers` to the `members` list in the workspace `Cargo.toml`
+- [X] T002 [P] Add `sha2` to `[workspace.dependencies]` in the workspace `Cargo.toml`, pinned to a minor version per `research.md §1`
+- [X] T003 [P] Create `buffers/Cargo.toml` declaring the `weaver-buffers` binary, `license.workspace = true`, runtime dependencies (`tokio`, `clap` with `derive`, `miette`, `thiserror`, `tracing`, `tracing-subscriber`, `uuid`, `sha2`, `humantime`, `serde`, `ciborium`, path dep on `weaver-core`), and `[dev-dependencies]` with `tempfile.workspace = true` + `proptest.workspace = true` (A2 fix from `/speckit-analyze`: `tempfile` is already a workspace dep — slice 002 uses it via `git-watcher` and `tests/` — but must be inherited explicitly by this crate)
+- [X] T004 [P] Create `buffers/src/main.rs` with a clap stub that prints a Phase-1 marker (`"weaver-buffers (slice 003 scaffold)"`) and exits
+- [X] T005 [P] Create `buffers/src/lib.rs` with module declarations for `model`, `observer`, `publisher` (each module stubbed with `// TODO: slice 003` comment)
+- [X] T006 [P] Create `buffers/README.md` — role (content-backed service), usage snippet, link to `specs/003-buffer-service/spec.md` and `plan.md`
+- [X] T007 Verify `cargo build --workspace` passes end-to-end with the new crate compiled; verify `scripts/ci.sh` green (clippy + fmt-check + test). No functional behavior yet — this just confirms the scaffold compiles under the workspace gates.
 
 **Checkpoint**: Scaffold compiles; the `weaver-buffers` binary exists but does nothing useful.
 
