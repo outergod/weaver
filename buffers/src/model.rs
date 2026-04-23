@@ -1,6 +1,336 @@
-//! Buffer-service domain types. Populated in Phase 2 (foundational
-//! tasks T021–T024) and Phase 3 (observer tasks).
+//! Buffer-service domain types.
 //!
-//! TODO: slice 003 — `BufferState`, `BufferObservation`, `ObserverError`,
-//! `buffer_entity_ref`, `watcher_instance_entity_ref` land here per
-//! `specs/003-buffer-service/data-model.md`.
+//! Contents:
+//!
+//! - [`buffer_entity_ref`] / [`watcher_instance_entity_ref`] —
+//!   entity-id derivation with reserved namespace bits.
+//! - [`BufferState`] — in-memory state for one opened buffer, with a
+//!   structurally enforced `memory_digest == sha256(content)` invariant.
+//! - [`BufferObservation`] — pure output of one observation tick.
+//! - [`ObserverError`] — categorised failure modes for
+//!   [`BufferState::open`] and the observer path.
+//!
+//! See `specs/003-buffer-service/data-model.md`.
+
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
+use std::path::{Path, PathBuf};
+
+use sha2::{Digest, Sha256};
+use thiserror::Error;
+use uuid::Uuid;
+use weaver_core::types::entity_ref::EntityRef;
+
+/// Buffer-namespace bit in the derived `EntityRef`. Set on every
+/// buffer entity; distinct from the slice-002 reserved bits 62
+/// (watcher-instance) and 63 (repo). Trace inspection can classify an
+/// entity at a glance by this bit.
+const BUFFER_NAMESPACE_BIT: u64 = 1 << 61;
+
+/// Watcher-instance-namespace bit. Reused unchanged from slice 002: a
+/// `weaver-buffers` invocation's instance entity shares the namespace
+/// with git-watcher instances — the TUI/inspect machinery distinguishes
+/// them by asserted facts, not by entity-id bit layout.
+const INSTANCE_NAMESPACE_BIT: u64 = 1 << 62;
+
+/// Repo-namespace bit, owned by slice-002's `git-watcher`. Buffer
+/// derivations clear this bit so a low-order hash never accidentally
+/// claims the repo namespace.
+const REPO_NAMESPACE_BIT: u64 = 1 << 63;
+
+/// Derive a stable `EntityRef` for a buffer entity from its
+/// canonicalized absolute path.
+///
+/// The caller MUST pass an already-canonicalized path (e.g., the output
+/// of [`std::fs::canonicalize`]). This function is a pure function of
+/// its input — no I/O, no implicit canonicalization — so the entity id
+/// is deterministic for any canonical path.
+pub fn buffer_entity_ref(path: &Path) -> EntityRef {
+    let mut hasher = DefaultHasher::new();
+    path.hash(&mut hasher);
+    let h =
+        (hasher.finish() | BUFFER_NAMESPACE_BIT) & !(INSTANCE_NAMESPACE_BIT | REPO_NAMESPACE_BIT);
+    EntityRef::new(h)
+}
+
+/// Derive a stable `EntityRef` for the buffer-service-instance entity
+/// (host of `watcher/status` for this invocation). Mirrors slice-002's
+/// watcher-instance derivation; bit 62 set, bit 63 cleared.
+pub fn watcher_instance_entity_ref(instance: &Uuid) -> EntityRef {
+    let mut hasher = DefaultHasher::new();
+    instance.as_bytes().hash(&mut hasher);
+    let h = (hasher.finish() | INSTANCE_NAMESPACE_BIT) & !REPO_NAMESPACE_BIT;
+    EntityRef::new(h)
+}
+
+/// In-memory state for a single opened buffer.
+///
+/// Invariant: `memory_digest == Sha256(content)` at all times. Enforced
+/// structurally via private fields plus the fallible [`Self::open`]
+/// constructor; slice 003 has no in-process mutation path. Slice 004+
+/// will expose a `set_content` that updates both fields together.
+///
+/// Custom [`std::fmt::Debug`] redacts `content` so accidental
+/// `tracing::debug!(?state)` never emits the bytes of an opened file —
+/// the slice's defining invariant (FR-002a) is that content must never
+/// leak through any API, including debug formatting.
+pub struct BufferState {
+    path: PathBuf,
+    entity: EntityRef,
+    content: Vec<u8>,
+    memory_digest: [u8; 32],
+    last_dirty: bool,
+    last_observable: bool,
+}
+
+impl std::fmt::Debug for BufferState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BufferState")
+            .field("path", &self.path)
+            .field("entity", &self.entity)
+            .field("byte_size", &self.byte_size())
+            .field("memory_digest", &hex_digest(&self.memory_digest))
+            .field("last_dirty", &self.last_dirty)
+            .field("last_observable", &self.last_observable)
+            .finish_non_exhaustive()
+    }
+}
+
+fn hex_digest(digest: &[u8; 32]) -> String {
+    let mut out = String::with_capacity(64);
+    for b in digest {
+        use std::fmt::Write as _;
+        let _ = write!(out, "{b:02x}");
+    }
+    out
+}
+
+impl BufferState {
+    /// Open `path` and construct a fresh `BufferState`.
+    ///
+    /// Reads the file's content into memory, computes its SHA-256
+    /// digest, and initialises `last_dirty=false` / `last_observable=true`.
+    /// `path` MUST already be canonicalized.
+    ///
+    /// Returns [`ObserverError::StartupFailure`] if the file is missing,
+    /// is a directory, is unreadable, or cannot be loaded into memory.
+    pub fn open(path: PathBuf) -> Result<Self, ObserverError> {
+        let content = std::fs::read(&path).map_err(|source| ObserverError::StartupFailure {
+            path: path.clone(),
+            reason: source.to_string(),
+        })?;
+        let memory_digest: [u8; 32] = Sha256::digest(&content).into();
+        let entity = buffer_entity_ref(&path);
+        Ok(Self {
+            path,
+            entity,
+            content,
+            memory_digest,
+            last_dirty: false,
+            last_observable: true,
+        })
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    pub fn entity(&self) -> EntityRef {
+        self.entity
+    }
+
+    pub fn content(&self) -> &[u8] {
+        &self.content
+    }
+
+    pub fn memory_digest(&self) -> &[u8; 32] {
+        &self.memory_digest
+    }
+
+    pub fn byte_size(&self) -> u64 {
+        self.content.len() as u64
+    }
+
+    pub fn last_dirty(&self) -> bool {
+        self.last_dirty
+    }
+
+    pub fn last_observable(&self) -> bool {
+        self.last_observable
+    }
+
+    // Wired in Phase 3 (publisher tasks T034 / T035): the poll loop
+    // records each edge-triggered transition back onto the state so
+    // subsequent ticks can emit `buffer/dirty` / `buffer/observable`
+    // only on actual state changes. `#[expect]` fails at compile time
+    // when the callers arrive, forcing the attribute's removal.
+    #[expect(dead_code)]
+    pub(crate) fn set_last_dirty(&mut self, v: bool) {
+        self.last_dirty = v;
+    }
+
+    #[expect(dead_code)]
+    pub(crate) fn set_last_observable(&mut self, v: bool) {
+        self.last_observable = v;
+    }
+}
+
+/// Pure output of one observation tick — what the publisher needs to
+/// decide which facts to re-assert.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BufferObservation {
+    pub byte_size: u64,
+    pub dirty: bool,
+    pub observable: bool,
+}
+
+/// Errors produced by [`BufferState::open`] and the observer path.
+#[derive(Debug, Error)]
+pub enum ObserverError {
+    /// File not readable mid-session (transient: permission flicker,
+    /// mid-rename race). Publisher flips `buffer/observable=false`.
+    #[error("transient read error for {path}: {source}")]
+    TransientRead {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+
+    /// File does not exist mid-session (deleted, unmounted). Publisher
+    /// flips `buffer/observable=false`.
+    #[error("buffer file missing: {path}")]
+    Missing { path: PathBuf },
+
+    /// File exists but is no longer a regular file (replaced by a
+    /// directory, socket, etc.). Publisher flips
+    /// `buffer/observable=false`; the buffer stays tracked but is lost.
+    #[error("buffer path is no longer a regular file: {path}")]
+    NotRegularFile { path: PathBuf },
+
+    /// Startup-only: path invalid at open time. Publisher exits code 1
+    /// after emitting a structured diagnostic.
+    #[error("buffer not openable at {path}: {reason}")]
+    StartupFailure { path: PathBuf, reason: String },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sha2::{Digest, Sha256};
+    use std::io::Write;
+    use tempfile::NamedTempFile;
+
+    fn path(bytes: &str) -> PathBuf {
+        PathBuf::from(bytes)
+    }
+
+    #[test]
+    fn buffer_entity_reserved_bits_set_correctly() {
+        for p in [
+            "/tmp/a",
+            "/home/alex/code/weaver/core/src/lib.rs",
+            "/",
+            "/this/is/a/very/long/canonical/path/that/exercises/the/hasher",
+        ] {
+            let e = buffer_entity_ref(&path(p)).as_u64();
+            assert!(e & BUFFER_NAMESPACE_BIT != 0, "bit 61 must be set for {p}");
+            assert!(
+                e & INSTANCE_NAMESPACE_BIT == 0,
+                "bit 62 must be clear for {p}"
+            );
+            assert!(e & REPO_NAMESPACE_BIT == 0, "bit 63 must be clear for {p}");
+        }
+    }
+
+    #[test]
+    fn buffer_entity_is_deterministic() {
+        let p = path("/home/alex/file.txt");
+        assert_eq!(buffer_entity_ref(&p), buffer_entity_ref(&p));
+    }
+
+    #[test]
+    fn buffer_entity_distinguishes_paths() {
+        let a = buffer_entity_ref(&path("/tmp/a"));
+        let b = buffer_entity_ref(&path("/tmp/b"));
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn watcher_instance_entity_reserved_bits_set_correctly() {
+        for _ in 0..8 {
+            let id = Uuid::new_v4();
+            let e = watcher_instance_entity_ref(&id).as_u64();
+            assert!(e & INSTANCE_NAMESPACE_BIT != 0, "bit 62 must be set");
+            assert!(e & REPO_NAMESPACE_BIT == 0, "bit 63 must be clear");
+        }
+    }
+
+    #[test]
+    fn watcher_instance_entity_is_deterministic() {
+        let id = Uuid::new_v4();
+        assert_eq!(
+            watcher_instance_entity_ref(&id),
+            watcher_instance_entity_ref(&id)
+        );
+    }
+
+    #[test]
+    fn watcher_instance_entity_distinguishes_uuids() {
+        let a = watcher_instance_entity_ref(&Uuid::new_v4());
+        let b = watcher_instance_entity_ref(&Uuid::new_v4());
+        assert_ne!(a, b, "two random uuids must produce distinct entities");
+    }
+
+    #[test]
+    fn buffer_state_open_establishes_digest_invariant() {
+        let mut f = NamedTempFile::new().expect("tempfile");
+        let content = b"hello buffer\n";
+        f.write_all(content).expect("write");
+        let canonical = std::fs::canonicalize(f.path()).expect("canonicalize");
+
+        let state = BufferState::open(canonical.clone()).expect("open");
+        assert_eq!(state.path(), canonical.as_path());
+        assert_eq!(state.entity(), buffer_entity_ref(&canonical));
+        assert_eq!(state.content(), content);
+        assert_eq!(state.byte_size(), content.len() as u64);
+
+        // Invariant: memory_digest == sha256(content).
+        let expected: [u8; 32] = Sha256::digest(content).into();
+        assert_eq!(state.memory_digest(), &expected);
+
+        // Initial transient flags.
+        assert!(!state.last_dirty(), "initial dirty must be false");
+        assert!(state.last_observable(), "initial observable must be true");
+    }
+
+    #[test]
+    fn buffer_state_open_missing_returns_startup_failure() {
+        let missing = path("/definitely/not/a/real/path/weaver-test-absent");
+        let err = BufferState::open(missing.clone()).expect_err("missing path must fail");
+        match err {
+            ObserverError::StartupFailure { path, .. } => assert_eq!(path, missing),
+            other => panic!("expected StartupFailure, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn observer_error_variants_are_distinct() {
+        let p = path("/tmp/x");
+        let transient = ObserverError::TransientRead {
+            path: p.clone(),
+            source: std::io::Error::other("transient"),
+        };
+        let missing = ObserverError::Missing { path: p.clone() };
+        let not_regular = ObserverError::NotRegularFile { path: p.clone() };
+        let startup = ObserverError::StartupFailure {
+            path: p,
+            reason: "fixture".into(),
+        };
+        // Spot-check the Display impls so downstream diagnostics don't
+        // collapse into ambiguous wording.
+        assert!(format!("{transient}").contains("transient read"));
+        assert!(format!("{missing}").contains("missing"));
+        assert!(format!("{not_regular}").contains("regular file"));
+        assert!(format!("{startup}").contains("not openable"));
+    }
+}
