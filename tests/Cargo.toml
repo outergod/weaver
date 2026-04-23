@@ -14,6 +14,7 @@ publish = false
 
 [dev-dependencies]
 weaver_core = { path = "../core" }
+weaver-buffers = { path = "../buffers" }
 tokio.workspace = true
 ciborium.workspace = true
 serde_json.workspace = true
@@ -64,3 +65,7 @@ path = "e2e/buffer_external_mutation.rs"
 [[test]]
 name = "buffer_sigkill"
 path = "e2e/buffer_sigkill.rs"
+
+[[test]]
+name = "buffer_inspect_attribution"
+path = "e2e/buffer_inspect_attribution.rs"
