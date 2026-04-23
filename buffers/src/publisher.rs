@@ -3,25 +3,18 @@
 //! `ActorIdentity::Service` identity, and handles clean-shutdown
 //! retraction and bus-EOF exit paths.
 //!
-//! Slice 003 builds this out across several commits. The C10 skeleton
-//! shipped here wires up the structural plumbing shared with slice-002's
-//! `weaver-git-watcher` publisher:
-//!
-//! - Service-identity construction.
-//! - Connection + handshake via [`weaver_core::bus::client::Client`].
-//! - Post-handshake stream split so a reader task can surface
-//!   server-sent `Error` frames concurrently with the write path (the
-//!   F3 review pattern from slice 002).
-//! - SIGTERM / SIGINT awareness with clean (empty) exit.
-//!
-//! Bootstrap (T030–T032), poll loop (T033–T036), and shutdown-retract
-//! (T037–T038) layer onto this scaffold in subsequent C11–C13 commits.
+//! Slice 003 builds this out across several commits. The current file
+//! covers C10 (connect + handshake + reader_loop + signal-aware idle)
+//! and C11 (service-level + per-buffer bootstrap, with fail-fast
+//! rollback on open failure). Poll loop (T033–T036) and shutdown-
+//! retract signalling (T037–T038) follow in C12 / C13.
 
+use std::collections::HashSet;
 use std::path::PathBuf;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use thiserror::Error;
-use tokio::net::unix::OwnedReadHalf;
+use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::select;
 use tokio::signal::unix::{SignalKind, signal};
 use tokio::sync::mpsc;
@@ -29,13 +22,33 @@ use tracing::{debug, info, warn};
 use uuid::Uuid;
 
 use weaver_core::bus::client::{Client, ClientError};
-use weaver_core::bus::codec::{CodecError, read_message};
-use weaver_core::provenance::ActorIdentity;
-use weaver_core::types::message::BusMessage;
+use weaver_core::bus::codec::{CodecError, read_message, write_message};
+use weaver_core::provenance::{ActorIdentity, Provenance};
+use weaver_core::types::entity_ref::EntityRef;
+use weaver_core::types::fact::{Fact, FactKey, FactValue};
+use weaver_core::types::ids::EventId;
+use weaver_core::types::message::{BusMessage, LifecycleSignal};
+
+use crate::model::{BufferState, ObserverError, watcher_instance_entity_ref};
 
 /// Kebab-case service-id used in Hello / ActorIdentity / inspect
 /// rendering, per `contracts/cli-surfaces.md` and Amendment 5.
 const SERVICE_ID: &str = "weaver-buffers";
+
+/// Thin wrapper around the write half of a bus connection — mirrors
+/// slice-002's `BusWriter` so the publisher's `publish_*` helpers can
+/// send without knowing whether the stream came from a `Client` or a
+/// test harness.
+struct BusWriter {
+    writer: OwnedWriteHalf,
+}
+
+impl BusWriter {
+    async fn send(&mut self, msg: &BusMessage) -> Result<(), ClientError> {
+        write_message(&mut self.writer, msg).await?;
+        Ok(())
+    }
+}
 
 #[derive(Debug, Error)]
 pub enum PublisherError {
@@ -54,6 +67,16 @@ pub enum PublisherError {
     #[error("authority conflict: {detail}")]
     AuthorityConflict { detail: String },
 
+    /// A positional path could not be opened at startup (missing,
+    /// directory, unreadable, etc.). Carries the categorised
+    /// [`ObserverError`] so the CLI layer can render miette diagnostics
+    /// with stable codes (WEAVER-BUF-001..003). Exit code 1.
+    #[error("startup failure: {source}")]
+    Observer {
+        #[source]
+        source: ObserverError,
+    },
+
     /// Residual bus-client errors that don't map to the categories
     /// above. Exit code 10 (internal) per `research.md §9`; slice-002
     /// F31 follow-up reclassifies identity-drift / invalid-identity as
@@ -67,14 +90,19 @@ pub enum PublisherError {
 
 /// Run the publisher end-to-end.
 ///
-/// Current scope (C10 scaffold): connect + handshake + spawn reader
-/// task + idle on SIGTERM / SIGINT. Returns `Ok(())` on clean signal,
-/// [`PublisherError::AuthorityConflict`] / [`PublisherError::Client`]
-/// on server-sent error frames, or [`PublisherError::BusUnavailable`]
-/// on connect failure or reader EOF.
+/// Current scope:
 ///
-/// `paths` and `poll_interval` are carried through for logging; they
-/// become load-bearing in C11 (bootstrap) and C12 (poll loop).
+/// 1. Connect + handshake (C10).
+/// 2. Spawn reader task for server-sent Error frames (C10).
+/// 3. Publish `watcher/status=started` on the instance entity (C11).
+/// 4. For each path, in CLI order: `BufferState::open(path)` followed
+///    by a 4-fact bootstrap with a per-buffer synthesised
+///    [`EventId`] as `causal_parent`. Fail-fast on any open failure —
+///    retract whatever partial bootstraps we published and return
+///    [`PublisherError::Observer`] (C11).
+/// 5. Publish `watcher/status=ready` (C11).
+/// 6. Idle on SIGTERM / SIGINT / bus error (C10; C12 lands the poll
+///    loop, C13 lands shutdown-retract).
 pub async fn run(
     paths: Vec<PathBuf>,
     socket: PathBuf,
@@ -86,6 +114,7 @@ pub async fn run(
         ActorIdentity::Service { instance_id, .. } => *instance_id,
         _ => unreachable!("ActorIdentity::service returns a Service variant"),
     };
+    let watcher_entity = watcher_instance_entity_ref(&instance_id);
 
     info!(
         socket = %socket.display(),
@@ -94,18 +123,64 @@ pub async fn run(
         buffers = paths.len(),
         "weaver-buffers starting",
     );
-    for p in &paths {
-        debug!(path = %p.display(), "opening buffer (deferred to C11)");
-    }
 
     let client = Client::connect(&socket, SERVICE_ID)
         .await
         .map_err(|source| PublisherError::BusUnavailable { source })?;
     info!("connected to core; bus protocol handshake complete");
 
-    let (reader, _writer_half) = client.stream.into_split();
+    let (reader, writer_half) = client.stream.into_split();
+    let mut writer = BusWriter {
+        writer: writer_half,
+    };
     let (err_tx, mut err_rx) = mpsc::channel::<ServerSentError>(4);
     let reader_task = tokio::spawn(reader_loop(reader, err_tx));
+
+    // Track every buffer/* fact we publish so the shutdown path (C13)
+    // — and the fail-fast open-error branch below — can retract them
+    // explicitly ahead of the bus disconnect. `watcher/status` is NOT
+    // tracked here: it's a single-value family we overwrite via Stopped
+    // rather than retract.
+    let mut tracked: HashSet<FactKey> = HashSet::new();
+
+    // T031: lifecycle started.
+    publish_watcher_status(
+        &mut writer,
+        watcher_entity,
+        &identity,
+        LifecycleSignal::Started,
+    )
+    .await?;
+
+    // T030 + T032: per-buffer open + bootstrap in CLI order, fail-fast
+    // with partial-retract on any open error.
+    let _states: Vec<BufferState> =
+        match open_and_bootstrap_all(&mut writer, &identity, &paths, &mut tracked).await {
+            Ok(states) => states,
+            Err(e) => {
+                // Retract any facts the partial-bootstrap published so
+                // subscribers see retract-before-disconnect. Core's
+                // release_connection would eventually cover it, but the
+                // explicit order is a cleaner operator-observation contract
+                // per T032.
+                shutdown_retract(&mut writer, &identity, &mut tracked).await;
+                reader_task.abort();
+                return Err(e);
+            }
+        };
+
+    // T031: lifecycle ready.
+    publish_watcher_status(
+        &mut writer,
+        watcher_entity,
+        &identity,
+        LifecycleSignal::Ready,
+    )
+    .await?;
+    info!(
+        facts_tracked = tracked.len(),
+        "bootstrap complete; idle (poll loop lands in C12)"
+    );
 
     let mut sigterm = signal(SignalKind::terminate()).ok();
     let mut sigint = signal(SignalKind::interrupt()).ok();
@@ -129,6 +204,95 @@ pub async fn run(
 
     reader_task.abort();
     outcome
+}
+
+/// Iterate positional paths; open each buffer and publish its 4-fact
+/// bootstrap with a per-buffer synthesised `EventId` as causal parent.
+/// Returns the accumulated [`BufferState`]s on success so the poll loop
+/// (C12) can consume them. On first open failure, surfaces a
+/// [`PublisherError::Observer`]; the caller handles retraction of
+/// whatever was already published.
+async fn open_and_bootstrap_all(
+    writer: &mut BusWriter,
+    identity: &ActorIdentity,
+    paths: &[PathBuf],
+    tracked: &mut HashSet<FactKey>,
+) -> Result<Vec<BufferState>, PublisherError> {
+    let mut states = Vec::with_capacity(paths.len());
+    for (idx, path) in paths.iter().enumerate() {
+        let state = match BufferState::open(path.clone()) {
+            Ok(s) => s,
+            Err(e) => {
+                warn!(
+                    path = %path.display(),
+                    error = %e,
+                    tracked_facts = tracked.len(),
+                    "buffer open failed; aborting bootstrap",
+                );
+                return Err(PublisherError::Observer { source: e });
+            }
+        };
+        // Per-buffer synthesised bootstrap-tick EventId. Deterministic:
+        // the buffer's index in the (already de-duplicated) CLI order.
+        // Research §8 + data-model §Bootstrap sequence step 3b.
+        let bootstrap_tick = EventId::new(idx as u64);
+        publish_buffer_bootstrap(writer, identity, &state, tracked, bootstrap_tick).await?;
+        states.push(state);
+    }
+    Ok(states)
+}
+
+/// Publish a single buffer's 4-fact bootstrap set — path, byte-size,
+/// dirty=false, observable=true — each carrying `bootstrap_tick` as
+/// `causal_parent` so `why?` walks land on the buffer's own
+/// synthesised boundary.
+async fn publish_buffer_bootstrap(
+    writer: &mut BusWriter,
+    identity: &ActorIdentity,
+    state: &BufferState,
+    tracked: &mut HashSet<FactKey>,
+    bootstrap_tick: EventId,
+) -> Result<(), PublisherError> {
+    let entity = state.entity();
+    let causal = Some(bootstrap_tick);
+    publish_fact(
+        writer,
+        FactKey::new(entity, "buffer/path"),
+        FactValue::String(state.path().display().to_string()),
+        identity,
+        causal,
+        tracked,
+    )
+    .await?;
+    publish_fact(
+        writer,
+        FactKey::new(entity, "buffer/byte-size"),
+        FactValue::U64(state.byte_size()),
+        identity,
+        causal,
+        tracked,
+    )
+    .await?;
+    publish_fact(
+        writer,
+        FactKey::new(entity, "buffer/dirty"),
+        FactValue::Bool(false),
+        identity,
+        causal,
+        tracked,
+    )
+    .await?;
+    publish_fact(
+        writer,
+        FactKey::new(entity, "buffer/observable"),
+        FactValue::Bool(true),
+        identity,
+        causal,
+        tracked,
+    )
+    .await?;
+    debug!(entity = %entity.as_u64(), "buffer bootstrap published");
+    Ok(())
 }
 
 /// Reader task: drains server-sent `BusMessage`s from the read half,
@@ -229,6 +393,91 @@ async fn wait_signal(sig: &mut Option<tokio::signal::unix::Signal>) {
     }
 }
 
+async fn publish_watcher_status(
+    writer: &mut BusWriter,
+    watcher_entity: EntityRef,
+    identity: &ActorIdentity,
+    signal: LifecycleSignal,
+) -> Result<(), PublisherError> {
+    // Wire label: kebab-case label matching slice-002's encoding of
+    // `LifecycleSignal` as a string FactValue on `watcher/status`.
+    let label = match signal {
+        LifecycleSignal::Started => "started",
+        LifecycleSignal::Ready => "ready",
+        LifecycleSignal::Degraded => "degraded",
+        LifecycleSignal::Unavailable => "unavailable",
+        LifecycleSignal::Restarting => "restarting",
+        LifecycleSignal::Stopped => "stopped",
+    };
+    let prov = Provenance::new(identity.clone(), now_ns(), None)
+        .expect("ActorIdentity is always well-formed");
+    let fact = Fact {
+        key: FactKey::new(watcher_entity, "watcher/status"),
+        value: FactValue::String(label.into()),
+        provenance: prov,
+    };
+    writer
+        .send(&BusMessage::FactAssert(fact))
+        .await
+        .map_err(|source| PublisherError::Client { source })?;
+    // Not tracked for shutdown-retract: we overwrite to Stopped rather
+    // than retract on clean exit.
+    Ok(())
+}
+
+async fn publish_fact(
+    writer: &mut BusWriter,
+    key: FactKey,
+    value: FactValue,
+    identity: &ActorIdentity,
+    causal_parent: Option<EventId>,
+    tracked: &mut HashSet<FactKey>,
+) -> Result<(), PublisherError> {
+    let prov = Provenance::new(identity.clone(), now_ns(), causal_parent)
+        .expect("ActorIdentity is always well-formed");
+    let fact = Fact {
+        key: key.clone(),
+        value,
+        provenance: prov,
+    };
+    writer
+        .send(&BusMessage::FactAssert(fact))
+        .await
+        .map_err(|source| PublisherError::Client { source })?;
+    tracked.insert(key);
+    Ok(())
+}
+
+/// Retract every fact in `tracked` on a best-effort basis. Broken-pipe
+/// writes are ignored — we're shutting down and the core's
+/// release_connection covers anything we miss.
+async fn shutdown_retract(
+    writer: &mut BusWriter,
+    identity: &ActorIdentity,
+    tracked: &mut HashSet<FactKey>,
+) {
+    let keys: Vec<FactKey> = tracked.drain().collect();
+    for key in keys {
+        let prov = match Provenance::new(identity.clone(), now_ns(), None) {
+            Ok(p) => p,
+            Err(_) => continue,
+        };
+        let _ = writer
+            .send(&BusMessage::FactRetract {
+                key,
+                provenance: prov,
+            })
+            .await;
+    }
+}
+
+fn now_ns() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| u64::try_from(d.as_nanos()).unwrap_or(u64::MAX))
+        .unwrap_or(0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -296,5 +545,23 @@ mod tests {
     fn bus_closed_error_surfaces_as_bus_unavailable() {
         let err = bus_closed_error();
         assert!(matches!(err, PublisherError::BusUnavailable { .. }));
+    }
+
+    #[test]
+    fn publisher_error_observer_preserves_source() {
+        let src = ObserverError::StartupFailure {
+            path: std::path::PathBuf::from("/nope"),
+            reason: "missing".into(),
+        };
+        let err = PublisherError::Observer { source: src };
+        assert!(format!("{err}").starts_with("startup failure:"));
+        match err {
+            PublisherError::Observer {
+                source: ObserverError::StartupFailure { path, .. },
+            } => {
+                assert_eq!(path, std::path::PathBuf::from("/nope"));
+            }
+            other => panic!("expected Observer(StartupFailure), got {other:?}"),
+        }
     }
 }
