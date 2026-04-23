@@ -113,12 +113,45 @@ impl BufferState {
     /// `path` MUST already be canonicalized.
     ///
     /// Returns [`ObserverError::StartupFailure`] if the file is missing,
-    /// is a directory, is unreadable, or cannot be loaded into memory.
+    /// is a directory, is unreadable, or cannot be loaded into memory;
+    /// the variant's `kind` selects the CLI diagnostic code
+    /// (WEAVER-BUF-001..003).
     pub fn open(path: PathBuf) -> Result<Self, ObserverError> {
-        let content = std::fs::read(&path).map_err(|source| ObserverError::StartupFailure {
-            path: path.clone(),
-            reason: source.to_string(),
+        let metadata = std::fs::metadata(&path).map_err(|source| {
+            // Every metadata failure (NotFound, PermissionDenied, I/O)
+            // renders under WEAVER-BUF-001. NotRegularFile is checked
+            // against a *successful* metadata below; too-large is
+            // checked against the read result.
+            ObserverError::StartupFailure {
+                path: path.clone(),
+                reason: source.to_string(),
+                kind: StartupKind::NotOpenable,
+            }
         })?;
+        if !metadata.file_type().is_file() {
+            return Err(ObserverError::StartupFailure {
+                path: path.clone(),
+                reason: "path is not a regular file (directory, symlink, or special file)".into(),
+                kind: StartupKind::NotRegularFile,
+            });
+        }
+        let content = match std::fs::read(&path) {
+            Ok(c) => c,
+            Err(e) if e.kind() == std::io::ErrorKind::OutOfMemory => {
+                return Err(ObserverError::StartupFailure {
+                    path: path.clone(),
+                    reason: e.to_string(),
+                    kind: StartupKind::TooLarge,
+                });
+            }
+            Err(e) => {
+                return Err(ObserverError::StartupFailure {
+                    path: path.clone(),
+                    reason: e.to_string(),
+                    kind: StartupKind::NotOpenable,
+                });
+            }
+        };
         let memory_digest: [u8; 32] = Sha256::digest(&content).into();
         let entity = buffer_entity_ref(&path);
         Ok(Self {
@@ -182,6 +215,25 @@ pub struct BufferObservation {
     pub observable: bool,
 }
 
+/// Classification of [`ObserverError::StartupFailure`]. Drives the
+/// CLI's `miette::Diagnostic` rendering by selecting the
+/// `WEAVER-BUF-00{1,2,3}` code per `contracts/cli-surfaces.md §Error
+/// rendering`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StartupKind {
+    /// WEAVER-BUF-001 — generic open failure: missing, permission
+    /// denied, I/O error. The most common startup failure.
+    NotOpenable,
+    /// WEAVER-BUF-002 — path exists but is a directory, symlink to a
+    /// non-regular target, socket, etc.
+    NotRegularFile,
+    /// WEAVER-BUF-003 — file exceeded available memory at open time.
+    /// Reserved for a later-slice configurable size limit; currently
+    /// triggered only if [`std::io::ErrorKind::OutOfMemory`]
+    /// propagates from `std::fs::read`.
+    TooLarge,
+}
+
 /// Errors produced by [`BufferState::open`] and the observer path.
 #[derive(Debug, Error)]
 pub enum ObserverError {
@@ -206,9 +258,14 @@ pub enum ObserverError {
     NotRegularFile { path: PathBuf },
 
     /// Startup-only: path invalid at open time. Publisher exits code 1
-    /// after emitting a structured diagnostic.
+    /// after the CLI layer emits a WEAVER-BUF-00{1,2,3} diagnostic
+    /// chosen by `kind`.
     #[error("buffer not openable at {path}: {reason}")]
-    StartupFailure { path: PathBuf, reason: String },
+    StartupFailure {
+        path: PathBuf,
+        reason: String,
+        kind: StartupKind,
+    },
 }
 
 #[cfg(test)]
@@ -302,12 +359,28 @@ mod tests {
     }
 
     #[test]
-    fn buffer_state_open_missing_returns_startup_failure() {
+    fn buffer_state_open_missing_returns_startup_failure_not_openable() {
         let missing = path("/definitely/not/a/real/path/weaver-test-absent");
         let err = BufferState::open(missing.clone()).expect_err("missing path must fail");
         match err {
-            ObserverError::StartupFailure { path, .. } => assert_eq!(path, missing),
+            ObserverError::StartupFailure { path, kind: k, .. } => {
+                assert_eq!(path, missing);
+                assert_eq!(k, StartupKind::NotOpenable);
+            }
             other => panic!("expected StartupFailure, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn buffer_state_open_directory_returns_startup_failure_not_regular_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let canonical = std::fs::canonicalize(dir.path()).expect("canonicalize");
+        let err = BufferState::open(canonical.clone()).expect_err("directory must fail");
+        match err {
+            ObserverError::StartupFailure { kind: k, .. } => {
+                assert_eq!(k, StartupKind::NotRegularFile);
+            }
+            other => panic!("expected StartupFailure::NotRegularFile, got {other:?}"),
         }
     }
 
@@ -323,6 +396,7 @@ mod tests {
         let startup = ObserverError::StartupFailure {
             path: p,
             reason: "fixture".into(),
+            kind: StartupKind::NotOpenable,
         };
         // Spot-check the Display impls so downstream diagnostics don't
         // collapse into ambiguous wording.

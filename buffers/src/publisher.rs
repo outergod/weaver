@@ -739,6 +739,7 @@ mod tests {
         let src = ObserverError::StartupFailure {
             path: std::path::PathBuf::from("/nope"),
             reason: "missing".into(),
+            kind: crate::model::StartupKind::NotOpenable,
         };
         let err = PublisherError::Observer { source: src };
         assert!(format!("{err}").starts_with("startup failure:"));

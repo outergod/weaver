@@ -14,7 +14,12 @@
 //! - `observer`  — per-poll file read + SHA-256 digest + dirty check.
 //! - `publisher` — bus client: handshake, per-buffer bootstrap, poll
 //!   loop, shutdown-retract.
+//! - `cli`       — clap-derive CLI entry point, miette diagnostics,
+//!   exit-code mapping.
+//! - `version`   — contracted `--version` rendering (human + JSON).
 
+pub mod cli;
 pub mod model;
 pub mod observer;
 pub mod publisher;
+pub mod version;
