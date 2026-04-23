@@ -478,19 +478,137 @@ async fn publish_observation(
 }
 
 fn state_fact(state: &WorkingCopyState) -> (&'static str, FactValue) {
-    match state {
-        WorkingCopyState::OnBranch { name } => {
-            ("repo/state/on-branch", FactValue::String(name.clone()))
+    test_support::state_fact(state)
+}
+
+/// Pure state-machine helpers, factored out of `diff_publish` so
+/// integration tests can drive the publisher's transition decisions
+/// against arbitrary observation sequences (T060 mutex-invariant
+/// property test, T061 transition-causal scenario test). The module
+/// is `pub` only because integration tests live in a separate
+/// compilation unit — consider the API unstable and internal.
+#[doc(hidden)]
+pub mod test_support {
+    use std::collections::HashSet;
+    use std::path::Path;
+
+    use weaver_core::types::entity_ref::EntityRef;
+    use weaver_core::types::fact::{FactKey, FactValue};
+    use weaver_core::types::ids::EventId;
+
+    use crate::model::WorkingCopyState;
+    use crate::observer::Observation;
+
+    /// One bus-level fact operation a transition produces — the
+    /// same ops the publisher dispatches over its bus connection,
+    /// minus the actor identity (which is per-publisher, not per-
+    /// transition).
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub enum FactOp {
+        Assert {
+            key: FactKey,
+            value: FactValue,
+            causal_parent: Option<EventId>,
+        },
+        Retract {
+            key: FactKey,
+            causal_parent: Option<EventId>,
+        },
+    }
+
+    /// Map a `WorkingCopyState` to its `(attribute, value)` pair.
+    /// Exactly one `repo/state/*` attribute name per variant.
+    pub fn state_fact(state: &WorkingCopyState) -> (&'static str, FactValue) {
+        match state {
+            WorkingCopyState::OnBranch { name } => {
+                ("repo/state/on-branch", FactValue::String(name.clone()))
+            }
+            WorkingCopyState::Detached { commit } => {
+                ("repo/state/detached", FactValue::String(commit.clone()))
+            }
+            WorkingCopyState::Unborn {
+                intended_branch_name,
+            } => (
+                "repo/state/unborn",
+                FactValue::String(intended_branch_name.clone()),
+            ),
         }
-        WorkingCopyState::Detached { commit } => {
-            ("repo/state/detached", FactValue::String(commit.clone()))
+    }
+
+    /// Compute the ordered list of fact operations for the
+    /// `prev → next` observation transition. Pure — no bus I/O.
+    ///
+    /// Must stay in lock-step with [`super::diff_publish`], which
+    /// now consumes the same ops via a thin emit loop; a drift
+    /// between the two would be caught by the existing e2e tests
+    /// plus T060 + T061.
+    pub fn transition_ops(
+        repo_entity: EntityRef,
+        repo_path: &Path,
+        prev: &Observation,
+        next: &Observation,
+        tracked: &HashSet<FactKey>,
+        poll_tick_id: EventId,
+    ) -> Vec<FactOp> {
+        let causal = Some(poll_tick_id);
+        let mut ops = Vec::new();
+
+        // State-variant transition? Retract the old variant first
+        // so the mutex invariant (at most one `repo/state/*`
+        // asserted per entity) holds across the transition.
+        if std::mem::discriminant(&prev.state) != std::mem::discriminant(&next.state) {
+            let (prev_attr, _) = state_fact(&prev.state);
+            ops.push(FactOp::Retract {
+                key: FactKey::new(repo_entity, prev_attr),
+                causal_parent: causal,
+            });
         }
-        WorkingCopyState::Unborn {
-            intended_branch_name,
-        } => (
-            "repo/state/unborn",
-            FactValue::String(intended_branch_name.clone()),
-        ),
+
+        // Always (re-)assert the current state. When the variant
+        // is unchanged but the payload moved (branch renamed /
+        // head shifted), this updates in place.
+        let (state_attr, state_value) = state_fact(&next.state);
+        ops.push(FactOp::Assert {
+            key: FactKey::new(repo_entity, state_attr),
+            value: state_value,
+            causal_parent: causal,
+        });
+
+        // Dirty + head-commit: single-value attributes; no retract
+        // needed on (re-)assert.
+        if prev.dirty != next.dirty {
+            ops.push(FactOp::Assert {
+                key: FactKey::new(repo_entity, "repo/dirty"),
+                value: FactValue::Bool(next.dirty),
+                causal_parent: causal,
+            });
+        }
+        if prev.head_commit != next.head_commit {
+            match &next.head_commit {
+                Some(sha) => ops.push(FactOp::Assert {
+                    key: FactKey::new(repo_entity, "repo/head-commit"),
+                    value: FactValue::String(sha.clone()),
+                    causal_parent: causal,
+                }),
+                None => ops.push(FactOp::Retract {
+                    key: FactKey::new(repo_entity, "repo/head-commit"),
+                    causal_parent: causal,
+                }),
+            }
+        }
+
+        // repo/path rarely changes; publish once (the `tracked`
+        // set gates re-publishing).
+        let path_key = FactKey::new(repo_entity, "repo/path");
+        if !tracked.contains(&path_key) {
+            ops.push(FactOp::Assert {
+                key: path_key,
+                value: FactValue::String(repo_path.display().to_string()),
+                causal_parent: causal,
+            });
+        }
+
+        ops
     }
 }
 
@@ -498,6 +616,11 @@ fn state_fact(state: &WorkingCopyState) -> (&'static str, FactValue) {
 /// facts. State transitions (discriminator change on `repo/state/*`)
 /// emit a retract-then-assert pair with a shared `causal_parent`
 /// matching T043 semantics (mutex invariant preserved).
+///
+/// The decision logic now lives in `test_support::transition_ops`
+/// so integration tests (T060 mutex-invariant property test, T061
+/// transition-causal scenario test) can drive it directly without
+/// standing up a bus writer.
 #[allow(clippy::too_many_arguments)] // TODO: refactor into a PublisherCtx { client, identity, tracked } + diff(&self, prev, next, ...) in a follow-up.
 async fn diff_publish(
     writer: &mut BusWriter,
@@ -509,87 +632,22 @@ async fn diff_publish(
     tracked: &mut HashSet<FactKey>,
     poll_tick_id: EventId,
 ) -> Result<(), PublisherError> {
-    let causal = Some(poll_tick_id);
-
-    // State-variant transition? If so, retract the old variant first.
-    if std::mem::discriminant(&prev.state) != std::mem::discriminant(&next.state) {
-        let (prev_attr, _) = state_fact(&prev.state);
-        retract_fact(
-            writer,
-            FactKey::new(repo_entity, prev_attr),
-            identity,
-            causal,
-            tracked,
-        )
-        .await?;
-    }
-    // Always (re-)assert the current state. If the variant is the same
-    // but the payload changed (branch renamed / head shifted), this
-    // updates in place.
-    let (state_attr, state_value) = state_fact(&next.state);
-    publish_fact(
-        writer,
-        FactKey::new(repo_entity, state_attr),
-        state_value,
-        identity,
-        causal,
-        tracked,
-    )
-    .await?;
-
-    // Dirty + head-commit: (re-)assert on change. No retract needed —
-    // these are single-value attributes.
-    if prev.dirty != next.dirty {
-        publish_fact(
-            writer,
-            FactKey::new(repo_entity, "repo/dirty"),
-            FactValue::Bool(next.dirty),
-            identity,
-            causal,
-            tracked,
-        )
-        .await?;
-    }
-    if prev.head_commit != next.head_commit {
-        match &next.head_commit {
-            Some(sha) => {
-                publish_fact(
-                    writer,
-                    FactKey::new(repo_entity, "repo/head-commit"),
-                    FactValue::String(sha.clone()),
-                    identity,
-                    causal,
-                    tracked,
-                )
-                .await?;
+    use test_support::FactOp;
+    let ops =
+        test_support::transition_ops(repo_entity, repo_path, prev, next, tracked, poll_tick_id);
+    for op in ops {
+        match op {
+            FactOp::Assert {
+                key,
+                value,
+                causal_parent,
+            } => {
+                publish_fact(writer, key, value, identity, causal_parent, tracked).await?;
             }
-            None => {
-                retract_fact(
-                    writer,
-                    FactKey::new(repo_entity, "repo/head-commit"),
-                    identity,
-                    causal,
-                    tracked,
-                )
-                .await?;
+            FactOp::Retract { key, causal_parent } => {
+                retract_fact(writer, key, identity, causal_parent, tracked).await?;
             }
         }
-    }
-
-    // repo/path rarely changes; re-publish if the canonicalized form
-    // moves (unlikely but defensive).
-    let path_str = repo_path.display().to_string();
-    let path_key = FactKey::new(repo_entity, "repo/path");
-    if !tracked.contains(&path_key) {
-        publish_fact(
-            writer,
-            path_key.clone(),
-            FactValue::String(path_str),
-            identity,
-            causal,
-            tracked,
-        )
-        .await?;
     }
     Ok(())
 }
