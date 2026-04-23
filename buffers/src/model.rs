@@ -159,17 +159,15 @@ impl BufferState {
         self.last_observable
     }
 
-    // Wired in Phase 3 (publisher tasks T034 / T035): the poll loop
-    // records each edge-triggered transition back onto the state so
-    // subsequent ticks can emit `buffer/dirty` / `buffer/observable`
-    // only on actual state changes. `#[expect]` fails at compile time
-    // when the callers arrive, forcing the attribute's removal.
-    #[expect(dead_code)]
+    /// Record the publisher's most-recently-asserted `buffer/dirty`
+    /// value for this buffer, so the next poll tick can edge-trigger
+    /// the transition (re-publish only when the flag flips).
     pub(crate) fn set_last_dirty(&mut self, v: bool) {
         self.last_dirty = v;
     }
 
-    #[expect(dead_code)]
+    /// Record the publisher's most-recently-asserted `buffer/observable`
+    /// value — the per-buffer complement of `last_dirty`'s edge rule.
     pub(crate) fn set_last_observable(&mut self, v: bool) {
         self.last_observable = v;
     }

@@ -4,10 +4,12 @@
 //! retraction and bus-EOF exit paths.
 //!
 //! Slice 003 builds this out across several commits. The current file
-//! covers C10 (connect + handshake + reader_loop + signal-aware idle)
-//! and C11 (service-level + per-buffer bootstrap, with fail-fast
-//! rollback on open failure). Poll loop (T033–T036) and shutdown-
-//! retract signalling (T037–T038) follow in C12 / C13.
+//! covers C10 (connect + handshake + reader_loop + signal-aware idle),
+//! C11 (service-level + per-buffer bootstrap, with fail-fast rollback
+//! on open failure), and C12 (poll loop + edge-triggered `buffer/dirty`
+//! and `buffer/observable` transitions + service-level `watcher/status
+//! = degraded` aggregation). Shutdown-retract signalling (T037–T038)
+//! follows in C13.
 
 use std::collections::HashSet;
 use std::path::PathBuf;
@@ -18,6 +20,7 @@ use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::select;
 use tokio::signal::unix::{SignalKind, signal};
 use tokio::sync::mpsc;
+use tokio::time::interval;
 use tracing::{debug, info, warn};
 use uuid::Uuid;
 
@@ -30,6 +33,7 @@ use weaver_core::types::ids::EventId;
 use weaver_core::types::message::{BusMessage, LifecycleSignal};
 
 use crate::model::{BufferState, ObserverError, watcher_instance_entity_ref};
+use crate::observer;
 
 /// Kebab-case service-id used in Hello / ActorIdentity / inspect
 /// rendering, per `contracts/cli-surfaces.md` and Amendment 5.
@@ -154,7 +158,7 @@ pub async fn run(
 
     // T030 + T032: per-buffer open + bootstrap in CLI order, fail-fast
     // with partial-retract on any open error.
-    let _states: Vec<BufferState> =
+    let mut states: Vec<BufferState> =
         match open_and_bootstrap_all(&mut writer, &identity, &paths, &mut tracked).await {
             Ok(states) => states,
             Err(e) => {
@@ -179,31 +183,177 @@ pub async fn run(
     .await?;
     info!(
         facts_tracked = tracked.len(),
-        "bootstrap complete; idle (poll loop lands in C12)"
+        "bootstrap complete; entering poll loop"
     );
 
     let mut sigterm = signal(SignalKind::terminate()).ok();
     let mut sigint = signal(SignalKind::interrupt()).ok();
 
-    let outcome = select! {
-        _ = wait_signal(&mut sigterm), if sigterm.is_some() => {
-            info!("SIGTERM received; shutting down");
-            Ok(())
-        }
-        _ = wait_signal(&mut sigint), if sigint.is_some() => {
-            info!("SIGINT received; shutting down");
-            Ok(())
-        }
-        maybe_err = err_rx.recv() => {
-            match maybe_err {
-                Some(err) => Err(translate_server_error(err)),
-                None => Err(bus_closed_error()),
+    // T033 + T034 + T035 + T036: poll loop with edge-triggered
+    // per-buffer `buffer/dirty` / `buffer/observable` transitions and
+    // service-level `watcher/status=degraded` on all-unobservable
+    // aggregate. Sequential iteration per buffer per research §10
+    // (no scalability commitment in slice 003).
+    let mut ticker = interval(poll_interval);
+    ticker.tick().await; // burn the immediate first tick
+    let mut was_degraded = false;
+
+    let outcome: Result<(), PublisherError> = 'poll: loop {
+        select! {
+            _ = ticker.tick() => {}
+            _ = wait_signal(&mut sigterm), if sigterm.is_some() => {
+                info!("SIGTERM received; shutting down");
+                break 'poll Ok(());
             }
+            _ = wait_signal(&mut sigint), if sigint.is_some() => {
+                info!("SIGINT received; shutting down");
+                break 'poll Ok(());
+            }
+            maybe_err = err_rx.recv() => {
+                break 'poll match maybe_err {
+                    Some(err) => Err(translate_server_error(err)),
+                    None => Err(bus_closed_error()),
+                };
+            }
+        }
+
+        // Per-tick event id: one synthesised EventId shared across
+        // every transition this tick emits — per data-model.md,
+        // retract/assert of `buffer/observable` and re-assert of
+        // `buffer/dirty` correlate to the same poll tick.
+        let poll_tick_id = EventId::new(now_ns());
+
+        for state in &mut states {
+            if let Err(e) =
+                poll_tick_per_buffer(&mut writer, &identity, state, &mut tracked, poll_tick_id)
+                    .await
+            {
+                break 'poll Err(e);
+            }
+        }
+
+        // Service-level degraded aggregation (FR-016a).
+        // `degraded` fires only when every currently-open buffer is
+        // simultaneously unobservable; recovery (any buffer regains
+        // observability) republishes `ready`. Edge-triggered.
+        let all_unobservable = !states.is_empty() && states.iter().all(|s| !s.last_observable());
+        match (all_unobservable, was_degraded) {
+            (true, false) => {
+                if let Err(e) = publish_watcher_status(
+                    &mut writer,
+                    watcher_entity,
+                    &identity,
+                    LifecycleSignal::Degraded,
+                )
+                .await
+                {
+                    break 'poll Err(e);
+                }
+                was_degraded = true;
+            }
+            (false, true) => {
+                if let Err(e) = publish_watcher_status(
+                    &mut writer,
+                    watcher_entity,
+                    &identity,
+                    LifecycleSignal::Ready,
+                )
+                .await
+                {
+                    break 'poll Err(e);
+                }
+                was_degraded = false;
+            }
+            _ => {}
         }
     };
 
     reader_task.abort();
     outcome
+}
+
+/// Drive one poll tick for a single buffer: observe, then emit
+/// edge-triggered `buffer/observable` + `buffer/dirty` facts only on
+/// actual state changes. Updates `state.last_*` after successful
+/// publish so the next tick's edge check is correct.
+async fn poll_tick_per_buffer(
+    writer: &mut BusWriter,
+    identity: &ActorIdentity,
+    state: &mut BufferState,
+    tracked: &mut HashSet<FactKey>,
+    poll_tick_id: EventId,
+) -> Result<(), PublisherError> {
+    let entity = state.entity();
+    let causal = Some(poll_tick_id);
+    match observer::observe_buffer(state) {
+        Ok(obs) => {
+            // Recovery: republish `observable=true` only when the
+            // previous tick saw the buffer as unobservable.
+            if !state.last_observable() {
+                publish_fact(
+                    writer,
+                    FactKey::new(entity, "buffer/observable"),
+                    FactValue::Bool(true),
+                    identity,
+                    causal,
+                    tracked,
+                )
+                .await?;
+                state.set_last_observable(true);
+                debug!(
+                    entity = %entity.as_u64(),
+                    "buffer/observable=true (recovered)"
+                );
+            }
+            // Dirty edge-trigger: republish only on flip.
+            if obs.dirty != state.last_dirty() {
+                publish_fact(
+                    writer,
+                    FactKey::new(entity, "buffer/dirty"),
+                    FactValue::Bool(obs.dirty),
+                    identity,
+                    causal,
+                    tracked,
+                )
+                .await?;
+                state.set_last_dirty(obs.dirty);
+                debug!(
+                    entity = %entity.as_u64(),
+                    dirty = obs.dirty,
+                    "buffer/dirty transition published"
+                );
+            }
+        }
+        Err(e) => {
+            // Unobservable edge-trigger: publish once on the
+            // healthy→unobservable boundary; subsequent failed polls
+            // remain silent until a successful observation recovers.
+            if state.last_observable() {
+                warn!(
+                    path = %state.path().display(),
+                    error = %e,
+                    "buffer unobservable; flipping observable=false",
+                );
+                publish_fact(
+                    writer,
+                    FactKey::new(entity, "buffer/observable"),
+                    FactValue::Bool(false),
+                    identity,
+                    causal,
+                    tracked,
+                )
+                .await?;
+                state.set_last_observable(false);
+            } else {
+                debug!(
+                    path = %state.path().display(),
+                    error = %e,
+                    "buffer still unobservable; silent per edge-trigger rule",
+                );
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Iterate positional paths; open each buffer and publish its 4-fact
