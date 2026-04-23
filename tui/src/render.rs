@@ -434,6 +434,43 @@ fn draw<W: Write>(w: &mut W, state: &AppState) -> std::io::Result<()> {
     }
     emit(w, &mut row, "│".into())?;
 
+    // Buffers section — rendered beneath Repositories per spec FR-014.
+    // One row per buffer entity: `<path> [<bytes> bytes] <dirty-badge>`
+    // plus the shared `by service …` annotation. The dirty badge is
+    // replaced by `[observability lost]` when `buffer/observable=false`,
+    // and every row gets a `[stale]` tail when the TUI has lost its
+    // core subscription (per `contracts/cli-surfaces.md §Display rules`).
+    let buffer_label = if state.stale {
+        "Buffers (stale):"
+    } else {
+        "Buffers:"
+    };
+    emit(w, &mut row, format!("│ {buffer_label}"))?;
+    let buffer_views = collect_buffer_views(&state.facts);
+    if buffer_views.is_empty() {
+        emit(w, &mut row, "│   (none)".into())?;
+    } else {
+        for view in &buffer_views {
+            let path = view.path.unwrap_or("(path unknown)");
+            let size = format_byte_size(view.byte_size);
+            let dirty_or_obs = format_dirty_or_obs_lost(view.observable, view.dirty);
+            let stale_tail = if state.stale { " [stale]" } else { "" };
+            emit(
+                w,
+                &mut row,
+                format!("│   {path}  {size} {dirty_or_obs}{stale_tail}"),
+            )?;
+            if let Some((fact, asserted_at)) = view.representative {
+                emit(
+                    w,
+                    &mut row,
+                    format!("│     {}", annotation(fact, asserted_at, state.stale)),
+                )?;
+            }
+        }
+    }
+    emit(w, &mut row, "│".into())?;
+
     if let Some(view) = &state.last_inspection {
         emit(w, &mut row, "│ Inspection:".into())?;
         emit(
@@ -494,16 +531,21 @@ fn draw<W: Write>(w: &mut W, state: &AppState) -> std::io::Result<()> {
     Ok(())
 }
 
-/// Render order for non-repo fact keys: sort by `(entity, attribute)`
+/// Render order for catch-all fact keys: sort by `(entity, attribute)`
 /// so the Facts section is deterministic across ticks (F29 review
 /// fix — `HashMap` iteration would otherwise shuffle the rendered
 /// order between runs and the `[i]` target wouldn't match what the
 /// operator sees first).
+///
+/// Filters out `repo/*` and `buffer/*` — those have their own
+/// Repositories and Buffers sections and would double-render here.
 fn non_repo_fact_keys_sorted(state: &AppState) -> Vec<FactKey> {
     let mut keys: Vec<FactKey> = state
         .facts
         .keys()
-        .filter(|k| !is_repo_fact_attribute(&k.attribute))
+        .filter(|k| {
+            !is_repo_fact_attribute(&k.attribute) && !is_buffer_fact_attribute(&k.attribute)
+        })
         .cloned()
         .collect();
     keys.sort_by(|a, b| {
@@ -516,14 +558,22 @@ fn non_repo_fact_keys_sorted(state: &AppState) -> Vec<FactKey> {
 }
 
 /// The fact key that `[i]nspect` should target: the first rendered
-/// fact, preferring non-repo facts (Facts section is above
-/// Repositories) and falling through to the representative fact of
-/// the first repository when only repo facts exist.
+/// fact in visual order. Render order is Facts → Repositories →
+/// Buffers, so `[i]` targets the first catch-all fact, falls through
+/// to the first repository's representative, then to the first
+/// buffer's representative.
 fn inspect_target(state: &AppState) -> Option<FactKey> {
     if let Some(k) = non_repo_fact_keys_sorted(state).into_iter().next() {
         return Some(k);
     }
-    collect_repo_views(&state.facts)
+    if let Some(k) = collect_repo_views(&state.facts)
+        .into_iter()
+        .next()
+        .and_then(|v| v.representative.map(|(f, _)| f.key.clone()))
+    {
+        return Some(k);
+    }
+    collect_buffer_views(&state.facts)
         .into_iter()
         .next()
         .and_then(|v| v.representative.map(|(f, _)| f.key.clone()))
@@ -536,6 +586,14 @@ fn inspect_target(state: &AppState) -> Option<FactKey> {
 /// `repo/state/*`.
 fn is_repo_fact_attribute(attribute: &str) -> bool {
     attribute == "repo" || attribute.starts_with("repo/")
+}
+
+/// Does `attribute` belong to the `buffer/*` family? Used to split
+/// the Facts section from the Buffers section. Matches what
+/// `weaver-buffers` publishes: `buffer/path`, `buffer/byte-size`,
+/// `buffer/dirty`, `buffer/observable`.
+fn is_buffer_fact_attribute(attribute: &str) -> bool {
+    attribute == "buffer" || attribute.starts_with("buffer/")
 }
 
 /// One repository's collapsed view, assembled from the currently-
@@ -636,12 +694,92 @@ fn collect_repo_views(facts: &HashMap<FactKey, FactDisplay>) -> Vec<RepoView<'_>
     grouped.into_values().collect()
 }
 
+/// One buffer's collapsed view, assembled from the currently-asserted
+/// `buffer/*` facts for a single `EntityRef`.
+struct BufferView<'a> {
+    path: Option<&'a str>,
+    byte_size: Option<u64>,
+    dirty: Option<bool>,
+    /// `Some(true)` when `buffer/observable` is asserted as `true`;
+    /// `Some(false)` when asserted as `false`; `None` if the fact is
+    /// absent. Drives the `[observability lost]` badge, which
+    /// suppresses the dirty flag when the buffer is unobservable
+    /// (per `contracts/cli-surfaces.md §Display rules`).
+    observable: Option<bool>,
+    /// Freshest `buffer/*` fact for this entity — used to pull the
+    /// `by service …` line via the shared `annotation` helper. All
+    /// buffer facts for one entity share the same asserting identity
+    /// (slice-002 F14), so any one will do; using the freshest keeps
+    /// the displayed age moving per poll tick (mirrors F27).
+    representative: Option<(&'a Fact, u64)>,
+}
+
+/// Group `buffer/*` facts by `EntityRef` and assemble a `BufferView`
+/// per buffer. Deterministic ordering via `BTreeMap<EntityRef, _>` so
+/// the Buffers section doesn't flicker between ticks.
+fn collect_buffer_views(facts: &HashMap<FactKey, FactDisplay>) -> Vec<BufferView<'_>> {
+    let mut grouped: BTreeMap<EntityRef, BufferView<'_>> = BTreeMap::new();
+    for fd in facts.values() {
+        if !is_buffer_fact_attribute(&fd.fact.key.attribute) {
+            continue;
+        }
+        let entry = grouped.entry(fd.fact.key.entity).or_insert(BufferView {
+            path: None,
+            byte_size: None,
+            dirty: None,
+            observable: None,
+            representative: None,
+        });
+        match fd.fact.key.attribute.as_str() {
+            "buffer/path" => {
+                if let FactValue::String(s) = &fd.fact.value {
+                    entry.path = Some(s.as_str());
+                }
+            }
+            "buffer/byte-size" => {
+                if let FactValue::U64(n) = fd.fact.value {
+                    entry.byte_size = Some(n);
+                }
+            }
+            "buffer/dirty" => {
+                if let FactValue::Bool(b) = fd.fact.value {
+                    entry.dirty = Some(b);
+                }
+            }
+            "buffer/observable" => {
+                if let FactValue::Bool(b) = fd.fact.value {
+                    entry.observable = Some(b);
+                }
+            }
+            _ => {}
+        }
+        match entry.representative {
+            None => entry.representative = Some((&fd.fact, fd.asserted_at_wall_ns)),
+            Some((_, prev_ns)) if fd.asserted_at_wall_ns > prev_ns => {
+                entry.representative = Some((&fd.fact, fd.asserted_at_wall_ns));
+            }
+            _ => {}
+        }
+    }
+    grouped.into_values().collect()
+}
+
 fn format_state_badge(state: Option<&RepoStateBadge<'_>>) -> String {
     match state {
         Some(RepoStateBadge::OnBranch(name)) => format!("[on {name}]"),
         Some(RepoStateBadge::Detached(sha)) => format!("[detached {}]", short_sha(sha)),
         Some(RepoStateBadge::Unborn(name)) => format!("[unborn {name}]"),
         None => "[state unknown]".into(),
+    }
+}
+
+/// Render the `[<n> bytes]` badge for a buffer row. Falls back to
+/// `[size unknown]` when the `buffer/byte-size` fact hasn't landed
+/// yet (partial-bootstrap window — user visible only very briefly).
+fn format_byte_size(size: Option<u64>) -> String {
+    match size {
+        Some(n) => format!("[{n} bytes]"),
+        None => "[size unknown]".into(),
     }
 }
 
@@ -805,6 +943,89 @@ mod tests {
     }
 
     #[test]
+    fn is_buffer_fact_attribute_matches_family_prefix() {
+        assert!(is_buffer_fact_attribute("buffer/path"));
+        assert!(is_buffer_fact_attribute("buffer/byte-size"));
+        assert!(is_buffer_fact_attribute("buffer/dirty"));
+        assert!(is_buffer_fact_attribute("buffer/observable"));
+        assert!(!is_buffer_fact_attribute("repo/dirty"));
+        assert!(!is_buffer_fact_attribute("watcher/status"));
+        assert!(!is_buffer_fact_attribute("buffers/dirty"));
+    }
+
+    #[test]
+    fn format_byte_size_renders_with_fallback() {
+        assert_eq!(format_byte_size(Some(0)), "[0 bytes]");
+        assert_eq!(format_byte_size(Some(18342)), "[18342 bytes]");
+        assert_eq!(format_byte_size(None), "[size unknown]");
+    }
+
+    #[test]
+    fn collect_buffer_views_groups_by_entity_and_picks_freshest_representative() {
+        let mut facts: HashMap<FactKey, FactDisplay> = HashMap::new();
+        // Two buffers under distinct entities.
+        insert(
+            &mut facts,
+            mk_fact_at(
+                EntityRef::new(10),
+                "buffer/path",
+                FactValue::String("/tmp/a".into()),
+                100,
+            ),
+        );
+        insert(
+            &mut facts,
+            mk_fact_at(
+                EntityRef::new(10),
+                "buffer/byte-size",
+                FactValue::U64(42),
+                200,
+            ),
+        );
+        insert(
+            &mut facts,
+            mk_fact_at(
+                EntityRef::new(10),
+                "buffer/dirty",
+                FactValue::Bool(true),
+                900,
+            ),
+        );
+        insert(
+            &mut facts,
+            mk_fact_at(
+                EntityRef::new(20),
+                "buffer/path",
+                FactValue::String("/tmp/b".into()),
+                300,
+            ),
+        );
+        insert(
+            &mut facts,
+            mk_fact_at(
+                EntityRef::new(20),
+                "buffer/observable",
+                FactValue::Bool(false),
+                400,
+            ),
+        );
+
+        let views = collect_buffer_views(&facts);
+        assert_eq!(views.len(), 2);
+        // Deterministic entity ordering.
+        assert_eq!(views[0].path, Some("/tmp/a"));
+        assert_eq!(views[0].byte_size, Some(42));
+        assert_eq!(views[0].dirty, Some(true));
+        // Freshest fact (dirty @ t=900) is the representative.
+        let (_, rep_ts) = views[0].representative.expect("representative");
+        assert_eq!(rep_ts, 900);
+
+        assert_eq!(views[1].path, Some("/tmp/b"));
+        assert_eq!(views[1].observable, Some(false));
+        assert_eq!(views[1].dirty, None);
+    }
+
+    #[test]
     fn dirty_or_obs_lost_prefers_observability_badge() {
         assert_eq!(
             format_dirty_or_obs_lost(Some(false), Some(true)),
@@ -880,29 +1101,36 @@ mod tests {
 
     #[test]
     fn non_repo_keys_sort_by_entity_then_attribute() {
+        // Catch-all Facts section: excludes both repo/* and buffer/*
+        // — those have dedicated sections in the render output.
         let mut state = AppState::new();
         insert(
             &mut state.facts,
-            mk_fact(EntityRef::new(2), "buffer/dirty", FactValue::Bool(true)),
+            mk_fact(EntityRef::new(2), "watcher/status", FactValue::Bool(true)),
         );
         insert(
             &mut state.facts,
-            mk_fact(EntityRef::new(1), "buffer/dirty", FactValue::Bool(false)),
+            mk_fact(EntityRef::new(1), "watcher/status", FactValue::Bool(false)),
         );
         insert(
             &mut state.facts,
-            mk_fact(EntityRef::new(1), "watcher/status", FactValue::Bool(true)),
+            mk_fact(EntityRef::new(1), "misc/probe", FactValue::Bool(true)),
         );
-        // repo/* must be filtered out entirely.
+        // repo/* and buffer/* must be filtered out entirely — they
+        // render in Repositories / Buffers, not in the catch-all Facts.
         insert(
             &mut state.facts,
             mk_fact(EntityRef::new(1), "repo/dirty", FactValue::Bool(false)),
+        );
+        insert(
+            &mut state.facts,
+            mk_fact(EntityRef::new(1), "buffer/dirty", FactValue::Bool(true)),
         );
         let keys = non_repo_fact_keys_sorted(&state);
         let attrs: Vec<&str> = keys.iter().map(|k| k.attribute.as_str()).collect();
         assert_eq!(
             attrs,
-            vec!["buffer/dirty", "watcher/status", "buffer/dirty"]
+            vec!["misc/probe", "watcher/status", "watcher/status"]
         );
         assert_eq!(keys[0].entity.as_u64(), 1);
         assert_eq!(keys[1].entity.as_u64(), 1);
@@ -910,7 +1138,8 @@ mod tests {
     }
 
     #[test]
-    fn inspect_target_prefers_first_non_repo_fact() {
+    fn inspect_target_prefers_first_catch_all_fact() {
+        // Catch-all Facts wins over Repositories and Buffers.
         let mut state = AppState::new();
         insert(
             &mut state.facts,
@@ -924,9 +1153,42 @@ mod tests {
                 FactValue::String("main".into()),
             ),
         );
+        insert(
+            &mut state.facts,
+            mk_fact(EntityRef::new(3), "watcher/status", FactValue::Bool(true)),
+        );
+        let k = inspect_target(&state).expect("some target");
+        assert_eq!(k.attribute, "watcher/status");
+        assert_eq!(k.entity.as_u64(), 3);
+    }
+
+    #[test]
+    fn inspect_target_falls_through_to_first_buffer_when_no_catch_all_or_repo() {
+        // Only buffer/* facts — Repositories priority already exhausted
+        // in the preceding catch-all-empty branch; buffer/* is the
+        // last resort.
+        let mut state = AppState::new();
+        insert(
+            &mut state.facts,
+            mk_fact_at(
+                EntityRef::new(42),
+                "buffer/path",
+                FactValue::String("/tmp/a".into()),
+                100,
+            ),
+        );
+        insert(
+            &mut state.facts,
+            mk_fact_at(
+                EntityRef::new(42),
+                "buffer/dirty",
+                FactValue::Bool(false),
+                900,
+            ),
+        );
         let k = inspect_target(&state).expect("some target");
         assert_eq!(k.attribute, "buffer/dirty");
-        assert_eq!(k.entity.as_u64(), 5);
+        assert_eq!(k.entity.as_u64(), 42);
     }
 
     #[test]
