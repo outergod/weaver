@@ -42,9 +42,11 @@ fn run(event_count: usize) -> Option<(String, u64, usize)> {
             let id = EventId::new((i as u64) + 1);
             d.process_event(Event {
                 id,
-                name: "buffer/edited".into(),
+                name: "buffer/open".into(),
                 target: Some(entity),
-                payload: EventPayload::BufferEdited,
+                payload: EventPayload::BufferOpen {
+                    path: "/tmp/weaver-fixture".into(),
+                },
                 provenance: Provenance::new(ActorIdentity::Tui, (i as u64 + 1) * 1_000, None)
                     .unwrap(),
             })

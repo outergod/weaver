@@ -35,9 +35,11 @@ async fn service_overwrite_of_behavior_fact_reports_service_attribution() {
     dispatcher
         .process_event(Event {
             id: event_id,
-            name: "buffer/edited".into(),
+            name: "buffer/open".into(),
             target: Some(entity),
-            payload: EventPayload::BufferEdited,
+            payload: EventPayload::BufferOpen {
+                path: "/tmp/weaver-fixture".into(),
+            },
             provenance: Provenance::new(ActorIdentity::Tui, 100, None).unwrap(),
         })
         .await;

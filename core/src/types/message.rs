@@ -345,9 +345,11 @@ mod tests {
     fn sample_event() -> Event {
         Event {
             id: EventId::new(42),
-            name: "buffer/edited".into(),
+            name: "buffer/open".into(),
             target: Some(EntityRef::new(1)),
-            payload: EventPayload::BufferEdited,
+            payload: EventPayload::BufferOpen {
+                path: "/tmp/weaver-fixture".into(),
+            },
             provenance: Provenance::new(ActorIdentity::Tui, 999, None).unwrap(),
         }
     }

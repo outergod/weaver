@@ -90,9 +90,11 @@ async fn behavior_chain_walks_back_to_originating_event_with_structured_identity
     dispatcher
         .process_event(Event {
             id: originating_event_id,
-            name: "buffer/edited".into(),
+            name: "buffer/open".into(),
             target: Some(buffer),
-            payload: EventPayload::BufferEdited,
+            payload: EventPayload::BufferOpen {
+                path: "/tmp/weaver-fixture".into(),
+            },
             provenance: Provenance::new(ActorIdentity::Tui, 100, None).unwrap(),
         })
         .await;
@@ -154,9 +156,11 @@ async fn multi_kind_chain_preserves_structured_identity_across_service_hop() {
     dispatcher
         .process_event(Event {
             id: EventId::new(11),
-            name: "buffer/edited".into(),
+            name: "buffer/open".into(),
             target: Some(buffer),
-            payload: EventPayload::BufferEdited,
+            payload: EventPayload::BufferOpen {
+                path: "/tmp/weaver-fixture".into(),
+            },
             provenance: Provenance::new(ActorIdentity::Tui, 100, None).unwrap(),
         })
         .await;

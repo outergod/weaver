@@ -364,9 +364,11 @@ async fn rejects_event_with_malformed_service_identity() {
     };
     let event = Event {
         id: EventId::new(now_ns()),
-        name: "buffer/edited".into(),
+        name: "buffer/open".into(),
         target: Some(EntityRef::new(1)),
-        payload: EventPayload::BufferEdited,
+        payload: EventPayload::BufferOpen {
+            path: "/tmp/weaver-fixture".into(),
+        },
         provenance: weaver_core::provenance::Provenance {
             source: malformed_source,
             timestamp_ns: now_ns(),

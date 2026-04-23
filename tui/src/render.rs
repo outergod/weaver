@@ -1,21 +1,23 @@
 //! TUI render loop — crossterm raw-mode event loop that multiplexes
 //! keystrokes, inbound bus messages, and disconnect detection.
 //!
-//! Implements tasks T047 (fact rendering), T072 (stale-on-disconnect),
-//! and the display side of T046 (`e`/`c` keys wire through
-//! [`crate::commands`]).
+//! Implements fact rendering, stale-on-disconnect, and the display
+//! side of `[i]nspect` (wires through [`crate::commands`]). Slice 003
+//! retired the `e`/`c` simulate-edit/simulate-clean keystrokes when
+//! `buffer/dirty` authority moved to the `weaver-buffers` service;
+//! in-TUI editing arrives in slice 004.
 //!
-//! Render surface matches `specs/001-hello-fact/contracts/cli-surfaces.md`:
+//! Render surface matches `specs/003-buffer-service/contracts/cli-surfaces.md`:
 //!
 //! ```text
 //! ┌─ Weaver TUI ────────────────────────────────────────────────────┐
-//! │ Connection: ready (bus v0.1.0)                                  │
+//! │ Connection: ready (bus v0.3.0)                                  │
 //! │                                                                 │
 //! │ Facts:                                                          │
 //! │   buffer/dirty(EntityRef(1)) = true                             │
-//! │     by core/dirty-tracking, event N, 0.142s ago                 │
+//! │     by service weaver-buffers (inst …), event N, 0.142s ago    │
 //! │                                                                 │
-//! │ Commands: [e]dit  [c]lean  [i]nspect  [q]uit                    │
+//! │ Commands: [i]nspect  [q]uit                                     │
 //! └─────────────────────────────────────────────────────────────────┘
 //! ```
 
@@ -39,11 +41,7 @@ use weaver_core::types::message::{
 };
 
 use crate::client::{BusStreamItem, TuiClient, connect};
-use crate::commands::{self, SimulateKind};
-
-/// The entity id used for every simulated event in slice 001. A
-/// single-buffer fact space makes this constant safe.
-const SYNTHETIC_BUFFER: EntityRef = EntityRef::new(1);
+use crate::commands;
 
 /// What the render layer knows about a currently-asserted fact.
 struct FactDisplay {
@@ -259,18 +257,6 @@ fn should_quit(key: &KeyEvent) -> bool {
         && matches!(key.code, KeyCode::Char('c') | KeyCode::Char('C')))
 }
 
-fn simulate_kind_for(key: &KeyEvent) -> Option<SimulateKind> {
-    // Ctrl-C is reserved for quit — handled in `should_quit`.
-    if key.modifiers.contains(KeyModifiers::CONTROL) {
-        return None;
-    }
-    match key.code {
-        KeyCode::Char('e') | KeyCode::Char('E') => Some(SimulateKind::Edit),
-        KeyCode::Char('c') | KeyCode::Char('C') => Some(SimulateKind::Clean),
-        _ => None,
-    }
-}
-
 fn is_inspect_key(key: &KeyEvent) -> bool {
     if key.modifiers.contains(KeyModifiers::CONTROL) {
         return false;
@@ -288,11 +274,7 @@ fn is_reconnect_key(key: &KeyEvent) -> bool {
 /// Handle a keystroke while connected. Factored out so the main loop
 /// stays readable.
 async fn handle_key_when_ready(key: &KeyEvent, state: &mut AppState, client: &mut TuiClient) {
-    if let Some(kind) = simulate_kind_for(key) {
-        if let Err(e) = commands::publish(&mut client.writer, kind, SYNTHETIC_BUFFER).await {
-            state.mark_unavailable(format!("write failed: {e} (press `r` to reconnect)"));
-        }
-    } else if is_inspect_key(key) {
+    if is_inspect_key(key) {
         // F29 review fix: `[i]` must inspect the fact that is
         // visually first in the rendered output. Prior logic used
         // `state.facts.keys().next()` — HashMap iteration order —
@@ -497,11 +479,7 @@ fn draw<W: Write>(w: &mut W, state: &AppState) -> std::io::Result<()> {
     }
 
     match &state.status {
-        ConnStatus::Ready => emit(
-            w,
-            &mut row,
-            "│ Commands: [e]dit  [c]lean  [i]nspect  [q]uit".into(),
-        )?,
+        ConnStatus::Ready => emit(w, &mut row, "│ Commands: [i]nspect  [q]uit".into())?,
         ConnStatus::Unavailable { .. } => {
             emit(w, &mut row, "│ Commands: [r]econnect  [q]uit".into())?
         }

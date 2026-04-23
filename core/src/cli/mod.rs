@@ -8,7 +8,6 @@ pub mod config;
 pub mod errors;
 pub mod inspect;
 pub mod output;
-pub mod simulate;
 pub mod status;
 pub mod tracing_setup;
 pub mod version;
@@ -34,12 +33,6 @@ pub fn run() -> miette::Result<()> {
         Some(Command::Run) => run_core(socket),
         Some(Command::Status) => status::run(output, socket),
         Some(Command::Inspect { fact_key }) => inspect::run(&fact_key, output, socket),
-        Some(Command::SimulateEdit { buffer_id }) => {
-            simulate::run(simulate::SimulationKind::Edit, buffer_id, output, socket)
-        }
-        Some(Command::SimulateClean { buffer_id }) => {
-            simulate::run(simulate::SimulationKind::Clean, buffer_id, output, socket)
-        }
         None => {
             print_help();
             Ok(())
@@ -62,11 +55,11 @@ fn run_core(socket_override: Option<std::path::PathBuf>) -> miette::Result<()> {
         .into_diagnostic()?;
     runtime.block_on(async move {
         let cfg = config::Config::from_cli(socket_override);
-        let mut dispatcher = crate::behavior::dispatcher::Dispatcher::new();
-        // Embedded behaviors (slice 001).
-        dispatcher.register(Box::new(
-            crate::behavior::dirty_tracking::DirtyTrackingBehavior::new(),
-        ));
+        // Slice 003: the shipped core registers no embedded behaviors.
+        // `buffer/dirty` authority moved to the `weaver-buffers`
+        // service; any future embedded behavior lands under its own
+        // registration call here.
+        let dispatcher = crate::behavior::dispatcher::Dispatcher::new();
         let dispatcher = Arc::new(dispatcher);
 
         tracing::info!(

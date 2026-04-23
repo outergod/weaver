@@ -1,8 +1,8 @@
 //! Bus client helpers — connect, handshake, and publish.
 //!
 //! Shared between the TUI (`weaver-tui`) and the `weaver` CLI's one-shot
-//! subcommands (`simulate-edit`, `simulate-clean`, `status`, `inspect`).
-//! Both need the same Hello → Ready handshake; duplicating it would drift.
+//! subcommands (`status`, `inspect`). Both need the same Hello → Ready
+//! handshake; duplicating it would drift.
 //!
 //! Slice 001 keeps the helper deliberately small: one `connect` that
 //! completes the handshake, plus `publish_event` / `subscribe_ack` / a

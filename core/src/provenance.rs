@@ -36,7 +36,7 @@ pub struct Provenance {
 /// kebab-case variant names / field names (Amendment 5). Examples:
 ///
 /// - `Core` → `{"type":"core"}`
-/// - `Behavior { id }` → `{"type":"behavior","id":"core/dirty-tracking"}`
+/// - `Behavior { id }` → `{"type":"behavior","id":"<behavior-id>"}`
 /// - `Tui` → `{"type":"tui"}`
 /// - `Service { service_id, instance_id }` →
 ///   `{"type":"service","service-id":"git-watcher","instance-id":"<uuid>"}`

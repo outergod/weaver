@@ -160,9 +160,11 @@ mod tests {
         let mut store = TraceStore::new();
         let event = Event {
             id: EventId::new(42),
-            name: "buffer/edited".into(),
+            name: "buffer/open".into(),
             target: Some(EntityRef::new(1)),
-            payload: EventPayload::BufferEdited,
+            payload: EventPayload::BufferOpen {
+                path: "/tmp/weaver-fixture".into(),
+            },
             provenance: Provenance::new(ActorIdentity::Tui, 100, None).unwrap(),
         };
         let seq = store.append(
@@ -189,9 +191,11 @@ mod tests {
             TracePayload::Event {
                 event: Event {
                     id: event_id,
-                    name: "buffer/edited".into(),
+                    name: "buffer/open".into(),
                     target: Some(EntityRef::new(1)),
-                    payload: EventPayload::BufferEdited,
+                    payload: EventPayload::BufferOpen {
+                        path: "/tmp/weaver-fixture".into(),
+                    },
                     provenance: Provenance::new(ActorIdentity::Tui, 100, None).unwrap(),
                 },
             },

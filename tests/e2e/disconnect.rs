@@ -1,10 +1,11 @@
-//! T073 — end-to-end disconnect: spawn `weaver run`, subscribe, publish
-//! `BufferEdited`, confirm `FactAssert` arrives, then SIGKILL the core
-//! and assert the client observes the disconnect within 5 s without
-//! panicking and exits cleanly.
+//! T073 (slice 001) — end-to-end disconnect scenario that drove the
+//! `core/dirty-tracking` behavior via `BufferEdited`.
 //!
-//! Reference: `specs/001-hello-fact/tasks.md` T073 +
-//! `specs/001-hello-fact/spec.md` SC-004.
+//! Slice 003 retired the behavior and the event variant; this test is
+//! `#[ignore]`-gated pending T053 rewrite to drive `weaver-buffers` as
+//! the service whose disconnect is being observed.
+//!
+//! Reference: `specs/003-buffer-service/tasks.md` T053.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -24,6 +25,7 @@ const DISCONNECT_BUDGET: Duration = Duration::from_secs(5);
 const SOCKET_WAIT_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[tokio::test]
+#[ignore = "rewrite under T053 in Phase 4 to drive weaver-buffers service disconnect"]
 async fn sigkill_surfaces_disconnect_within_budget_without_panic() {
     let socket = unique_socket_path();
     let guard = ChildGuard::new(spawn_weaver(&socket));
@@ -45,9 +47,11 @@ async fn sigkill_surfaces_disconnect_within_budget_without_panic() {
     client
         .send(&BusMessage::Event(Event {
             id: edit_id,
-            name: "buffer/edited".into(),
+            name: "buffer/open".into(),
             target: Some(EntityRef::new(1)),
-            payload: EventPayload::BufferEdited,
+            payload: EventPayload::BufferOpen {
+                path: "/tmp/weaver-fixture".into(),
+            },
             provenance: Provenance::new(
                 ActorIdentity::service("e2e-publisher", Uuid::new_v4()).unwrap(),
                 edit_id.as_u64(),
@@ -56,7 +60,7 @@ async fn sigkill_surfaces_disconnect_within_budget_without_panic() {
             .unwrap(),
         }))
         .await
-        .expect("send BufferEdited");
+        .expect("send BufferOpen");
 
     let _fact = timeout(Duration::from_secs(2), async {
         loop {

@@ -1,11 +1,11 @@
-//! T048 — end-to-end scenario: spawn `weaver run` as a subprocess,
-//! connect a test client to the bus, publish `BufferEdited`, assert
-//! that `FactAssert(buffer/dirty = true)` arrives within the
-//! interactive latency budget (100 ms); then publish `BufferCleaned`
-//! and assert `FactRetract(buffer/dirty)` arrives.
+//! T048 (slice 001) — end-to-end scenario that drove the
+//! `core/dirty-tracking` behavior via `BufferEdited` / `BufferCleaned`.
 //!
-//! Reference: `specs/001-hello-fact/tasks.md` T048 +
-//! `specs/001-hello-fact/spec.md` SC-001.
+//! Slice 003 retired both the behavior and the event variants; this
+//! test is `#[ignore]`-gated pending T052 rewrite to drive
+//! `weaver-buffers <fixture>` + external-mutation instead.
+//!
+//! Reference: `specs/003-buffer-service/tasks.md` T052.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -26,6 +26,7 @@ const INTERACTIVE_BUDGET: Duration = Duration::from_millis(100);
 const SOCKET_WAIT_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[tokio::test]
+#[ignore = "rewrite under T052 in Phase 4 to drive weaver-buffers + external mutation"]
 async fn buffer_edited_then_cleaned_round_trips_via_bus() {
     let socket = unique_socket_path();
     let _guard = ChildGuard::new(spawn_weaver(&socket));
@@ -40,16 +41,18 @@ async fn buffer_edited_then_cleaned_round_trips_via_bus() {
         .await
         .expect("subscribe to buffer/*");
 
-    // Publish BufferEdited and verify FactAssert within 100 ms.
+    // Publish BufferOpen and verify FactAssert within 100 ms.
     let edit_event_id = EventId::new(now_ns());
     client
         .send(&BusMessage::Event(build_event(
             edit_event_id,
-            EventPayload::BufferEdited,
-            "buffer/edited",
+            EventPayload::BufferOpen {
+                path: "/tmp/weaver-fixture".into(),
+            },
+            "buffer/open",
         )))
         .await
-        .expect("send BufferEdited");
+        .expect("send BufferOpen");
 
     let assert_start = Instant::now();
     let assert_msg = wait_for_fact_assert(&mut client).await;
@@ -78,16 +81,18 @@ async fn buffer_edited_then_cleaned_round_trips_via_bus() {
         INTERACTIVE_BUDGET,
     );
 
-    // Publish BufferCleaned and verify FactRetract within 100 ms.
+    // Publish a second BufferOpen and verify FactRetract within 100 ms.
     let clean_event_id = EventId::new(now_ns());
     client
         .send(&BusMessage::Event(build_event(
             clean_event_id,
-            EventPayload::BufferCleaned,
-            "buffer/cleaned",
+            EventPayload::BufferOpen {
+                path: "/tmp/weaver-fixture".into(),
+            },
+            "buffer/open",
         )))
         .await
-        .expect("send BufferCleaned");
+        .expect("send BufferOpen");
 
     let retract_start = Instant::now();
     let retract_msg = wait_for_fact_retract(&mut client).await;

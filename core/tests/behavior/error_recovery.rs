@@ -42,9 +42,11 @@ impl Behavior for FixtureErrorBehavior {
 fn sample_event(id: u64, entity: EntityRef) -> Event {
     Event {
         id: EventId::new(id),
-        name: "buffer/edited".into(),
+        name: "buffer/open".into(),
         target: Some(entity),
-        payload: EventPayload::BufferEdited,
+        payload: EventPayload::BufferOpen {
+            path: "/tmp/weaver-fixture".into(),
+        },
         provenance: Provenance::new(ActorIdentity::Tui, id.saturating_mul(1_000), None).unwrap(),
     }
 }

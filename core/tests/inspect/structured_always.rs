@@ -91,9 +91,11 @@ async fn every_inspection_response_is_structured_across_fact_families() {
     dispatcher
         .process_event(Event {
             id: EventId::new(10),
-            name: "buffer/edited".into(),
+            name: "buffer/open".into(),
             target: Some(buffer_entity),
-            payload: EventPayload::BufferEdited,
+            payload: EventPayload::BufferOpen {
+                path: "/tmp/weaver-fixture".into(),
+            },
             provenance: Provenance::new(ActorIdentity::Tui, 100, None).unwrap(),
         })
         .await;

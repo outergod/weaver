@@ -16,6 +16,12 @@ use tokio::time::{sleep, timeout};
 use uuid::Uuid;
 use weaver_core::bus::client::Client;
 use weaver_core::provenance::{ActorIdentity, Provenance};
+// Slice 001 used this test to assert that a late subscriber receives a
+// behavior-authored `buffer/dirty` from the snapshot. Slice 003 retired
+// the embedded behavior, so the assertion body (which expects
+// `core/dirty-tracking` attribution) no longer holds; Phase 4 of slice
+// 003 rewrites the test to drive `weaver-buffers` as the snapshot
+// source. Gated with `#[ignore]` until that rewrite lands.
 use weaver_core::types::entity_ref::EntityRef;
 use weaver_core::types::event::{Event, EventPayload};
 use weaver_core::types::fact::{FactKey, FactValue};
@@ -25,6 +31,7 @@ use weaver_core::types::message::{BusMessage, SubscribePattern};
 const SOCKET_WAIT_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[tokio::test]
+#[ignore = "rewrite in Phase 4 to drive weaver-buffers as the snapshot source"]
 async fn subscribe_replays_current_facts_before_live_updates() {
     let socket = unique_socket_path();
     let _guard = ChildGuard::new(spawn_weaver(&socket));
@@ -41,9 +48,11 @@ async fn subscribe_replays_current_facts_before_live_updates() {
         publisher
             .send(&BusMessage::Event(Event {
                 id: edit_id,
-                name: "buffer/edited".into(),
+                name: "buffer/open".into(),
                 target: Some(EntityRef::new(1)),
-                payload: EventPayload::BufferEdited,
+                payload: EventPayload::BufferOpen {
+                    path: "/tmp/weaver-fixture".into(),
+                },
                 provenance: Provenance::new(
                     ActorIdentity::service("e2e-publisher", Uuid::new_v4()).unwrap(),
                     edit_id.as_u64(),
@@ -52,7 +61,7 @@ async fn subscribe_replays_current_facts_before_live_updates() {
                 .unwrap(),
             }))
             .await
-            .expect("send BufferEdited");
+            .expect("send BufferOpen");
         // Give the dispatcher a beat to process the event before we
         // disconnect. Without this the TCP close could race the
         // dispatcher's fact-store mutation.
