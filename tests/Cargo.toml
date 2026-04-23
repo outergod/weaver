@@ -52,3 +52,7 @@ path = "e2e/fact_assert_identity_guard.rs"
 [[test]]
 name = "git_watcher_inspect"
 path = "e2e/git_watcher_inspect.rs"
+
+[[test]]
+name = "buffer_open_bootstrap"
+path = "e2e/buffer_open_bootstrap.rs"
