@@ -80,7 +80,7 @@ root):
 |---|---|---|
 | `repo/path` | String | Canonical working-tree root. |
 | `repo/dirty` | Bool | Index-or-working-tree differs from HEAD. Untracked-only is clean (Clarification Q5). |
-| `repo/head-commit` | String | 40-char hex SHA. Absent when HEAD is unborn. |
+| `repo/head-commit` | String | Lowercase hex-encoded object id as produced by `gix::rev_parse_single("HEAD").to_hex()` — 40 chars for SHA-1 repositories, 64 for SHA-256 repositories. Absent when HEAD is unborn. |
 | `repo/state/on-branch` | String | Branch name when HEAD points at `refs/heads/<name>`. |
 | `repo/state/detached` | String | Commit SHA when HEAD is detached. |
 | `repo/state/unborn` | String | Intended branch name for an empty repo. |
@@ -106,8 +106,8 @@ Per `specs/002-git-watcher-actor/contracts/cli-surfaces.md`:
 | 0 | Clean shutdown (SIGTERM / SIGINT; facts retracted). |
 | 1 | Startup failure (path not a repo, bare repo, transient op in progress, bootstrap observation failed, malformed `--poll-interval`). |
 | 2 | Bus unavailable. |
-| 3 | Authority conflict (another watcher already owns `repo/*` for the target entity, or the connection's bound identity drifted). |
-| 10 | Unclassified internal error. |
+| 3 | `authority-conflict` or `not-owner` rejection from the core. Another watcher already owns `repo/*` for the target entity, or the watcher tried to retract a key owned by a different connection. |
+| 10 | Unclassified internal error, including protocol-violation rejections other than the two listed above — specifically `identity-drift` and `invalid-identity`. A correctly-behaving watcher never produces these; receiving one indicates a bug in the watcher itself. Follow-up: reclassify these as fatal and map to a dedicated exit code so operator automation can distinguish protocol misuse from generic internal faults. |
 
 ## Behavior under failure
 

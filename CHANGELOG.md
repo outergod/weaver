@@ -12,7 +12,7 @@ Per L2 Principle 7, each public surface carries its own version.
 - **Bus protocol** v0.2.0 (was v0.1.0) — message categories, delivery classes (lossy / authoritative), CBOR tag scheme entries 1000 (entity-ref), 1001 (keyword), **1002 (structured actor identity, slice 002)**. See `specs/002-git-watcher-actor/contracts/bus-messages.md`.
 - **Fact-family schema `buffer/dirty`** v0.1.0 — unchanged since slice 001.
 - **Fact-family schema `repo/dirty`** v0.1.0 (slice 002, new) — `FactValue::Bool`; asserted by `weaver-git-watcher` per Clarification Q5 (index-or-working-tree differs from HEAD; untracked-only is clean). See `specs/002-git-watcher-actor/data-model.md`.
-- **Fact-family schema `repo/head-commit`** v0.1.0 (slice 002, new) — `FactValue::String` (40-char hex SHA). Retracted in the `Unborn` state.
+- **Fact-family schema `repo/head-commit`** v0.1.0 (slice 002, new) — `FactValue::String` holding the lowercase hex-encoded object id from `gix::rev_parse_single("HEAD")` — 40 chars for SHA-1 repositories, 64 for SHA-256. Retracted in the `Unborn` state.
 - **Fact-family schema `repo/state/on-branch`** v0.1.0 (slice 002, new) — `FactValue::String` (branch name). Asserted iff HEAD points at `refs/heads/<name>`.
 - **Fact-family schema `repo/state/detached`** v0.1.0 (slice 002, new) — `FactValue::String` (detached HEAD commit SHA).
 - **Fact-family schema `repo/state/unborn`** v0.1.0 (slice 002, new) — `FactValue::String` (intended branch name for an empty repository).
