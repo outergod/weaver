@@ -706,6 +706,7 @@ fn format_value(v: &FactValue) -> String {
         FactValue::Bool(b) => b.to_string(),
         FactValue::String(s) => format!("{s:?}"),
         FactValue::Int(n) => n.to_string(),
+        FactValue::U64(n) => n.to_string(),
         FactValue::Null => "null".into(),
     }
 }

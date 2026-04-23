@@ -44,8 +44,8 @@ description: "Task list for Slice 003 — Buffer Service implementation"
 
 ### Wire vocabulary changes
 
-- [ ] T008 {surface:bus} {surface:fact} Add `FactValue::U64(u64)` variant to `core/src/types/fact.rs` under the existing `#[serde(tag = "type", content = "value", rename_all = "kebab-case")]` adjacent-tag; wire form `{"type":"u64","value":<n>}`
-- [ ] T009 [P] {surface:bus} Update `core/src/types/fact.rs` unit tests to cover `FactValue::U64` round-trip (JSON + CBOR via `ciborium`)
+- [X] T008 {surface:bus} {surface:fact} Add `FactValue::U64(u64)` variant to `core/src/types/fact.rs` under the existing `#[serde(tag = "type", content = "value", rename_all = "kebab-case")]` adjacent-tag; wire form `{"type":"u64","value":<n>}`
+- [X] T009 [P] {surface:bus} Update `core/src/types/fact.rs` unit tests to cover `FactValue::U64` round-trip (JSON + CBOR via `ciborium`)
 - [ ] T010 {surface:bus} Remove `EventPayload::BufferEdited` and `EventPayload::BufferCleaned` from `core/src/types/event.rs`; remove any downstream unit tests that construct them
 - [ ] T011 {surface:bus} Add `EventPayload::BufferOpen { path: String }` to `core/src/types/event.rs`; wire form `{"type":"buffer-open","payload":{"path":"<p>"}}`; kebab-case variant tag per Amendment 5
 - [ ] T012 [P] {surface:bus} Update `core/src/types/event.rs` unit tests: remove `BufferEdited` / `BufferCleaned` round-trip coverage; add `BufferOpen` round-trip coverage (JSON + CBOR)
