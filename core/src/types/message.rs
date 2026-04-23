@@ -154,12 +154,30 @@ pub struct ErrorMsg {
 ///   naturally reduce to "behavior" or "service" semantics. Rendering
 ///   falls back on `source_event` + the trace entry.
 ///
-/// JSON wire shape uses `#[serde(skip_serializing_if = "Option::is_none")]`
-/// so each variant renders as a flat object without the other
-/// variant's fields — matches `specs/002-git-watcher-actor/contracts/cli-surfaces.md`.
+/// JSON wire shape:
+///
+/// - `asserting_kind` is **always present** — `"behavior" | "service" |
+///   "core" | "tui" | "user" | "host" | "agent"` — matching
+///   [`crate::provenance::ActorIdentity::kind_label`]. It is the
+///   wire-level discriminator that lets consumers parse the response
+///   without peeking at which `asserting_*` identifier field happens
+///   to be populated (T064 / T067 review direction).
+///
+/// - The identifier fields (`asserting_behavior`, `asserting_service`,
+///   `asserting_instance`) are `#[serde(skip_serializing_if =
+///   "Option::is_none")]` so each shape renders flat. Only the slice's
+///   emitted kinds get identifier fields this slice:
+///   - `"behavior"` → `asserting_behavior`
+///   - `"service"` → `asserting_service`, `asserting_instance`
+///   - `"core" | "tui"` → no identifier fields (the kind is the identity)
+///   - reserved (`"user" | "host" | "agent"`) — `asserting_kind` only;
+///     richer payload defers to the slice that actually emits them.
+///
+/// See `specs/002-git-watcher-actor/contracts/cli-surfaces.md`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InspectionDetail {
     pub source_event: EventId,
+    pub asserting_kind: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub asserting_behavior: Option<BehaviorId>,
     #[serde(skip_serializing_if = "Option::is_none", rename = "asserting_service")]
@@ -172,8 +190,7 @@ pub struct InspectionDetail {
 
 impl InspectionDetail {
     /// Build an `InspectionDetail` for a behavior-authored fact.
-    /// Slice-001 shape. All `asserting_service` / `asserting_instance`
-    /// fields are `None`.
+    /// Slice-001 shape extended with `asserting_kind = "behavior"`.
     pub fn behavior(
         source_event: EventId,
         asserting_behavior: BehaviorId,
@@ -182,6 +199,7 @@ impl InspectionDetail {
     ) -> Self {
         Self {
             source_event,
+            asserting_kind: "behavior".into(),
             asserting_behavior: Some(asserting_behavior),
             asserting_service: None,
             asserting_instance: None,
@@ -191,7 +209,7 @@ impl InspectionDetail {
     }
 
     /// Build an `InspectionDetail` for a service-authored fact.
-    /// Slice-002 shape. The `asserting_behavior` field is `None`.
+    /// Slice-002 shape extended with `asserting_kind = "service"`.
     pub fn service(
         source_event: EventId,
         service_id: String,
@@ -201,6 +219,7 @@ impl InspectionDetail {
     ) -> Self {
         Self {
             source_event,
+            asserting_kind: "service".into(),
             asserting_behavior: None,
             asserting_service: Some(service_id),
             asserting_instance: Some(instance_id),
@@ -210,11 +229,23 @@ impl InspectionDetail {
     }
 
     /// Build an `InspectionDetail` for a fact whose actor kind does
-    /// not reduce to behavior or service (e.g. Core-authored or other
-    /// reserved variants). All three `asserting_*` fields are `None`.
-    pub fn opaque(source_event: EventId, asserted_at_ns: u64, trace_sequence: u64) -> Self {
+    /// not carry a separately-rendered identifier this slice (Core,
+    /// Tui, or the reserved User/Host/Agent variants). Callers pass
+    /// the kind label string via
+    /// [`crate::provenance::ActorIdentity::kind_label`] so the
+    /// wire-level discriminator is always meaningful (T064 review
+    /// fix: previously this constructor produced a purely opaque
+    /// response with no way for consumers to distinguish Core from
+    /// Tui).
+    pub fn kind_only(
+        kind: &'static str,
+        source_event: EventId,
+        asserted_at_ns: u64,
+        trace_sequence: u64,
+    ) -> Self {
         Self {
             source_event,
+            asserting_kind: kind.into(),
             asserting_behavior: None,
             asserting_service: None,
             asserting_instance: None,
