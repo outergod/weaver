@@ -49,6 +49,12 @@ pub enum InspectCliError {
 struct FoundJson {
     fact: FactKeyJson,
     source_event: u64,
+    /// Wire-level discriminator — one of `"behavior" | "service" |
+    /// "core" | "tui" | "user" | "host" | "agent"`. Always present
+    /// so consumers can parse the response without peeking at which
+    /// identifier field happens to be populated (T064 review
+    /// direction; mirrors `InspectionDetail::asserting_kind`).
+    asserting_kind: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     asserting_behavior: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -207,6 +213,7 @@ fn render(
 fn print_found_human(key: &FactKey, d: &InspectionDetail) {
     println!("fact: ({}, {})", key.entity, key.attribute);
     println!("  source_event:       {}", d.source_event);
+    println!("  asserting_kind:     {}", d.asserting_kind);
     if let Some(b) = &d.asserting_behavior {
         println!("  asserting_behavior: {b}");
     }
@@ -227,6 +234,7 @@ fn print_found_json(key: &FactKey, d: &InspectionDetail) -> miette::Result<()> {
             attribute: key.attribute.clone(),
         },
         source_event: d.source_event.as_u64(),
+        asserting_kind: d.asserting_kind.clone(),
         asserting_behavior: d.asserting_behavior.as_ref().map(|b| b.to_string()),
         asserting_service: d.asserting_service.clone(),
         asserting_instance: d.asserting_instance.map(|u| u.to_string()),

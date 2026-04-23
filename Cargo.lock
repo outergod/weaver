@@ -2659,6 +2659,8 @@ version = "0.1.0"
 dependencies = [
  "ciborium",
  "libc",
+ "serde_json",
+ "tempfile",
  "tokio",
  "uuid",
  "weaver_core",

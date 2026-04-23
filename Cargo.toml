@@ -40,6 +40,10 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json"]
 # Property-based testing per L2 P9.
 proptest = "1"
 
+# Scratch directories for scenario/e2e tests that need a real file
+# tree (git repos, synthetic socket paths, etc.).
+tempfile = "3"
+
 # Build-time provenance per L2 P11.
 vergen = { version = "8", features = ["build", "cargo", "git", "gitcl", "rustc"] }
 

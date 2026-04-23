@@ -90,15 +90,18 @@ pub fn inspect_fact(
                 trace_sequence.as_u64(),
             ))
         }
-        // Core / Tui / User / Host / Agent: render the opaque shape.
-        // The trace entry still names the full actor identity; the
-        // inspection detail only omits it because the slice's
-        // InspectionDetail shape reserves structured rendering for
-        // Behavior and Service.
-        _ => {
+        // Core / Tui / User / Host / Agent: the actor kind is the
+        // identity for this slice (T064 + T067 review direction —
+        // `asserting_kind` is the always-present discriminator;
+        // richer payload for reserved variants defers to the slice
+        // that actually emits them). The kind label flows straight
+        // from ActorIdentity so adding new variants later
+        // automatically propagates without touching this match.
+        other => {
             let (asserted_at_ns, trace_sequence, source_event) =
                 resolve_live_assert(trace, key, fact)?;
-            Ok(InspectionDetail::opaque(
+            Ok(InspectionDetail::kind_only(
+                other.kind_label(),
                 source_event,
                 asserted_at_ns,
                 trace_sequence.as_u64(),

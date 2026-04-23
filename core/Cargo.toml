@@ -69,8 +69,24 @@ name = "inspect_inspection_overwrite"
 path = "tests/inspect/inspection_overwrite.rs"
 
 [[test]]
+name = "inspect_structured_always"
+path = "tests/inspect/structured_always.rs"
+
+[[test]]
+name = "inspect_causal_walkback"
+path = "tests/inspect/causal_walkback.rs"
+
+[[test]]
+name = "inspect_behavior_authored"
+path = "tests/inspect/behavior_authored.rs"
+
+[[test]]
 name = "property_inspection_invariant"
 path = "tests/property/inspection_invariant.rs"
+
+[[test]]
+name = "property_inspect_identity"
+path = "tests/property/inspect_identity.rs"
 
 # Phase 5 (US3) status CLI tests — spawn `weaver` via CARGO_BIN_EXE.
 [[test]]
