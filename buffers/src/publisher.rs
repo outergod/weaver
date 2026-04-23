@@ -4,12 +4,13 @@
 //! retraction and bus-EOF exit paths.
 //!
 //! Slice 003 builds this out across several commits. The current file
-//! covers C10 (connect + handshake + reader_loop + signal-aware idle),
-//! C11 (service-level + per-buffer bootstrap, with fail-fast rollback
-//! on open failure), and C12 (poll loop + edge-triggered `buffer/dirty`
-//! and `buffer/observable` transitions + service-level `watcher/status
-//! = degraded` aggregation). Shutdown-retract signalling (T037–T038)
-//! follows in C13.
+//! covers C10 (connect + handshake + reader_loop), C11 (service-level
+//! and per-buffer bootstrap with fail-fast rollback on open failure),
+//! C12 (poll loop with edge-triggered `buffer/dirty` and
+//! `buffer/observable` transitions plus service-level degraded
+//! aggregation), and C13 (clean-shutdown retract on SIGTERM / SIGINT,
+//! bus-EOF classification). The CLI wrapper that invokes [`run`]
+//! lands in C14.
 
 use std::collections::HashSet;
 use std::path::PathBuf;
@@ -105,8 +106,14 @@ pub enum PublisherError {
 ///    retract whatever partial bootstraps we published and return
 ///    [`PublisherError::Observer`] (C11).
 /// 5. Publish `watcher/status=ready` (C11).
-/// 6. Idle on SIGTERM / SIGINT / bus error (C10; C12 lands the poll
-///    loop, C13 lands shutdown-retract).
+/// 6. Poll loop: per-tick per-buffer observation, edge-triggered
+///    `buffer/dirty` / `buffer/observable`, service-level degraded
+///    aggregation (C12).
+/// 7. On SIGTERM / SIGINT: retract every `buffer/*` fact authored,
+///    publish `watcher/status=unavailable` → `stopped`, close cleanly
+///    with exit 0 (C13).
+/// 8. On bus-EOF (core gone) or server-sent fatal errors: abort the
+///    reader task, return the categorised [`PublisherError`] (C13).
 pub async fn run(
     paths: Vec<PathBuf>,
     socket: PathBuf,
@@ -202,14 +209,19 @@ pub async fn run(
         select! {
             _ = ticker.tick() => {}
             _ = wait_signal(&mut sigterm), if sigterm.is_some() => {
-                info!("SIGTERM received; shutting down");
+                info!("SIGTERM received; retracting facts and shutting down");
+                clean_shutdown(&mut writer, watcher_entity, &identity, &mut tracked).await;
                 break 'poll Ok(());
             }
             _ = wait_signal(&mut sigint), if sigint.is_some() => {
-                info!("SIGINT received; shutting down");
+                info!("SIGINT received; retracting facts and shutting down");
+                clean_shutdown(&mut writer, watcher_entity, &identity, &mut tracked).await;
                 break 'poll Ok(());
             }
             maybe_err = err_rx.recv() => {
+                // T038: no retract attempt on bus-EOF — the bus is
+                // gone and any write would fail. Core's
+                // release_connection covers cleanup server-side.
                 break 'poll match maybe_err {
                     Some(err) => Err(translate_server_error(err)),
                     None => Err(bus_closed_error()),
@@ -619,6 +631,31 @@ async fn shutdown_retract(
             })
             .await;
     }
+}
+
+/// Clean shutdown sequence driven by SIGTERM / SIGINT: retract every
+/// tracked `buffer/*` fact, then overwrite `watcher/status` with
+/// `unavailable` → `stopped`. Every write is best-effort — if the bus
+/// dies mid-shutdown the core's `release_connection` covers the gap.
+/// Kept out of the fail-fast open-error path per
+/// `contracts/bus-messages.md §Failure modes`: startup failures
+/// announce via stderr + retract only, no bus-level lifecycle.
+async fn clean_shutdown(
+    writer: &mut BusWriter,
+    watcher_entity: EntityRef,
+    identity: &ActorIdentity,
+    tracked: &mut HashSet<FactKey>,
+) {
+    shutdown_retract(writer, identity, tracked).await;
+    let _ = publish_watcher_status(
+        writer,
+        watcher_entity,
+        identity,
+        LifecycleSignal::Unavailable,
+    )
+    .await;
+    let _ =
+        publish_watcher_status(writer, watcher_entity, identity, LifecycleSignal::Stopped).await;
 }
 
 fn now_ns() -> u64 {
