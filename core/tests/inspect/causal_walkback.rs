@@ -14,8 +14,11 @@
 //!
 //! Reference: `specs/002-git-watcher-actor/tasks.md` T067a.
 
+#[path = "../common/mod.rs"]
+mod common;
+
+use common::StubBehavior;
 use uuid::Uuid;
-use weaver_core::behavior::dirty_tracking::DirtyTrackingBehavior;
 use weaver_core::behavior::dispatcher::{Dispatcher, ServicePublishOutcome};
 use weaver_core::fact_space::FactStore;
 use weaver_core::inspect::inspect_fact;
@@ -73,11 +76,16 @@ fn assert_inspection_structured(
 
 #[tokio::test]
 async fn behavior_chain_walks_back_to_originating_event_with_structured_identity() {
+    let buffer = EntityRef::new(1);
+    let key = FactKey::new(buffer, "buffer/dirty");
+
     let mut dispatcher = Dispatcher::new();
-    dispatcher.register(Box::new(DirtyTrackingBehavior::new()));
+    dispatcher.register(Box::new(StubBehavior::new(
+        key.clone(),
+        FactValue::Bool(true),
+    )));
 
     // Hop 1: TUI-sourced Event → dispatcher.
-    let buffer = EntityRef::new(1);
     let originating_event_id = EventId::new(4242);
     dispatcher
         .process_event(Event {
@@ -89,7 +97,6 @@ async fn behavior_chain_walks_back_to_originating_event_with_structured_identity
         })
         .await;
 
-    let key = FactKey::new(buffer, "buffer/dirty");
     let snapshot = {
         let fs = dispatcher.fact_store();
         let fs = fs.lock().await;
@@ -134,15 +141,21 @@ async fn behavior_chain_walks_back_to_originating_event_with_structured_identity
 
 #[tokio::test]
 async fn multi_kind_chain_preserves_structured_identity_across_service_hop() {
+    let buffer = EntityRef::new(1);
+    let buffer_key = FactKey::new(buffer, "buffer/dirty");
+
     let mut dispatcher = Dispatcher::new();
-    dispatcher.register(Box::new(DirtyTrackingBehavior::new()));
+    dispatcher.register(Box::new(StubBehavior::new(
+        buffer_key.clone(),
+        FactValue::Bool(true),
+    )));
 
     // Behavior-authored hop (as above).
     dispatcher
         .process_event(Event {
             id: EventId::new(11),
             name: "buffer/edited".into(),
-            target: Some(EntityRef::new(1)),
+            target: Some(buffer),
             payload: EventPayload::BufferEdited,
             provenance: Provenance::new(ActorIdentity::Tui, 100, None).unwrap(),
         })
@@ -177,12 +190,7 @@ async fn multi_kind_chain_preserves_structured_identity_across_service_hop() {
     // Both inspection responses must be structured; the kinds
     // must disagree (one behavior, one service) so we know the
     // walkback distinguishes actor kinds at every hop.
-    assert_inspection_structured(
-        &snapshot,
-        &trace,
-        &FactKey::new(EntityRef::new(1), "buffer/dirty"),
-        "behavior",
-    );
+    assert_inspection_structured(&snapshot, &trace, &buffer_key, "behavior");
     assert_inspection_structured(
         &snapshot,
         &trace,

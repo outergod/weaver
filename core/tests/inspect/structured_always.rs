@@ -13,8 +13,11 @@
 //!
 //! Reference: `specs/002-git-watcher-actor/tasks.md` T067.
 
+#[path = "../common/mod.rs"]
+mod common;
+
+use common::StubBehavior;
 use uuid::Uuid;
-use weaver_core::behavior::dirty_tracking::DirtyTrackingBehavior;
 use weaver_core::behavior::dispatcher::{Dispatcher, ServicePublishOutcome};
 use weaver_core::fact_space::FactStore;
 use weaver_core::inspect::inspect_fact;
@@ -73,13 +76,18 @@ fn assert_structured(detail: &InspectionDetail) {
 
 #[tokio::test]
 async fn every_inspection_response_is_structured_across_fact_families() {
+    let buffer_entity = EntityRef::new(1);
+    let buffer_key = FactKey::new(buffer_entity, "buffer/dirty");
+
     let mut dispatcher = Dispatcher::new();
-    dispatcher.register(Box::new(DirtyTrackingBehavior::new()));
+    dispatcher.register(Box::new(StubBehavior::new(
+        buffer_key.clone(),
+        FactValue::Bool(true),
+    )));
 
     // ------------------------------------------------------------
-    // buffer/* — behavior-authored via BufferEdited.
+    // buffer/* — behavior-authored via the stub behavior.
     // ------------------------------------------------------------
-    let buffer_entity = EntityRef::new(1);
     dispatcher
         .process_event(Event {
             id: EventId::new(10),
@@ -137,7 +145,7 @@ async fn every_inspection_response_is_structured_across_fact_families() {
     let trace = trace.lock().await;
 
     for (key, expected_kind) in [
-        (FactKey::new(buffer_entity, "buffer/dirty"), "behavior"),
+        (buffer_key.clone(), "behavior"),
         (FactKey::new(repo_entity, "repo/dirty"), "service"),
         (FactKey::new(watcher_entity, "watcher/status"), "service"),
     ] {

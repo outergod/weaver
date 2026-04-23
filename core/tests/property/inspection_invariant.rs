@@ -5,45 +5,52 @@
 //!
 //! Reference: `specs/001-hello-fact/tasks.md` T051.
 
+#[path = "../common/mod.rs"]
+mod common;
+
+use common::StubBehavior;
 use proptest::prelude::*;
 use tokio::runtime::Builder;
 
-use weaver_core::behavior::dirty_tracking::DirtyTrackingBehavior;
 use weaver_core::behavior::dispatcher::Dispatcher;
 use weaver_core::fact_space::FactStore;
 use weaver_core::inspect::inspect_fact;
 use weaver_core::provenance::{ActorIdentity, Provenance};
 use weaver_core::types::entity_ref::EntityRef;
 use weaver_core::types::event::{Event, EventPayload};
-use weaver_core::types::fact::FactKey;
+use weaver_core::types::fact::{FactKey, FactValue};
 use weaver_core::types::ids::EventId;
 
-/// Returns `Some(trace_sequence)` if the inspection succeeds and the
-/// invariants hold; `None` if the property should not have applied
-/// (empty fact-space after the event sequence).
-fn run(events: &[bool]) -> Option<(String, u64, usize)> {
+/// Run `event_count` events through a dispatcher registered with
+/// `StubBehavior`. Every event triggers the stub (which unconditionally
+/// re-asserts the target fact), so the fact is guaranteed present at
+/// the end for `event_count >= 1`. Returns the inspection detail's
+/// `asserting_behavior` string + `trace_sequence` + `trace.len()`.
+fn run(event_count: usize) -> Option<(String, u64, usize)> {
     let rt = Builder::new_current_thread().enable_all().build().unwrap();
     rt.block_on(async {
-        let mut d = Dispatcher::new();
-        d.register(Box::new(DirtyTrackingBehavior::new()));
         let entity = EntityRef::new(1);
-        for (i, &edit) in events.iter().enumerate() {
+        let key = FactKey::new(entity, "buffer/dirty");
+
+        let mut d = Dispatcher::new();
+        d.register(Box::new(StubBehavior::new(
+            key.clone(),
+            FactValue::Bool(true),
+        )));
+
+        for i in 0..event_count {
             let id = EventId::new((i as u64) + 1);
-            let (name, payload) = if edit {
-                ("buffer/edited", EventPayload::BufferEdited)
-            } else {
-                ("buffer/cleaned", EventPayload::BufferCleaned)
-            };
             d.process_event(Event {
                 id,
-                name: name.into(),
+                name: "buffer/edited".into(),
                 target: Some(entity),
-                payload,
+                payload: EventPayload::BufferEdited,
                 provenance: Provenance::new(ActorIdentity::Tui, (i as u64 + 1) * 1_000, None)
                     .unwrap(),
             })
             .await;
         }
+
         let snapshot = {
             let fs = d.fact_store();
             let fs = fs.lock().await;
@@ -51,12 +58,9 @@ fn run(events: &[bool]) -> Option<(String, u64, usize)> {
         };
         let trace = d.trace();
         let trace = trace.lock().await;
-        let key = FactKey::new(entity, "buffer/dirty");
+
         match inspect_fact(&snapshot, &trace, &key) {
             Ok(detail) => Some((
-                // Slice 002: asserting_behavior is Option<BehaviorId>;
-                // this property tests the dirty-tracking behavior path
-                // so expect Some(_) for asserted facts.
                 detail
                     .asserting_behavior
                     .as_ref()
@@ -71,27 +75,22 @@ fn run(events: &[bool]) -> Option<(String, u64, usize)> {
 }
 
 proptest! {
+    /// For any non-empty event sequence, the stub behavior re-asserts
+    /// the target fact on every fire, so inspection must return
+    /// `Ok(InspectionDetail)` with a non-empty `asserting_behavior`
+    /// and a `trace_sequence` within the trace log.
     #[test]
-    fn asserted_fact_always_yields_non_empty_provenance(
-        // Guarantee at least one BufferEdited so the final state is likely
-        // to have the fact asserted (last_event parity controls it).
-        events in proptest::collection::vec(any::<bool>(), 1..10),
-    ) {
-        // Use the parity invariant: if the last event is BufferEdited,
-        // the fact is asserted; we must see Ok.
-        let last_edits = events.last().copied().unwrap_or(false);
-        let outcome = run(&events);
-        match (last_edits, outcome) {
-            (true, Some((behavior, seq, trace_len))) => {
+    fn asserted_fact_always_yields_non_empty_provenance(event_count in 1usize..10) {
+        let outcome = run(event_count);
+        match outcome {
+            Some((behavior, seq, trace_len)) => {
                 prop_assert!(!behavior.is_empty(), "asserting_behavior must be non-empty");
                 prop_assert!(
                     (seq as usize) < trace_len,
                     "trace_sequence {seq} must index < trace_len {trace_len}",
                 );
             }
-            (true, None) => prop_assert!(false, "last-event-edit should leave fact asserted"),
-            (false, Some(_)) => prop_assert!(false, "last-event-clean should leave fact absent"),
-            (false, None) => {}
+            None => prop_assert!(false, "event sequence must leave the target fact asserted"),
         }
     }
 }

@@ -5,22 +5,30 @@
 //!
 //! Reference: `specs/001-hello-fact/tasks.md` T049.
 
-use weaver_core::behavior::dirty_tracking::DirtyTrackingBehavior;
+#[path = "../common/mod.rs"]
+mod common;
+
+use common::StubBehavior;
 use weaver_core::behavior::dispatcher::Dispatcher;
 use weaver_core::fact_space::FactStore;
 use weaver_core::inspect::inspect_fact;
 use weaver_core::provenance::{ActorIdentity, Provenance};
 use weaver_core::types::entity_ref::EntityRef;
 use weaver_core::types::event::{Event, EventPayload};
-use weaver_core::types::fact::FactKey;
+use weaver_core::types::fact::{FactKey, FactValue};
 use weaver_core::types::ids::{BehaviorId, EventId};
 
 #[tokio::test]
 async fn asserted_fact_is_inspectable_with_full_provenance() {
-    let mut dispatcher = Dispatcher::new();
-    dispatcher.register(Box::new(DirtyTrackingBehavior::new()));
-
     let entity = EntityRef::new(1);
+    let key = FactKey::new(entity, "buffer/dirty");
+
+    let mut dispatcher = Dispatcher::new();
+    dispatcher.register(Box::new(StubBehavior::new(
+        key.clone(),
+        FactValue::Bool(true),
+    )));
+
     let event_id = EventId::new(42);
     dispatcher
         .process_event(Event {
@@ -31,8 +39,6 @@ async fn asserted_fact_is_inspectable_with_full_provenance() {
             provenance: Provenance::new(ActorIdentity::Tui, 100, None).unwrap(),
         })
         .await;
-
-    let key = FactKey::new(entity, "buffer/dirty");
 
     let snapshot = {
         let fs = dispatcher.fact_store();
@@ -46,7 +52,7 @@ async fn asserted_fact_is_inspectable_with_full_provenance() {
     assert_eq!(detail.source_event, event_id);
     assert_eq!(
         detail.asserting_behavior,
-        Some(BehaviorId::new("core/dirty-tracking")),
+        Some(BehaviorId::new(StubBehavior::ID)),
     );
     // Slice 002: service/instance fields are absent for behavior-authored facts.
     assert!(detail.asserting_service.is_none());
