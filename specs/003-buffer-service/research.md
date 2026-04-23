@@ -64,7 +64,7 @@ Phase 0 decisions. Each entry resolves an implementation-level question that the
 
 ## 5. E2e fixture approach
 
-**Decision**: Use the `tempfile` crate (already dev-transitive via `proptest`) to create temporary directories and files per e2e test. Each test owns its `TempDir`; fixture lifetime is bound to the test's `ChildGuard` scope (inherited pattern from slice 002). Paths pass through a `tempdir.path().join("<name>")` and get canonicalized by the service at startup.
+**Decision**: Use the `tempfile` crate (already declared as `tempfile = "3"` in the workspace root `Cargo.toml`, consumed by slice-002 crates via `tempfile.workspace = true` in `git-watcher/Cargo.toml` and `tests/Cargo.toml`) to create temporary directories and files per e2e test. The slice-003 `buffers/Cargo.toml` MUST inherit it the same way under `[dev-dependencies]`. Each test owns its `TempDir`; fixture lifetime is bound to the test's `ChildGuard` scope (inherited pattern from slice 002). Paths pass through a `tempdir.path().join("<name>")` and get canonicalized by the service at startup.
 
 **Rationale**:
 

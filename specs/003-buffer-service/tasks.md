@@ -26,7 +26,7 @@ description: "Task list for Slice 003 — Buffer Service implementation"
 
 - [ ] T001 Add `buffers` to the `members` list in the workspace `Cargo.toml`
 - [ ] T002 [P] Add `sha2` to `[workspace.dependencies]` in the workspace `Cargo.toml`, pinned to a minor version per `research.md §1`
-- [ ] T003 [P] Create `buffers/Cargo.toml` declaring the `weaver-buffers` binary, `license.workspace = true`, and dependencies (`tokio`, `clap` with `derive`, `miette`, `thiserror`, `tracing`, `tracing-subscriber`, `uuid`, `sha2`, `humantime`, `serde`, `ciborium`, path dep on `weaver-core`)
+- [ ] T003 [P] Create `buffers/Cargo.toml` declaring the `weaver-buffers` binary, `license.workspace = true`, runtime dependencies (`tokio`, `clap` with `derive`, `miette`, `thiserror`, `tracing`, `tracing-subscriber`, `uuid`, `sha2`, `humantime`, `serde`, `ciborium`, path dep on `weaver-core`), and `[dev-dependencies]` with `tempfile.workspace = true` + `proptest.workspace = true` (A2 fix from `/speckit-analyze`: `tempfile` is already a workspace dep — slice 002 uses it via `git-watcher` and `tests/` — but must be inherited explicitly by this crate)
 - [ ] T004 [P] Create `buffers/src/main.rs` with a clap stub that prints a Phase-1 marker (`"weaver-buffers (slice 003 scaffold)"`) and exits
 - [ ] T005 [P] Create `buffers/src/lib.rs` with module declarations for `model`, `observer`, `publisher` (each module stubbed with `// TODO: slice 003` comment)
 - [ ] T006 [P] Create `buffers/README.md` — role (content-backed service), usage snippet, link to `specs/003-buffer-service/spec.md` and `plan.md`
@@ -124,7 +124,7 @@ description: "Task list for Slice 003 — Buffer Service implementation"
 
 - [ ] T043 [US1] {surface:cli} Add `FamilyPrefix("buffer/")` to the TUI's subscription set in `tui/src/client.rs` (alongside the existing `buffer/` subscription only if still needed — actually pre-slice-003 the TUI subscribed to slice 001's `buffer/dirty`, so this refinement may be only re-phrasing; verify the concrete change)
 - [ ] T044 [US1] {surface:cli} Add the Buffers render section to `tui/src/render.rs` below the existing Repositories section: one row per buffer entity, rendering `<path> [<bytes> bytes] <dirty-badge>` plus the authoring-actor line `by service weaver-buffers (inst <short-uuid>), event <id>, <t>s ago`. Depends on T043. Per `contracts/cli-surfaces.md §Binary: weaver-tui`
-- [ ] T045 [P] [US1] {surface:cli} Implement the `[observability lost]` badge replacement when `buffer/observable=false`; implement the `[stale]` marker when the TUI loses its core subscription (both per `contracts/cli-surfaces.md §Display rules`)
+- [ ] T045 [US1] {surface:cli} In the same `tui/src/render.rs` file introduced by T044, implement the `[observability lost]` badge replacement when `buffer/observable=false` and the `[stale]` marker when the TUI loses its core subscription (both per `contracts/cli-surfaces.md §Display rules`). **Not parallelizable with T044** — same file (A1 fix from `/speckit-analyze`).
 
 ### e2e tests (SC-301, SC-302, SC-303)
 
