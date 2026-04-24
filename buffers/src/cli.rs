@@ -141,7 +141,7 @@ pub fn run() -> Result<(), Report> {
     init_tracing(cli.verbose, &cli.output);
 
     let poll_interval = parse_duration(&cli.poll_interval).into_diagnostic()?;
-    let socket = resolve_socket(cli.socket.clone());
+    let socket = weaver_core::cli::config::Config::from_cli(cli.socket.clone()).socket_path;
     let paths = canonicalise_and_dedup(cli.paths.clone());
     assert!(
         !paths.is_empty(),
@@ -272,19 +272,6 @@ fn canonicalise_and_dedup(paths: Vec<PathBuf>) -> Vec<PathBuf> {
     out
 }
 
-/// Resolve the socket path: explicit `--socket` wins, else the
-/// XDG/`/tmp` default. (`WEAVER_SOCKET` env is consumed by clap's
-/// `env =` attribute and surfaces as `cli.socket == Some(...)`.)
-fn resolve_socket(explicit: Option<PathBuf>) -> PathBuf {
-    if let Some(p) = explicit {
-        return p;
-    }
-    if let Ok(runtime_dir) = std::env::var("XDG_RUNTIME_DIR") {
-        return std::path::Path::new(&runtime_dir).join("weaver.sock");
-    }
-    PathBuf::from("/tmp/weaver.sock")
-}
-
 fn init_tracing(verbose: u8, output: &str) {
     use tracing_subscriber::filter::EnvFilter;
     use tracing_subscriber::fmt;
@@ -393,12 +380,6 @@ mod tests {
             let code = diag.code().map(|c| c.to_string()).unwrap_or_default();
             assert_eq!(code, expected, "diagnostic code drift: {diag:?}");
         }
-    }
-
-    #[test]
-    fn resolve_socket_prefers_explicit() {
-        let p = PathBuf::from("/tmp/custom.sock");
-        assert_eq!(resolve_socket(Some(p.clone())), p);
     }
 
     #[test]

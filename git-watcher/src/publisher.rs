@@ -51,15 +51,6 @@ impl BusWriter {
     }
 }
 
-/// Default bus socket path, matching the core's `cli::config::Config`
-/// default. Overridable via `--socket` on the watcher CLI.
-fn default_socket() -> PathBuf {
-    if let Ok(runtime_dir) = std::env::var("XDG_RUNTIME_DIR") {
-        return Path::new(&runtime_dir).join("weaver.sock");
-    }
-    PathBuf::from("/tmp/weaver.sock")
-}
-
 #[derive(Debug, Error)]
 pub enum PublisherError {
     #[error("bus unavailable: {source}")]
@@ -93,7 +84,7 @@ pub async fn run(
     socket_override: Option<PathBuf>,
     poll_interval: Duration,
 ) -> Result<(), PublisherError> {
-    let socket = socket_override.unwrap_or_else(default_socket);
+    let socket = weaver_core::cli::config::Config::from_cli(socket_override).socket_path;
     let identity =
         ActorIdentity::service("git-watcher", Uuid::new_v4()).expect("kebab-case service-id");
     let instance_id = match &identity {

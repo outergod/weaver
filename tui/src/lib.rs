@@ -28,7 +28,7 @@ pub fn run() -> miette::Result<()> {
         .into_diagnostic()?;
 
     runtime.block_on(async move {
-        let socket = cli.socket.unwrap_or_else(default_socket_path);
+        let socket = weaver_core::cli::config::Config::from_cli(cli.socket).socket_path;
         render::run(socket).await
     })
 }
@@ -41,12 +41,4 @@ fn print_version(_no_color: bool) {
         "  bus protocol: v{}",
         weaver_core::types::message::BUS_PROTOCOL_VERSION_STR
     );
-}
-
-fn default_socket_path() -> std::path::PathBuf {
-    if let Ok(xdg) = std::env::var("XDG_RUNTIME_DIR") {
-        std::path::Path::new(&xdg).join("weaver.sock")
-    } else {
-        std::path::PathBuf::from("/tmp/weaver.sock")
-    }
 }
