@@ -15,14 +15,17 @@
 //!
 //! Invariants pinned here:
 //!
-//! 1. Exactly four facts: `buffer/path`, `buffer/byte-size`,
-//!    `buffer/dirty`, `buffer/observable`. No duplicates, no extras.
+//! 1. Exactly five facts: `buffer/path`, `buffer/byte-size`,
+//!    `buffer/dirty`, `buffer/observable`, `buffer/version`. No
+//!    duplicates, no extras.
 //! 2. Variant discipline: every value is `String | U64 | Bool`.
 //! 3. Attribute→type map:
 //!    - `buffer/path` → `String` equal to `path.display().to_string()`.
 //!    - `buffer/byte-size` → `U64` equal to `content.len() as u64`.
 //!    - `buffer/dirty` → `Bool(false)` (bootstrap is clean).
 //!    - `buffer/observable` → `Bool(true)` (bootstrap is observable).
+//!    - `buffer/version` → `U64(0)` (bootstrap applied-edit counter
+//!      starts at 0; slice 004+ bumps on each accepted edit).
 //! 4. No content leakage: the `buffer/path` String value is not the
 //!    file's content. FR-002a is the defining invariant this guards.
 
@@ -46,8 +49,8 @@ proptest! {
         let state = BufferState::open(canonical.clone()).expect("open canonical tempfile");
         let facts = buffer_bootstrap_facts(&state);
 
-        // (1) Four distinct attributes, alphabetically.
-        prop_assert_eq!(facts.len(), 4);
+        // (1) Five distinct attributes, alphabetically.
+        prop_assert_eq!(facts.len(), 5);
         let mut attrs: Vec<&str> = facts.iter().map(|(a, _)| *a).collect();
         attrs.sort();
         prop_assert_eq!(
@@ -57,6 +60,7 @@ proptest! {
                 "buffer/dirty",
                 "buffer/observable",
                 "buffer/path",
+                "buffer/version",
             ],
         );
 
@@ -110,6 +114,13 @@ proptest! {
                         continue;
                     };
                     prop_assert!(*b, "bootstrap buffer/observable is always true");
+                }
+                "buffer/version" => {
+                    let FactValue::U64(n) = value else {
+                        prop_assert!(false, "buffer/version must be a U64");
+                        continue;
+                    };
+                    prop_assert_eq!(*n, 0u64, "bootstrap buffer/version is always 0");
                 }
                 other => prop_assert!(false, "unknown attribute {other}"),
             }

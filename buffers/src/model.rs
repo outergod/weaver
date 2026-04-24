@@ -216,7 +216,7 @@ pub struct BufferObservation {
     pub observable: bool,
 }
 
-/// The full bootstrap fact set for one opened buffer — the four
+/// The full bootstrap fact set for one opened buffer — the five
 /// `(attribute, FactValue)` tuples the publisher emits once per file
 /// before entering the poll loop.
 ///
@@ -230,11 +230,17 @@ pub struct BufferObservation {
 /// - `buffer/byte-size`  → `U64`    (byte length of in-memory content)
 /// - `buffer/dirty`      → `Bool`   (false at bootstrap)
 /// - `buffer/observable` → `Bool`   (true at bootstrap)
+/// - `buffer/version`    → `U64`    (applied-edit counter, 0 at
+///   bootstrap; bumped by each accepted `EventPayload::BufferEdit`
+///   in slice 004+; used to gate concurrent-edit conflict detection
+///   when a stale edit references a pre-edit version. Present now
+///   as forward-compat so slice 004 doesn't have to BREAKING-bump
+///   the fact-family set.)
 ///
 /// The publisher calls this from its bootstrap path so the invariant
 /// is single-sourced; the `buffers/tests/component_discipline.rs`
 /// proptest (T062) exercises the same seam under arbitrary content.
-pub fn buffer_bootstrap_facts(state: &BufferState) -> [(&'static str, FactValue); 4] {
+pub fn buffer_bootstrap_facts(state: &BufferState) -> [(&'static str, FactValue); 5] {
     [
         (
             "buffer/path",
@@ -243,6 +249,7 @@ pub fn buffer_bootstrap_facts(state: &BufferState) -> [(&'static str, FactValue)
         ("buffer/byte-size", FactValue::U64(state.byte_size())),
         ("buffer/dirty", FactValue::Bool(false)),
         ("buffer/observable", FactValue::Bool(true)),
+        ("buffer/version", FactValue::U64(0)),
     ]
 }
 
