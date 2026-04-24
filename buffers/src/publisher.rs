@@ -13,7 +13,7 @@
 //! lands in C14.
 
 use std::collections::HashSet;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use thiserror::Error;
@@ -33,7 +33,7 @@ use weaver_core::types::fact::{Fact, FactKey, FactValue};
 use weaver_core::types::ids::EventId;
 use weaver_core::types::message::{BusMessage, LifecycleSignal};
 
-use crate::model::{BufferState, ObserverError, watcher_instance_entity_ref};
+use crate::model::{BufferState, ObserverError, buffer_entity_ref, watcher_instance_entity_ref};
 use crate::observer;
 
 /// Kebab-case service-id used in Hello / ActorIdentity / inspect
@@ -53,6 +53,70 @@ impl BusWriter {
         write_message(&mut self.writer, msg).await?;
         Ok(())
     }
+}
+
+/// Set of buffer entities currently owned by this service instance.
+///
+/// Drives the FR-011a idempotence invariant: when a `BufferOpen`
+/// event names a path whose derived entity is already in the
+/// registry, the dispatch handler short-circuits to a no-op — no
+/// re-read of the file, no fact re-publication, no trace emission.
+///
+/// Slice 003's CLI bootstrap calls [`dispatch_buffer_open`] per
+/// deduped path, so the registry is populated as part of the hot
+/// path; the "already-owned" branch is unreachable under slice-003
+/// argv (T055's canonicalisation+dedup at parse time collapses
+/// duplicates upstream). Slice 004+ external producers that emit
+/// `BufferOpen` over the wire will exercise the branch for real.
+#[derive(Default)]
+pub(crate) struct BufferRegistry {
+    owned: HashSet<EntityRef>,
+}
+
+impl BufferRegistry {
+    pub(crate) fn is_owned(&self, entity: EntityRef) -> bool {
+        self.owned.contains(&entity)
+    }
+
+    pub(crate) fn mark_owned(&mut self, entity: EntityRef) {
+        self.owned.insert(entity);
+    }
+}
+
+/// Outcome of dispatching a `BufferOpen` for a given canonical
+/// path. The caller decides what to do with each variant; the
+/// idempotence invariant lives in the handler, not the caller.
+#[derive(Debug)]
+pub(crate) enum BufferOpenOutcome {
+    /// First sighting — caller MUST publish the 4-fact bootstrap
+    /// and [`BufferRegistry::mark_owned`] the returned state's
+    /// entity so subsequent dispatches short-circuit.
+    Fresh(BufferState),
+    /// Entity already owned. Caller MUST NOT publish or retract
+    /// anything — FR-011a.
+    AlreadyOwned,
+}
+
+/// Handler for a single `BufferOpen` event: decides fresh-vs-
+/// already-owned and, when fresh, opens the file. Kept as a
+/// pure-ish function (no bus writes, no tracing beyond the
+/// `AlreadyOwned` debug line) so the unit test can exercise
+/// idempotence without a mock writer.
+pub(crate) fn dispatch_buffer_open(
+    registry: &BufferRegistry,
+    path: &Path,
+) -> Result<BufferOpenOutcome, ObserverError> {
+    let entity = buffer_entity_ref(path);
+    if registry.is_owned(entity) {
+        debug!(
+            entity = %entity.as_u64(),
+            path = %path.display(),
+            "BufferOpen for already-owned entity; no-op per FR-011a",
+        );
+        return Ok(BufferOpenOutcome::AlreadyOwned);
+    }
+    let state = BufferState::open(path.to_path_buf())?;
+    Ok(BufferOpenOutcome::Fresh(state))
 }
 
 #[derive(Debug, Error)]
@@ -374,6 +438,13 @@ async fn poll_tick_per_buffer(
 /// (C12) can consume them. On first open failure, surfaces a
 /// [`PublisherError::Observer`]; the caller handles retraction of
 /// whatever was already published.
+///
+/// Routes every path through [`dispatch_buffer_open`] so the CLI hot
+/// path and any future (slice 004+) wire-driven `BufferOpen` handler
+/// share the same idempotence invariant. T055's CLI-side dedup makes
+/// the `AlreadyOwned` branch unreachable under slice-003 argv, but
+/// threading the registry here keeps it authoritative if a wire-side
+/// handler ever joins the same publisher instance.
 async fn open_and_bootstrap_all(
     writer: &mut BusWriter,
     identity: &ActorIdentity,
@@ -381,17 +452,27 @@ async fn open_and_bootstrap_all(
     tracked: &mut HashSet<FactKey>,
 ) -> Result<Vec<BufferState>, PublisherError> {
     let mut states = Vec::with_capacity(paths.len());
+    let mut registry = BufferRegistry::default();
     for (idx, path) in paths.iter().enumerate() {
-        let state = match BufferState::open(path.clone()) {
-            Ok(s) => s,
-            Err(e) => {
+        let outcome = match dispatch_buffer_open(&registry, path) {
+            Ok(o) => o,
+            Err(source) => {
                 warn!(
                     path = %path.display(),
-                    error = %e,
+                    error = %source,
                     tracked_facts = tracked.len(),
                     "buffer open failed; aborting bootstrap",
                 );
-                return Err(PublisherError::Observer { source: e });
+                return Err(PublisherError::Observer { source });
+            }
+        };
+        let state = match outcome {
+            BufferOpenOutcome::Fresh(s) => s,
+            BufferOpenOutcome::AlreadyOwned => {
+                // Unreachable under slice-003 argv (T055 dedups
+                // upstream). If a future caller triggers this, FR-011a
+                // demands a silent skip — no re-bootstrap, no retract.
+                continue;
             }
         };
         // Per-buffer synthesised bootstrap-tick EventId. Deterministic:
@@ -399,6 +480,7 @@ async fn open_and_bootstrap_all(
         // Research §8 + data-model §Bootstrap sequence step 3b.
         let bootstrap_tick = EventId::new(idx as u64);
         publish_buffer_bootstrap(writer, identity, &state, tracked, bootstrap_tick).await?;
+        registry.mark_owned(state.entity());
         states.push(state);
     }
     Ok(states)
@@ -732,6 +814,58 @@ mod tests {
     fn bus_closed_error_surfaces_as_bus_unavailable() {
         let err = bus_closed_error();
         assert!(matches!(err, PublisherError::BusUnavailable { .. }));
+    }
+
+    #[test]
+    fn dispatch_buffer_open_is_noop_for_already_owned_entity() {
+        use std::io::Write;
+        // FR-011a: a second `BufferOpen` for a canonical path whose
+        // derived entity is already owned must short-circuit to a
+        // no-op. The handler surfaces this by returning the
+        // `AlreadyOwned` variant — carrying no `BufferState`, which
+        // means a disciplined caller has nothing to publish or
+        // retract. That's the "fires no FactAssert / FactRetract"
+        // contract T057 asserts, demonstrated without a mock writer.
+        let mut f = tempfile::NamedTempFile::new().expect("tempfile");
+        f.write_all(b"slice-003 idempotence fixture\n")
+            .expect("write");
+        let canonical = std::fs::canonicalize(f.path()).expect("canonicalize");
+
+        let mut registry = BufferRegistry::default();
+
+        // First dispatch: fresh. Caller (the bootstrap loop) would
+        // publish the 4-fact bootstrap and mark_owned the entity.
+        let first =
+            dispatch_buffer_open(&registry, &canonical).expect("first dispatch must succeed");
+        let state = match first {
+            BufferOpenOutcome::Fresh(s) => s,
+            BufferOpenOutcome::AlreadyOwned => panic!("first dispatch must be Fresh"),
+        };
+        assert_eq!(state.path(), canonical.as_path());
+        registry.mark_owned(state.entity());
+
+        // Second dispatch on the same canonical path: registry hit,
+        // so the handler returns AlreadyOwned and performs no file
+        // I/O beyond the registry lookup.
+        let second =
+            dispatch_buffer_open(&registry, &canonical).expect("second dispatch must succeed");
+        match second {
+            BufferOpenOutcome::AlreadyOwned => {}
+            BufferOpenOutcome::Fresh(_) => {
+                panic!("second dispatch on already-owned entity must be AlreadyOwned (FR-011a)")
+            }
+        }
+    }
+
+    #[test]
+    fn dispatch_buffer_open_passes_observer_errors_through() {
+        // A missing path must surface as `ObserverError::StartupFailure`
+        // rather than being masked by the registry short-circuit.
+        let registry = BufferRegistry::default();
+        let missing = std::path::PathBuf::from("/definitely/not/a/real/path/weaver-dispatch-test");
+        let err =
+            dispatch_buffer_open(&registry, &missing).expect_err("missing path must fail the open");
+        assert!(matches!(err, ObserverError::StartupFailure { .. }));
     }
 
     #[test]
