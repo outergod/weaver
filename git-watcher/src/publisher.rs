@@ -159,6 +159,40 @@ pub async fn run(
         &mut tracked,
     )
     .await?;
+    // Fail-fast bootstrap drain: authority-conflict rejections come
+    // back asynchronously on `err_rx`, so a losing instance whose
+    // bootstrap writer.send() returned Ok (kernel buffered the
+    // frame) would otherwise publish `watcher/status=ready` before
+    // the core's rejection was consumed — leaving subscribers with a
+    // brief "ready" lifecycle signal from a doomed instance. Drain
+    // BEFORE publishing Ready so the signal means "bootstrap facts
+    // accepted", not merely "wire writes returned Ok".
+    //
+    // Three outcomes:
+    //   - Clean timeout       -> proceed to Ready.
+    //   - Async server error  -> translate + retract + exit.
+    //   - Channel closed      -> reader_task exited (bus EOF);
+    //                            retract what we tracked and surface
+    //                            BusUnavailable for exit code 2.
+    match tokio::time::timeout(Duration::from_millis(250), err_rx.recv()).await {
+        Err(_elapsed) => {}
+        Ok(Some(err)) => {
+            shutdown_retract(&mut writer, &identity, &mut tracked).await;
+            reader_task.abort();
+            return Err(translate_server_error(err));
+        }
+        Ok(None) => {
+            shutdown_retract(&mut writer, &identity, &mut tracked).await;
+            reader_task.abort();
+            return Err(PublisherError::BusUnavailable {
+                source: ClientError::Codec(CodecError::Io(std::io::Error::new(
+                    std::io::ErrorKind::UnexpectedEof,
+                    "bus connection closed during bootstrap",
+                ))),
+            });
+        }
+    }
+
     publish_watcher_status(
         &mut writer,
         watcher_entity,
@@ -172,19 +206,6 @@ pub async fn run(
         "initial bootstrap complete; entering poll loop"
     );
     last = Some(initial);
-
-    // Fail-fast bootstrap check: if the core rejected any of our
-    // bootstrap FactAsserts with an authority-conflict, the reader
-    // task will have queued a `ServerSentError`. A brief wait here
-    // surfaces the conflict before we enter the poll loop — so w2
-    // exits immediately with code 3 instead of looping silently.
-    if let Ok(Ok(err)) = tokio::time::timeout(Duration::from_millis(250), err_rx.recv())
-        .await
-        .map(|opt| opt.ok_or(()))
-    {
-        reader_task.abort();
-        return Err(translate_server_error(err));
-    }
 
     // Signal handlers for clean shutdown.
     let mut sigterm = signal(SignalKind::terminate()).ok();
