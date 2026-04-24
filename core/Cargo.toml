@@ -92,5 +92,9 @@ name = "property_provenance_wire"
 path = "tests/property/provenance_wire.rs"
 
 [[test]]
+name = "property_factvalue_u64_roundtrip"
+path = "tests/property/factvalue_u64_roundtrip.rs"
+
+[[test]]
 name = "cli_version_timing"
 path = "tests/cli/version_timing.rs"
