@@ -193,33 +193,33 @@ description: "Task list for Slice 003 — Buffer Service implementation"
 
 ### Property tests
 
-- [ ] T062 [P] Create `buffers/tests/component_discipline.rs`: proptest asserting SC-306 — for any random observation sequence over any random content, every `Fact` the publisher emits satisfies `matches!(fact.value, FactValue::String(_) | FactValue::U64(_) | FactValue::Bool(_))`. No `FactValue::Bytes`, no `FactValue::String` containing the file's content
-- [ ] T063 [P] Create `core/tests/property/factvalue_u64_roundtrip.rs`: proptest asserting `FactValue::U64(n)` round-trips through CBOR and JSON for arbitrary `n in 0..u64::MAX`
-- [ ] T064 [P] Create `buffers/tests/path_canonicalization.rs`: proptest asserting `buffer_entity_ref(canonicalize(p)) == buffer_entity_ref(canonicalize(p))` across arbitrary paths; reserved-bit invariants (bit 61 set, bits 62/63 cleared) hold universally. Covers `data-model.md` validation rules 1–3
+- [X] T062 [P] Create `buffers/tests/component_discipline.rs`: proptest asserting SC-306 — for any random observation sequence over any random content, every `Fact` the publisher emits satisfies `matches!(fact.value, FactValue::String(_) | FactValue::U64(_) | FactValue::Bool(_))`. No `FactValue::Bytes`, no `FactValue::String` containing the file's content
+- [X] T063 [P] Create `core/tests/property/factvalue_u64_roundtrip.rs`: proptest asserting `FactValue::U64(n)` round-trips through CBOR and JSON for arbitrary `n in 0..u64::MAX`
+- [X] T064 [P] Create `buffers/tests/path_canonicalization.rs`: proptest asserting `buffer_entity_ref(canonicalize(p)) == buffer_entity_ref(canonicalize(p))` across arbitrary paths; reserved-bit invariants (bit 61 set, bits 62/63 cleared) hold universally. Covers `data-model.md` validation rules 1–3
 
 ### CHANGELOG body
 
-- [ ] T065 {surface:bus} {surface:cli} {schema-migration} Fill in the `CHANGELOG.md` `[Unreleased] — slice 003 Phase 2` body: enumerate the bus-protocol changes (event removals, event addition, FactValue::U64, Hello bump), fact-family additions with initial schemas 0.1.0, CLI MAJOR removals (simulate-edit, simulate-clean), new `weaver-buffers` binary at 0.1.0. Match the slice-002 CHANGELOG entry style. Include a migration note for the slice-001 test transformation
+- [X] T065 {surface:bus} {surface:cli} {schema-migration} Fill in the `CHANGELOG.md` `[Unreleased] — slice 003 Phase 2` body: enumerate the bus-protocol changes (event removals, event addition, FactValue::U64, Hello bump), fact-family additions with initial schemas 0.1.0, CLI MAJOR removals (simulate-edit, simulate-clean), new `weaver-buffers` binary at 0.1.0. Match the slice-002 CHANGELOG entry style. Include a migration note for the slice-001 test transformation
 
 ### Documentation
 
-- [ ] T066 [P] Update `docs/repository-layout.md` (if present) to mention the new `buffers/` workspace member; confirm `docs/01-system-model.md §2.4` cross-references this slice as the first component-authority instantiation (no edit required if the cross-reference is symmetric); confirm `docs/07-open-questions.md §26` still reads as intended
+- [X] T066 [P] Update `docs/repository-layout.md` (if present) to mention the new `buffers/` workspace member; confirm `docs/01-system-model.md §2.4` cross-references this slice as the first component-authority instantiation (no edit required if the cross-reference is symmetric); confirm `docs/07-open-questions.md §26` still reads as intended
 
 ### Agent / assistant context
 
-- [ ] T067 [P] Verify `CLAUDE.md` SPECKIT block points at slice 003's plan (already done during plan phase; this task is a sanity check after all edits have landed)
+- [X] T067 [P] Verify `CLAUDE.md` SPECKIT block points at slice 003's plan (already done during plan phase; this task is a sanity check after all edits have landed)
 
 ### Manual validation
 
-- [ ] T068 Run the `quickstart.md` walkthrough by hand end-to-end; verify SC-301 through SC-307 each pass their described criteria. Cross-check the pre-commit hook runs green on any ad-hoc uncommitted state. Report any drift between what the walkthrough claims and what the running system does in a follow-up commit
+- [X] T068 Run the `quickstart.md` walkthrough by hand end-to-end; verify SC-301 through SC-307 each pass their described criteria. Cross-check the pre-commit hook runs green on any ad-hoc uncommitted state. Report any drift between what the walkthrough claims and what the running system does in a follow-up commit
 
 ### Version-timing check
 
-- [ ] T069 [P] Ensure `weaver-buffers --version` median wall-clock time is ≤ 50 ms (matching slice 001's `weaver --version` budget from T075 of slice 001). Add a `core/tests/cli/weaver_buffers_version_timing.rs` benchmark that runs 5 `--version` invocations and asserts median ≤ 50 ms. Prints min/median/max to stderr for diagnostic visibility
+- [X] T069 [P] Ensure `weaver-buffers --version` median wall-clock time is ≤ 50 ms (matching slice 001's `weaver --version` budget from T075 of slice 001). Add a `core/tests/cli/weaver_buffers_version_timing.rs` benchmark that runs 5 `--version` invocations and asserts median ≤ 50 ms. Prints min/median/max to stderr for diagnostic visibility
 
 ### CI verification
 
-- [ ] T070 Run `scripts/ci.sh` end-to-end on the 003-buffer-service branch: clippy green on all crates including `buffers/`; rustfmt check green; full workspace test suite green; slice-001 transformed e2e tests green; all new slice-003 e2e tests green. This is the final gate before PR
+- [X] T070 Run `scripts/ci.sh` end-to-end on the 003-buffer-service branch: clippy green on all crates including `buffers/`; rustfmt check green; full workspace test suite green; slice-001 transformed e2e tests green; all new slice-003 e2e tests green. This is the final gate before PR
 
 ---
 
