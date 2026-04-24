@@ -29,6 +29,7 @@ use weaver_core::bus::client::{Client, ClientError};
 use weaver_core::bus::codec::{CodecError, read_message, write_message};
 use weaver_core::provenance::{ActorIdentity, Provenance};
 use weaver_core::types::entity_ref::EntityRef;
+use weaver_core::types::event::{Event, EventPayload};
 use weaver_core::types::fact::{Fact, FactKey, FactValue};
 use weaver_core::types::ids::EventId;
 use weaver_core::types::message::{BusMessage, LifecycleSignal};
@@ -481,12 +482,57 @@ async fn open_and_bootstrap_all(
         // Per-buffer synthesised bootstrap-tick EventId. Deterministic:
         // the buffer's index in the (already de-duplicated) CLI order.
         // Research §8 + data-model §Bootstrap sequence step 3b.
+        //
+        // Register the event on the trace BEFORE the bootstrap facts
+        // so `causal_parent` on those facts resolves to a real event.
+        // Without the event emission, `weaver inspect --why` walkback
+        // terminates at a phantom id and the slice-003
+        // `EventPayload::BufferOpen` variant is effectively never
+        // produced on the bus.
         let bootstrap_tick = EventId::new(idx as u64);
+        publish_buffer_open_event(writer, identity, &state, bootstrap_tick).await?;
         publish_buffer_bootstrap(writer, identity, &state, tracked, bootstrap_tick).await?;
         registry.mark_owned(state.entity());
         states.push(state);
     }
     Ok(states)
+}
+
+/// Publish the `BufferOpen` event that anchors a buffer's bootstrap
+/// fact set. Carries the same [`EventId`] the bootstrap facts will
+/// use as `causal_parent`, so `weaver inspect --why` walkback from
+/// any of those facts lands on this event.
+///
+/// `target` is the buffer entity the open claims; `payload` carries
+/// the canonical path (rendered via `Display`). Provenance is the
+/// service identity at the current wall-clock, with no causal
+/// parent — the open is the origin of the buffer's lifecycle within
+/// this invocation.
+///
+/// Events are lossy-class (no authority check, not tracked for
+/// retraction); shutdown only retracts the bootstrap facts.
+async fn publish_buffer_open_event(
+    writer: &mut BusWriter,
+    identity: &ActorIdentity,
+    state: &BufferState,
+    bootstrap_tick: EventId,
+) -> Result<(), PublisherError> {
+    let prov = Provenance::new(identity.clone(), now_ns(), None)
+        .expect("ActorIdentity is always well-formed");
+    let event = Event {
+        id: bootstrap_tick,
+        name: "buffer/open".into(),
+        target: Some(state.entity()),
+        payload: EventPayload::BufferOpen {
+            path: state.path().display().to_string(),
+        },
+        provenance: prov,
+    };
+    writer
+        .send(&BusMessage::Event(event))
+        .await
+        .map_err(|source| PublisherError::Client { source })?;
+    Ok(())
 }
 
 /// Publish a single buffer's 4-fact bootstrap set — path, byte-size,
