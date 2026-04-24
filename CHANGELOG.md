@@ -14,6 +14,7 @@ Per L2 Principle 7, each public surface carries its own version.
 - **Fact-family schema `buffer/path`** v0.1.0 (slice 003, new) — `FactValue::String` (canonical absolute path). Bootstrap fact asserted once per opened buffer; never updated (path change ≡ entity change). Authored by `weaver-buffers`.
 - **Fact-family schema `buffer/byte-size`** v0.1.0 (slice 003, new) — `FactValue::U64` (the new variant lands under the bus-protocol MAJOR bump). Byte count of the service's in-memory content. Authored by `weaver-buffers`.
 - **Fact-family schema `buffer/observable`** v0.1.0 (slice 003, new) — `FactValue::Bool`. Per-buffer file observability; `false` during transient unreadability, `true` on recovery. Edge-triggered per slice-002 F21. Authored by `weaver-buffers`.
+- **Fact-family schema `buffer/version`** v0.1.0 (slice 003 post-merge, new) — `FactValue::U64`. Per-buffer applied-edit counter; `0` at bootstrap; bumped by each accepted `EventPayload::BufferEdit` in slice 004+. Forward-compat scaffolding so slice 004 doesn't have to BREAKING-expand the bootstrap fact-family set when the edit-versioning handshake lands. Authored by `weaver-buffers`.
 - **Fact-family schema `repo/dirty`** v0.1.0 (slice 002, new) — `FactValue::Bool`; asserted by `weaver-git-watcher` per Clarification Q5 (index-or-working-tree differs from HEAD; untracked-only is clean). See `specs/002-git-watcher-actor/data-model.md`.
 - **Fact-family schema `repo/head-commit`** v0.1.0 (slice 002, new) — `FactValue::String` holding the lowercase hex-encoded object id from `gix::rev_parse_single("HEAD")` — 40 chars for SHA-1 repositories, 64 for SHA-256. Retracted in the `Unborn` state.
 - **Fact-family schema `repo/state/on-branch`** v0.1.0 (slice 002, new) — `FactValue::String` (branch name). Asserted iff HEAD points at `refs/heads/<name>`.
@@ -28,7 +29,16 @@ Per L2 Principle 7, each public surface carries its own version.
 - **CLI surface `weaver-tui`** v0.1.0 — MINOR additive. Slice 003 adds a Buffers render section below the existing Repositories section; no new keybindings. The `e`/`c` simulate-edit/simulate-clean keystrokes are removed (their target events are gone from the protocol); the command bar now shows `Commands: [i]nspect  [q]uit`. (NB: this is keybinding removal, which under `cli-surfaces.md §Versioning policy` is reserved for a future MAJOR — handled here as a slice-coordinated simultaneous removal with the wire variants rather than as a standalone TUI break.)
 - **Configuration schema** v0.1.0 — unchanged.
 
-## [Unreleased] — slice 003 — Buffer Service
+## [Unreleased]
+
+### Added — buffer/version fact family (slice-004 forward-compat)
+
+- **Fact-family schema `buffer/version`** v0.1.0 — `FactValue::U64`. `weaver-buffers` publishes `buffer/version=0` as a fifth bootstrap fact alongside `buffer/path` / `buffer/byte-size` / `buffer/dirty` / `buffer/observable`. No consumer in this change; no edit path in slice 003.
+- Forward-compat motivation: slice 004 introduces `EventPayload::BufferEdit` with an edit-versioning handshake (stale edits referencing a pre-edit version are rejected server-side). Shipping the version field on the bootstrap set now means slice 004 can start bumping the counter on each accepted edit without expanding the bootstrap fact count in the same PR. The `buffers/tests/component_discipline.rs` proptest's attribute→type-map assertion already pins the shape.
+- `buffer_bootstrap_facts` in `buffers/src/model.rs` now returns `[(&'static str, FactValue); 5]` (was `; 4`). `publish_buffer_bootstrap` still iterates via the seam, so the new fact flows to the wire automatically. Retract set in `tests/e2e/buffer_sigkill.rs` updated to the five attributes.
+- Additive across every public surface; no bus-protocol bump (stays `0.3.0`).
+
+## [0.3.0] — 2026-04-24 — slice 003 "Buffer Service"
 
 **Breaking bus-protocol change** — version advances `0.2.0 → 0.3.0`. Slice-002 clients cannot connect to a v0.3.0 core; every in-tree bus client (core, TUI, git-watcher, new `weaver-buffers`, e2e test harness) rebuilds together. CLI `weaver` surface bumps MAJOR for the `simulate-edit` / `simulate-clean` removal. New `weaver-buffers` binary ships at 0.1.0. The slice adds Weaver's first content-backed service and retires the slice-001 embedded `DirtyTrackingBehavior`, leaving `buffer/dirty` authored only by a process on the bus.
 

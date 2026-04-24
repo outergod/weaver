@@ -39,7 +39,7 @@ const SC303_BUDGET: Duration = Duration::from_secs(5);
 /// deeply wrong; the 5 s comparison is still the spec budget.
 const RETRACT_HARD_BUDGET: Duration = Duration::from_secs(10);
 
-/// The four fact attributes the buffer service bootstraps, keyed on
+/// The five fact attributes the buffer service bootstraps, keyed on
 /// the buffer entity. These are what `release_connection` must
 /// retract server-side after SIGKILL.
 const BUFFER_ATTRS: &[&str] = &[
@@ -47,6 +47,7 @@ const BUFFER_ATTRS: &[&str] = &[
     "buffer/byte-size",
     "buffer/dirty",
     "buffer/observable",
+    "buffer/version",
 ];
 
 #[tokio::test]
