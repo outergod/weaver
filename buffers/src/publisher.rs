@@ -33,7 +33,10 @@ use weaver_core::types::fact::{Fact, FactKey, FactValue};
 use weaver_core::types::ids::EventId;
 use weaver_core::types::message::{BusMessage, LifecycleSignal};
 
-use crate::model::{BufferState, ObserverError, buffer_entity_ref, watcher_instance_entity_ref};
+use crate::model::{
+    BufferState, ObserverError, buffer_bootstrap_facts, buffer_entity_ref,
+    watcher_instance_entity_ref,
+};
 use crate::observer;
 
 /// Kebab-case service-id used in Hello / ActorIdentity / inspect
@@ -490,6 +493,11 @@ async fn open_and_bootstrap_all(
 /// dirty=false, observable=true — each carrying `bootstrap_tick` as
 /// `causal_parent` so `why?` walks land on the buffer's own
 /// synthesised boundary.
+///
+/// The `(attribute, FactValue)` tuples come from
+/// [`buffer_bootstrap_facts`]; keeping the map in one place lets the
+/// SC-306 component-discipline proptest (T062) exercise the exact
+/// shape the wire sees.
 async fn publish_buffer_bootstrap(
     writer: &mut BusWriter,
     identity: &ActorIdentity,
@@ -499,42 +507,17 @@ async fn publish_buffer_bootstrap(
 ) -> Result<(), PublisherError> {
     let entity = state.entity();
     let causal = Some(bootstrap_tick);
-    publish_fact(
-        writer,
-        FactKey::new(entity, "buffer/path"),
-        FactValue::String(state.path().display().to_string()),
-        identity,
-        causal,
-        tracked,
-    )
-    .await?;
-    publish_fact(
-        writer,
-        FactKey::new(entity, "buffer/byte-size"),
-        FactValue::U64(state.byte_size()),
-        identity,
-        causal,
-        tracked,
-    )
-    .await?;
-    publish_fact(
-        writer,
-        FactKey::new(entity, "buffer/dirty"),
-        FactValue::Bool(false),
-        identity,
-        causal,
-        tracked,
-    )
-    .await?;
-    publish_fact(
-        writer,
-        FactKey::new(entity, "buffer/observable"),
-        FactValue::Bool(true),
-        identity,
-        causal,
-        tracked,
-    )
-    .await?;
+    for (attribute, value) in buffer_bootstrap_facts(state) {
+        publish_fact(
+            writer,
+            FactKey::new(entity, attribute),
+            value,
+            identity,
+            causal,
+            tracked,
+        )
+        .await?;
+    }
     debug!(entity = %entity.as_u64(), "buffer bootstrap published");
     Ok(())
 }

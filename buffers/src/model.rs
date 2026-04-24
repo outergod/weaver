@@ -20,6 +20,7 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 use uuid::Uuid;
 use weaver_core::types::entity_ref::EntityRef;
+use weaver_core::types::fact::FactValue;
 
 /// Buffer-namespace bit in the derived `EntityRef`. Set on every
 /// buffer entity; distinct from the slice-002 reserved bits 62
@@ -213,6 +214,36 @@ pub struct BufferObservation {
     pub byte_size: u64,
     pub dirty: bool,
     pub observable: bool,
+}
+
+/// The full bootstrap fact set for one opened buffer — the four
+/// `(attribute, FactValue)` tuples the publisher emits once per file
+/// before entering the poll loop.
+///
+/// This is the structural anchor for SC-306 (component discipline):
+/// every value returned here is `FactValue::String`, `FactValue::U64`,
+/// or `FactValue::Bool`; no `FactValue::Bytes` variant is reachable;
+/// `buffer/path` renders the filesystem path, never file content.
+/// The attribute→type map is:
+///
+/// - `buffer/path`       → `String` (canonical path, not file content)
+/// - `buffer/byte-size`  → `U64`    (byte length of in-memory content)
+/// - `buffer/dirty`      → `Bool`   (false at bootstrap)
+/// - `buffer/observable` → `Bool`   (true at bootstrap)
+///
+/// The publisher calls this from its bootstrap path so the invariant
+/// is single-sourced; the `buffers/tests/component_discipline.rs`
+/// proptest (T062) exercises the same seam under arbitrary content.
+pub fn buffer_bootstrap_facts(state: &BufferState) -> [(&'static str, FactValue); 4] {
+    [
+        (
+            "buffer/path",
+            FactValue::String(state.path().display().to_string()),
+        ),
+        ("buffer/byte-size", FactValue::U64(state.byte_size())),
+        ("buffer/dirty", FactValue::Bool(false)),
+        ("buffer/observable", FactValue::Bool(true)),
+    ]
 }
 
 /// Classification of [`ObserverError::StartupFailure`]. Drives the
