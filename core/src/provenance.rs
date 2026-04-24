@@ -179,6 +179,44 @@ impl ActorIdentity {
         }
     }
 
+    /// Diagnostic rendering that *identifies* the actor, not just its
+    /// kind. Callers that want to display "who" in an operator-facing
+    /// error (e.g. authority-conflict detail) should use this over
+    /// [`Self::kind_label`], which would otherwise elide the
+    /// identifier and leave an operator with no way to distinguish
+    /// one service instance from another.
+    ///
+    /// The format per variant:
+    ///
+    /// - `Core` / `Tui` — just the kind label (no identifier carried).
+    /// - `Behavior` — `"behavior <id>"`.
+    /// - `Service` — `"service <service-id> (inst <8-hex>)"`, matching
+    ///   the TUI rendering in `tui/src/render.rs`.
+    /// - `User` / `Host` / `Agent` — `"<kind> <id>"` using the
+    ///   variant's primary identifier.
+    ///
+    /// **Not** a wire format — use serde for serialization. Purely a
+    /// diagnostic surface; the exact string shape may tighten in
+    /// future slices if an operator-facing tool starts parsing it.
+    pub fn identifying_label(&self) -> String {
+        match self {
+            Self::Core => "core".into(),
+            Self::Tui => "tui".into(),
+            Self::Behavior { id } => format!("behavior {id}"),
+            Self::Service {
+                service_id,
+                instance_id,
+            } => {
+                let hyphenated = instance_id.as_hyphenated().to_string();
+                let short = hyphenated.get(..8).unwrap_or(hyphenated.as_str());
+                format!("service {service_id} (inst {short})")
+            }
+            Self::User { id } => format!("user {id}"),
+            Self::Host { host_id, .. } => format!("host {host_id}"),
+            Self::Agent { agent_id, .. } => format!("agent {agent_id}"),
+        }
+    }
+
     /// Validate any structural invariants an identity variant carries.
     ///
     /// Serde's derived `Deserialize` bypasses the per-variant

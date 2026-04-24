@@ -80,38 +80,84 @@ async fn second_instance_on_overlapping_path_exits_authority_conflict() {
     // before instance 2 starts competing.
     wait_for_first_ready(&mut observer).await;
 
-    // Spawn instance 2. Start the stopwatch before the fork so
-    // the reported SC-304 elapsed includes connect + handshake +
-    // the attempted bootstrap through to exit.
+    // Spawn instance 2 with captured stderr so we can assert the
+    // authority-conflict detail identifies the owning instance, not
+    // just its kind. The identifying-label regression (listener.rs
+    // emitting "...by service" with no service-id) slipped past
+    // slice 002's test because that test also only pinned exit code.
+    // Pipe + drain here is the regression guard.
+    //
+    // Start the stopwatch before the fork so the reported SC-304
+    // elapsed includes connect + handshake + the attempted bootstrap
+    // through to exit.
     let conflict_start = Instant::now();
-    let second = spawn_buffer_service(&socket, &canonical);
-    let mut second_reaper = Reaper::new(second);
+    let mut second = spawn_buffer_service_capturing_stderr(&socket, &canonical);
 
-    // Wait for exit on a blocking worker so the tokio runtime
-    // stays responsive. Reporting elapsed the moment the reaper
-    // returns keeps the timing measurement tight — no
-    // concurrent-task drag from a bounded observer drain.
-    let (status_result, _reaper) = tokio::task::spawn_blocking(move || {
-        let r = second_reaper.try_wait_within(EXIT_HARD_BUDGET);
-        (r, second_reaper)
+    // Wait for exit on a blocking worker so the tokio runtime stays
+    // responsive. The closure owns the Child so post-exit stderr
+    // drain happens under the same blocking task — no hand-off.
+    let (exit_outcome, stderr_bytes) = tokio::task::spawn_blocking(move || {
+        let start = Instant::now();
+        let status = loop {
+            match second.try_wait() {
+                Ok(Some(s)) => break Some(s),
+                Ok(None) => {}
+                Err(_) => break None,
+            }
+            if start.elapsed() >= EXIT_HARD_BUDGET {
+                // Hard deadline hit — tear down so the panic path
+                // below doesn't leak a zombie.
+                let _ = second.kill();
+                let _ = second.wait();
+                break None;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        // Drain whatever the child wrote to stderr before exit.
+        // Stdio::piped is live for the lifetime of the Child; after
+        // exit, read_to_end returns immediately with whatever
+        // buffered.
+        let stderr_bytes = second
+            .stderr
+            .take()
+            .map(|mut s| {
+                use std::io::Read;
+                let mut buf = Vec::new();
+                let _ = s.read_to_end(&mut buf);
+                buf
+            })
+            .unwrap_or_default();
+        (status, stderr_bytes)
     })
     .await
     .expect("join blocking");
     let elapsed = conflict_start.elapsed();
     eprintln!("[sc-304] second-instance exit observed in {elapsed:?} (budget {SC304_BUDGET:?})");
 
-    let status = status_result
-        .expect("try_wait io error")
-        .unwrap_or_else(|| {
-            panic!(
-                "second instance did not exit within hard budget {EXIT_HARD_BUDGET:?}; \
+    let status = exit_outcome.unwrap_or_else(|| {
+        panic!(
+            "second instance did not exit within hard budget {EXIT_HARD_BUDGET:?}; \
              the authority-conflict classification path is broken"
-            )
-        });
+        )
+    });
     assert_eq!(
         status.code(),
         Some(EXIT_AUTHORITY_CONFLICT),
         "second instance must exit {EXIT_AUTHORITY_CONFLICT} (AuthorityConflict); got {status:?}"
+    );
+
+    // Regression guard: the authority-conflict detail forwarded from
+    // core must name the owning service, not merely its kind. A
+    // historical bug rendered the owning identity via `kind_label()`
+    // ("...already claimed by service") with no identifier — leaving
+    // an operator unable to distinguish one weaver-buffers instance
+    // from another. The fix in `core/src/bus/listener.rs` renders
+    // `identifying_label()` which carries the service-id; this
+    // assertion pins that forward.
+    let stderr = String::from_utf8_lossy(&stderr_bytes);
+    assert!(
+        stderr.contains("weaver-buffers"),
+        "second instance stderr must identify the owning service by id; got:\n{stderr}",
     );
 
     // Post-exit: drain any messages buffered on the observer
@@ -259,6 +305,23 @@ fn spawn_buffer_service(socket: &Path, path: &Path) -> std::process::Child {
         .expect("spawn weaver-buffers")
 }
 
+/// Second-instance variant that captures stderr so the test can
+/// assert the authority-conflict detail's identifying content. Not
+/// folded into `spawn_buffer_service` because every other caller
+/// wants stderr suppressed for clean test output.
+fn spawn_buffer_service_capturing_stderr(socket: &Path, path: &Path) -> std::process::Child {
+    let bin = build_buffer_service_binary();
+    Command::new(&bin)
+        .arg(path)
+        .arg("--socket")
+        .arg(socket)
+        .arg("--poll-interval=100ms")
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn weaver-buffers (piped stderr)")
+}
+
 async fn wait_for_socket(socket: &Path) {
     let start = Instant::now();
     while !socket.exists() {
@@ -310,45 +373,5 @@ fn nix_signal(pid: u32, sig: libc::c_int) -> std::io::Result<()> {
         Ok(())
     } else {
         Err(std::io::Error::last_os_error())
-    }
-}
-
-/// Variant guard that exposes a synchronous `try_wait_within` for
-/// exit-status inspection (T053 / T060). On drop, falls back to
-/// kill + wait so no zombies leak on the panic path.
-struct Reaper {
-    child: Option<std::process::Child>,
-}
-
-impl Reaper {
-    fn new(child: std::process::Child) -> Self {
-        Self { child: Some(child) }
-    }
-
-    fn try_wait_within(
-        &mut self,
-        deadline: Duration,
-    ) -> std::io::Result<Option<std::process::ExitStatus>> {
-        let start = Instant::now();
-        loop {
-            if let Some(child) = self.child.as_mut()
-                && let Some(status) = child.try_wait()?
-            {
-                return Ok(Some(status));
-            }
-            if start.elapsed() >= deadline {
-                return Ok(None);
-            }
-            std::thread::sleep(Duration::from_millis(50));
-        }
-    }
-}
-
-impl Drop for Reaper {
-    fn drop(&mut self) {
-        if let Some(mut child) = self.child.take() {
-            let _ = child.kill();
-            let _ = child.wait();
-        }
     }
 }

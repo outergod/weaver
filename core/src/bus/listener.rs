@@ -377,7 +377,7 @@ async fn handle_client_message(
                     let detail = format!(
                         "{family}/* for entity {} already claimed by {}",
                         entity.as_u64(),
-                        existing.kind_label(),
+                        existing.identifying_label(),
                     );
                     let err = BusMessage::Error(ErrorMsg {
                         category: "authority-conflict".into(),
