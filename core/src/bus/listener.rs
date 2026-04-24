@@ -389,13 +389,19 @@ async fn handle_client_message(
                 ServicePublishOutcome::IdentityDrift { bound, attempted } => {
                     // F14: this connection already published under a
                     // different identity; refuse to let the second
-                    // attribution silently overwrite the first.
+                    // attribution silently overwrite the first. Detail
+                    // renders via `identifying_label` so an operator
+                    // diagnosing drift sees WHICH service-id the
+                    // connection bound to and WHICH it tried to
+                    // impersonate — kind labels alone ("bound to
+                    // service; refusing FactAssert as service") leave
+                    // no forensic signal.
                     let err = BusMessage::Error(ErrorMsg {
                         category: "identity-drift".into(),
                         detail: format!(
                             "connection bound to {}; refusing FactAssert as {}",
-                            bound.kind_label(),
-                            attempted.kind_label(),
+                            bound.identifying_label(),
+                            attempted.identifying_label(),
                         ),
                         context: None,
                     });
