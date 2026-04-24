@@ -73,3 +73,7 @@ path = "e2e/buffer_inspect_attribution.rs"
 [[test]]
 name = "buffer_simulate_removed"
 path = "e2e/buffer_simulate_removed.rs"
+
+[[test]]
+name = "buffer_multi_buffer"
+path = "e2e/buffer_multi_buffer.rs"
