@@ -49,41 +49,58 @@ ls -la "$FIXTURE"
 
 ```bash
 ./target/debug/weaver run
-# Expected: "weaver core started; bus protocol v0.3.0; listening at /run/user/<uid>/weaver.sock"
 ```
+
+Expected stderr (similar to):
+
+```
+INFO weaver::lifecycle: started socket=/run/user/<uid>/weaver.sock
+INFO weaver::bus: listening path=/run/user/<uid>/weaver.sock
+INFO weaver::lifecycle: ready
+```
+
+Each binary emits `tracing` INFO lines with `key=value` fields; no human-formatted startup banner. The bus-protocol version isn't logged at startup — confirm it instead via `./target/debug/weaver --version` (`bus_protocol: "0.3.0"`).
 
 **Window 2 — TUI**:
 
 ```bash
 ./target/debug/weaver-tui
-# Expected: Connection: ready (bus v0.3.0, core 0.3.0+<sha>)
-# Buffers: (none)
-# Repositories: (none)
+```
+
+Expected TUI top line (similar to):
+
+```
+Connection: ready (bus v0.3.0)
+Facts:
+  (none)
+Repositories:
+  (none)
+Buffers:
+  (none)
 ```
 
 **Window 3 — buffer service**:
 
 ```bash
 ./target/debug/weaver-buffers "$FIXTURE"
-# Expected startup log:
-#   weaver-buffers 0.1.0 starting
-#     paths:
-#       /tmp/.../slice-003-fixture.txt
-#     socket:   /run/user/<uid>/weaver.sock
-#     poll:     250ms
-#     instance: <some UUID>
-#   [INFO] connected to core (bus protocol v0.3.0)
-#   [INFO] published initial state:
-#            /tmp/.../slice-003-fixture.txt  [13 bytes]  clean
-#            watcher/status = ready
 ```
+
+Expected stderr (similar to):
+
+```
+INFO weaver_buffers::publisher: weaver-buffers starting socket=/run/user/<uid>/weaver.sock poll_interval=250ms instance=<uuid> buffers=1
+INFO weaver_buffers::publisher: connected to core; bus protocol handshake complete
+INFO weaver_buffers::publisher: bootstrap complete; entering poll loop facts_tracked=4
+```
+
+No rendered "published initial state" block — the facts are emitted over the bus (visible in the TUI Buffers section, not on stderr).
 
 **Expected TUI state** (within 1 s):
 
 ```
 Buffers:
-  /tmp/.../slice-003-fixture.txt  [13 bytes]  clean
-    by service weaver-buffers (inst <short-uuid>), event 0, 0.XXXs ago
+  /tmp/.../slice-003-fixture.txt  [13 bytes] clean
+    by service weaver-buffers (inst <8-hex>), event EventId(<nanos>), 0.XXXs ago
 ```
 
 **PASS CRITERION (SC-301)**: the Buffers section shows the fixture's path, byte count, and `clean` badge within 1 s of the buffer service's process start.
@@ -102,8 +119,8 @@ echo "mutated" >> "$FIXTURE"
 
 ```
 Buffers:
-  /tmp/.../slice-003-fixture.txt  [13 bytes]  dirty
-    by service weaver-buffers (inst <short-uuid>), event <N>, 0.XXXs ago
+  /tmp/.../slice-003-fixture.txt  [13 bytes] dirty
+    by service weaver-buffers (inst <8-hex>), event EventId(<nanos>), 0.XXXs ago
 ```
 
 Note: `buffer/byte-size` stays `13` (memory still holds the pre-mutation content — slice 003 does NOT re-read disk into memory on mutation; slice 004+ will). The dirty flag flips because memory digest ≠ disk digest.
@@ -152,16 +169,24 @@ Wait for `watcher/status = ready`. Then in **Window 4** (or a new shell):
 
 ```bash
 ./target/debug/weaver-buffers "$FIXTURE"
-# Expected stderr:
-#   Error: buffer/* fact family for /tmp/.../slice-003-fixture.txt
-#          is already claimed by weaver-buffers instance <first-UUID> (started 0:0X:XX ago).
-#     help: only one weaver-buffers instance may own a given buffer entity at a time.
-#           Stop the other instance, or open a different file.
-#     code: WEAVER-BUF-004
-#
+```
+
+Expected stderr (similar to):
+
+```
+WEAVER-BUF-004
+
+  × buffer/* fact family is already claimed: buffer/* for entity <n> already claimed by service weaver-buffers (inst <8-hex>)
+  help: only one weaver-buffers instance may own a given buffer entity at a time.
+        Stop the other instance, or open a different file.
+```
+
+```bash
 echo $?
 # Expected: 3
 ```
+
+The diagnostic's `(inst <8-hex>)` suffix identifies the *first* instance — the one holding the authority. If the detail ever truncates to `"...already claimed by service"` with nothing after, that's a regression of the identifying-label contract (see `tests/e2e/buffer_authority_conflict.rs`).
 
 The first instance MUST continue serving uninterrupted — its `weaver-tui` state should NOT change.
 
@@ -174,31 +199,57 @@ The first instance MUST continue serving uninterrupted — its `weaver-tui` stat
 With the first buffer service still running, in a new shell:
 
 ```bash
-# Determine the entity id via TUI inspection or `weaver status`.
-./target/debug/weaver status --output=json | jq '.facts[] | select(.fact.attribute == "buffer/dirty")'
+# Determine the entity id via `weaver status`. Note the jq path is
+# `.key.attribute`, not `.fact.attribute` — the status JSON is keyed
+# by `key` / `value` / `provenance` (see contracts/cli-surfaces.md).
+./target/debug/weaver status --output=json | jq '.facts[] | select(.key.attribute == "buffer/dirty")'
 ```
 
-Use the `entity` value from the output:
+Expected match (similar to):
+
+```json
+{
+  "key": { "entity": <u64>, "attribute": "buffer/dirty" },
+  "value": { "type": "bool", "value": true },
+  "provenance": {
+    "source": {
+      "type": "service",
+      "service-id": "weaver-buffers",
+      "instance-id": "<uuid>"
+    },
+    "timestamp_ns": <u64>,
+    "causal_parent": <u64>
+  }
+}
+```
+
+The `provenance.source` block already demonstrates SC-305 — attribution is to `weaver-buffers`, not `core/dirty-tracking`. For the dedicated inspect path:
 
 ```bash
 ./target/debug/weaver inspect <entity>:buffer/dirty
-# Expected human output:
-#   fact:       <entity>:buffer/dirty
-#   source:     service weaver-buffers (instance <UUID>)
-#   event:      <poll-tick EventId>
-#   asserted:   <timestamp>
-#   trace seq:  <N>
+```
+
+Expected human output (similar to):
+
+```
+fact: (EntityRef(<n>), buffer/dirty)
+  source_event:       EventId(<u64>)
+  asserting_kind:     service
+  asserting_service:  weaver-buffers
+  asserting_instance: <uuid>
+  asserted_at_ns:     <u64>
+  trace_sequence:     <n>
 ```
 
 JSON form:
 
 ```bash
 ./target/debug/weaver inspect <entity>:buffer/dirty --output=json
-# Expected: asserting_service: "weaver-buffers", asserting_instance: "<UUID>",
-#          asserting_behavior field absent.
 ```
 
-**PASS CRITERION (SC-305)**: human rendering says `service weaver-buffers (instance <UUID>)`; JSON rendering has `asserting_service` = `"weaver-buffers"` and no `asserting_behavior` field.
+Expected fields: `asserting_kind: "service"`, `asserting_service: "weaver-buffers"`, `asserting_instance: "<uuid>"`, no `asserting_behavior` field.
+
+**PASS CRITERION (SC-305)**: human rendering shows `asserting_kind: service` + `asserting_service: weaver-buffers`; JSON rendering has `asserting_service = "weaver-buffers"` and no `asserting_behavior` field.
 
 **Additionally** (FR-013 — F23 live-fact-provenance check in isolation): the e2e test `buffer_inspect_overwrites_behavior.rs` does this as a unit: injects a behavior-authored `buffer/dirty=true` into the trace, then has the service assert `buffer/dirty=false` on the same key, then asserts inspect returns the service attribution. Verified programmatically, not manually.
 
@@ -214,10 +265,12 @@ This is a property test, not a manual walkthrough step. The test (`buffers/tests
 Run locally:
 
 ```bash
-cargo test -p weaver-buffers component_discipline
+cargo test -p weaver-buffers --test component_discipline
 ```
 
-**PASS CRITERION (SC-306)**: property test passes with 1000+ proptest iterations.
+(Use `--test <file>` — a bare positional arg is a substring filter against test fn names, and `component_discipline` does not substring-match `bootstrap_facts_obey_sc_306_discipline`.)
+
+**PASS CRITERION (SC-306)**: property test passes with proptest's default 256 cases; `scripts/ci.sh` green at every commit on the branch exercises it automatically.
 
 ## SC-307 — Slice-001 e2e tests transformed, not dropped
 
