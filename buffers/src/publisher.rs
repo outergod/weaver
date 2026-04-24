@@ -44,6 +44,14 @@ use crate::observer;
 /// rendering, per `contracts/cli-surfaces.md` and Amendment 5.
 const SERVICE_ID: &str = "weaver-buffers";
 
+/// Window to drain pending `authority-conflict` / other bus errors
+/// between bootstrap-fact emission and the `watcher/status=ready` +
+/// `buffer/open` event burst. Conflicts are reported asynchronously
+/// by the core via `err_rx`; without this gate, a doomed instance
+/// would publish `ready` (and `buffer/open` events) before its
+/// bootstrap `FactAssert` was actually accepted.
+const BOOTSTRAP_GRACE: Duration = Duration::from_millis(250);
+
 /// Thin wrapper around the write half of a bus connection — mirrors
 /// slice-002's `BusWriter` so the publisher's `publish_*` helpers can
 /// send without knowing whether the stream came from a `Client` or a
@@ -247,6 +255,33 @@ pub async fn run(
                 return Err(e);
             }
         };
+
+    // Bootstrap-write sides returned Ok (wire writes succeeded), but
+    // authority-conflict rejections come back asynchronously on
+    // `err_rx`. Drain for a grace window before the `ready` + per-
+    // buffer `buffer/open` event burst so:
+    //
+    //   - `watcher/status=ready` means "bootstrap facts accepted",
+    //     not merely "wire writes returned Ok" — matches the
+    //     contract subscribers rely on.
+    //   - `BusMessage::Event(EventPayload::BufferOpen { .. })` only
+    //     fires for buffers this instance actually owns. Events are
+    //     lossy-class (no retract), so emitting them pre-drain would
+    //     produce false-positive open signals for doomed instances
+    //     that subscribers could never unsee.
+    if let Some(async_err) = wait_for_bootstrap_error(&mut err_rx, BOOTSTRAP_GRACE).await {
+        shutdown_retract(&mut writer, &identity, &mut tracked).await;
+        reader_task.abort();
+        return Err(async_err);
+    }
+
+    // Drain cleared: the core accepted every bootstrap `FactAssert`.
+    // Now emit the `buffer/open` events that anchor each buffer's
+    // causal_parent chain, in the same CLI order as the bootstrap
+    // facts used when they referenced `EventId::new(idx as u64)`.
+    for (idx, state) in states.iter().enumerate() {
+        publish_buffer_open_event(&mut writer, &identity, state, EventId::new(idx as u64)).await?;
+    }
 
     // T031: lifecycle ready.
     publish_watcher_status(
@@ -483,14 +518,16 @@ async fn open_and_bootstrap_all(
         // the buffer's index in the (already de-duplicated) CLI order.
         // Research §8 + data-model §Bootstrap sequence step 3b.
         //
-        // Register the event on the trace BEFORE the bootstrap facts
-        // so `causal_parent` on those facts resolves to a real event.
-        // Without the event emission, `weaver inspect --why` walkback
-        // terminates at a phantom id and the slice-003
-        // `EventPayload::BufferOpen` variant is effectively never
-        // produced on the bus.
+        // Bootstrap facts carry this id as `causal_parent`; the
+        // matching `BusMessage::Event(EventPayload::BufferOpen { .. })`
+        // is emitted by the caller AFTER `wait_for_bootstrap_error`
+        // confirms no async authority-conflict on any fact in this
+        // batch. Emitting the event pre-drain would produce a
+        // false-positive `buffer/open` signal for doomed instances
+        // (events are lossy-class, no retract), so the caller owns
+        // the "event emission only once ownership is confirmed"
+        // ordering.
         let bootstrap_tick = EventId::new(idx as u64);
-        publish_buffer_open_event(writer, identity, &state, bootstrap_tick).await?;
         publish_buffer_bootstrap(writer, identity, &state, tracked, bootstrap_tick).await?;
         registry.mark_owned(state.entity());
         states.push(state);
@@ -655,6 +692,25 @@ fn bus_closed_error() -> PublisherError {
             std::io::ErrorKind::UnexpectedEof,
             "bus connection closed",
         ))),
+    }
+}
+
+/// Poll `err_rx` for up to `window` to catch any asynchronous bus
+/// error queued by `reader_loop` since the bootstrap writes started.
+/// Used to gate `watcher/status=ready` and the per-buffer
+/// `buffer/open` events on confirmed bootstrap-fact acceptance.
+///
+/// Returns `Some(PublisherError)` if an error or channel-close
+/// surfaces within the window; `None` if no error arrived (the
+/// clean path).
+async fn wait_for_bootstrap_error(
+    err_rx: &mut mpsc::Receiver<ServerSentError>,
+    window: Duration,
+) -> Option<PublisherError> {
+    match tokio::time::timeout(window, err_rx.recv()).await {
+        Err(_elapsed) => None,
+        Ok(Some(err)) => Some(translate_server_error(err)),
+        Ok(None) => Some(bus_closed_error()),
     }
 }
 
