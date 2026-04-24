@@ -81,3 +81,7 @@ path = "e2e/buffer_multi_buffer.rs"
 [[test]]
 name = "buffer_authority_conflict"
 path = "e2e/buffer_authority_conflict.rs"
+
+[[test]]
+name = "buffer_degraded_observable"
+path = "e2e/buffer_degraded_observable.rs"
