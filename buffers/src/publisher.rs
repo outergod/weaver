@@ -531,7 +531,7 @@ async fn publish_buffer_open_event(
     writer
         .send(&BusMessage::Event(event))
         .await
-        .map_err(|source| PublisherError::Client { source })?;
+        .map_err(classify_write_error)?;
     Ok(())
 }
 
@@ -658,6 +658,37 @@ fn bus_closed_error() -> PublisherError {
     }
 }
 
+/// Classify a write-side [`ClientError`] from `writer.send(...)`.
+///
+/// The reader loop's EOF path maps bus death to
+/// [`PublisherError::BusUnavailable`] (exit code 2). Without this
+/// helper, a writer that loses the peer between the poll-loop
+/// `select!` arm and the send would surface `BrokenPipe` /
+/// `ConnectionReset` / `UnexpectedEof` and get funnelled into
+/// [`PublisherError::Client`] (exit code 10 — internal), so the
+/// same disconnect produces a different exit code depending on
+/// which side of the socket notices first.
+///
+/// This helper recovers the symmetry: any transport-level failure
+/// maps to `BusUnavailable`; only encoding / frame-size / handshake-
+/// protocol errors (which indicate a programmer bug, not a dead
+/// peer) remain `Client`.
+fn classify_write_error(source: ClientError) -> PublisherError {
+    if let ClientError::Codec(CodecError::Io(ref io_err)) = source {
+        match io_err.kind() {
+            std::io::ErrorKind::BrokenPipe
+            | std::io::ErrorKind::ConnectionReset
+            | std::io::ErrorKind::ConnectionAborted
+            | std::io::ErrorKind::UnexpectedEof
+            | std::io::ErrorKind::NotConnected => {
+                return PublisherError::BusUnavailable { source };
+            }
+            _ => {}
+        }
+    }
+    PublisherError::Client { source }
+}
+
 async fn wait_signal(sig: &mut Option<tokio::signal::unix::Signal>) {
     if let Some(s) = sig.as_mut() {
         let _ = s.recv().await;
@@ -692,7 +723,7 @@ async fn publish_watcher_status(
     writer
         .send(&BusMessage::FactAssert(fact))
         .await
-        .map_err(|source| PublisherError::Client { source })?;
+        .map_err(classify_write_error)?;
     // Not tracked for shutdown-retract: we overwrite to Stopped rather
     // than retract on clean exit.
     Ok(())
@@ -716,7 +747,7 @@ async fn publish_fact(
     writer
         .send(&BusMessage::FactAssert(fact))
         .await
-        .map_err(|source| PublisherError::Client { source })?;
+        .map_err(classify_write_error)?;
     tracked.insert(key);
     Ok(())
 }
@@ -843,6 +874,63 @@ mod tests {
     fn bus_closed_error_surfaces_as_bus_unavailable() {
         let err = bus_closed_error();
         assert!(matches!(err, PublisherError::BusUnavailable { .. }));
+    }
+
+    #[test]
+    fn classify_write_error_maps_transport_kinds_to_bus_unavailable() {
+        // Every io::ErrorKind that indicates the peer is gone must
+        // surface as BusUnavailable so the exit code matches the
+        // reader-loop EOF path (exit 2), not Client (exit 10).
+        for kind in [
+            std::io::ErrorKind::BrokenPipe,
+            std::io::ErrorKind::ConnectionReset,
+            std::io::ErrorKind::ConnectionAborted,
+            std::io::ErrorKind::UnexpectedEof,
+            std::io::ErrorKind::NotConnected,
+        ] {
+            let src = ClientError::Codec(CodecError::Io(std::io::Error::new(kind, "peer gone")));
+            let err = classify_write_error(src);
+            assert!(
+                matches!(err, PublisherError::BusUnavailable { .. }),
+                "io::ErrorKind::{kind:?} must classify as BusUnavailable; got {err:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn classify_write_error_preserves_client_for_encoding_errors() {
+        // Encoding / frame-size / decode errors are programmer bugs,
+        // not dead peers; they must NOT be laundered into
+        // BusUnavailable.
+        let src = ClientError::Codec(CodecError::Encode("bad encoding".into()));
+        let err = classify_write_error(src);
+        assert!(
+            matches!(err, PublisherError::Client { .. }),
+            "Encode error must classify as Client; got {err:?}"
+        );
+
+        let src = ClientError::Codec(CodecError::FrameTooLarge {
+            size: 1_000_000,
+            max: 65536,
+        });
+        let err = classify_write_error(src);
+        assert!(matches!(err, PublisherError::Client { .. }));
+    }
+
+    #[test]
+    fn classify_write_error_preserves_client_for_unrelated_io_kinds() {
+        // An io::Error that isn't one of the transport-death kinds
+        // stays Client. NotFound / PermissionDenied on a write would
+        // be bizarre but not a bus disconnect.
+        let src = ClientError::Codec(CodecError::Io(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "eacces",
+        )));
+        let err = classify_write_error(src);
+        assert!(
+            matches!(err, PublisherError::Client { .. }),
+            "unexpected io kind must classify as Client; got {err:?}"
+        );
     }
 
     #[test]
