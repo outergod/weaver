@@ -6,8 +6,11 @@
 //! The fix derives the inspection shape from the live fact's
 //! provenance instead of consulting the behavior index first.
 
+#[path = "../common/mod.rs"]
+mod common;
+
+use common::StubBehavior;
 use uuid::Uuid;
-use weaver_core::behavior::dirty_tracking::DirtyTrackingBehavior;
 use weaver_core::behavior::dispatcher::{Dispatcher, ServicePublishOutcome};
 use weaver_core::fact_space::FactStore;
 use weaver_core::inspect::inspect_fact;
@@ -19,24 +22,29 @@ use weaver_core::types::ids::EventId;
 
 #[tokio::test]
 async fn service_overwrite_of_behavior_fact_reports_service_attribution() {
-    let mut dispatcher = Dispatcher::new();
-    dispatcher.register(Box::new(DirtyTrackingBehavior::new()));
-
     let entity = EntityRef::new(1);
+    let key = FactKey::new(entity, "buffer/dirty");
+
+    let mut dispatcher = Dispatcher::new();
+    dispatcher.register(Box::new(StubBehavior::new(
+        key.clone(),
+        FactValue::Bool(true),
+    )));
+
     let event_id = EventId::new(42);
     dispatcher
         .process_event(Event {
             id: event_id,
-            name: "buffer/edited".into(),
+            name: "buffer/open".into(),
             target: Some(entity),
-            payload: EventPayload::BufferEdited,
+            payload: EventPayload::BufferOpen {
+                path: "/tmp/weaver-fixture".into(),
+            },
             provenance: Provenance::new(ActorIdentity::Tui, 100, None).unwrap(),
         })
         .await;
 
-    let key = FactKey::new(entity, "buffer/dirty");
-
-    // Sanity: inspect currently reports the dirty-tracking behavior.
+    // Sanity: inspect currently reports the stub behavior.
     {
         let snapshot = {
             let fs = dispatcher.fact_store();

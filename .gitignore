@@ -5,6 +5,16 @@
 mempalace.yaml
 entities.json
 
+# Speckit / Claude Code plugin artefacts. These directories contain
+# tracked files (plugin SKILL.md templates, bash scripts, settings),
+# but they are tooling surface that `mempalace mine` should never
+# index — it has no mempalace-specific exclude mechanism, only
+# .gitignore. Listing them here keeps future re-mines from polluting
+# the weaver wing with plugin internals. Already-tracked files stay
+# tracked; `git commit -a` still stages their modifications.
+/.claude/
+/.specify/
+
 # Rust build outputs
 /target/
 **/*.rs.bk

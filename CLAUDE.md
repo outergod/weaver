@@ -2,14 +2,15 @@
 For additional context about technologies to be used, project structure,
 shell commands, and other important information, read the current plan:
 
-- `specs/002-git-watcher-actor/plan.md` — Git-Watcher Actor slice (current)
-- `specs/002-git-watcher-actor/spec.md` — feature specification
-- `specs/002-git-watcher-actor/research.md` — Phase 0 decisions (gix; 250ms polling; uuid v4)
-- `specs/002-git-watcher-actor/data-model.md`, `specs/002-git-watcher-actor/contracts/`, `specs/002-git-watcher-actor/quickstart.md` — Phase 1 design
+- `specs/003-buffer-service/plan.md` — Buffer Service slice (current)
+- `specs/003-buffer-service/spec.md` — feature specification (with 4 clarifications, 2026-04-23)
+- `specs/003-buffer-service/research.md` — Phase 0 decisions (sha2 digests; 250ms polling; FactValue::U64; sequential per-poll iteration)
+- `specs/003-buffer-service/data-model.md`, `specs/003-buffer-service/contracts/`, `specs/003-buffer-service/quickstart.md` — Phase 1 design
 
-Prior slice (shipped):
+Prior slices (shipped):
 
 - `specs/001-hello-fact/` — Hello, fact slice (merged)
+- `specs/002-git-watcher-actor/` — Git-Watcher Actor slice (merged)
 
 Architecture and engineering constitutions:
 

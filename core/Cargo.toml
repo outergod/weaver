@@ -32,30 +32,15 @@ vergen.workspace = true
 [dev-dependencies]
 proptest.workspace = true
 
-# Phase 3 (US1) integration tests. Cargo auto-discovers files directly
-# under `tests/`, but subdirectories are not picked up unless declared
-# explicitly. These entries keep the task-spec paths verbatim.
-[[test]]
-name = "behavior_dirty_tracking_assert"
-path = "tests/behavior/dirty_tracking_assert.rs"
-
-[[test]]
-name = "behavior_dirty_tracking_retract"
-path = "tests/behavior/dirty_tracking_retract.rs"
-
-[[test]]
-name = "behavior_dirty_tracking_sequence"
-path = "tests/behavior/dirty_tracking_sequence.rs"
-
+# Cargo auto-discovers integration tests directly under `tests/` but
+# not in subdirectories; each entry below pins an explicit path so the
+# structure under `tests/behavior/`, `tests/inspect/`,
+# `tests/property/`, and `tests/cli/` continues to be picked up.
 [[test]]
 name = "behavior_error_recovery"
 path = "tests/behavior/error_recovery.rs"
 
-[[test]]
-name = "property_dirty_tracking_invariant"
-path = "tests/property/dirty_tracking_invariant.rs"
-
-# Phase 4 (US2) inspection tests.
+# Inspection tests (slice 002 Phase 4 structure).
 [[test]]
 name = "inspect_inspection_found"
 path = "tests/inspect/inspection_found.rs"
@@ -69,16 +54,16 @@ name = "inspect_inspection_overwrite"
 path = "tests/inspect/inspection_overwrite.rs"
 
 [[test]]
+name = "inspect_buffer_behavior_service_overwrite"
+path = "tests/inspect/buffer_behavior_service_overwrite.rs"
+
+[[test]]
 name = "inspect_structured_always"
 path = "tests/inspect/structured_always.rs"
 
 [[test]]
 name = "inspect_causal_walkback"
 path = "tests/inspect/causal_walkback.rs"
-
-[[test]]
-name = "inspect_behavior_authored"
-path = "tests/inspect/behavior_authored.rs"
 
 [[test]]
 name = "property_inspection_invariant"
@@ -105,6 +90,10 @@ path = "tests/cli/status_human.rs"
 [[test]]
 name = "property_provenance_wire"
 path = "tests/property/provenance_wire.rs"
+
+[[test]]
+name = "property_factvalue_u64_roundtrip"
+path = "tests/property/factvalue_u64_roundtrip.rs"
 
 [[test]]
 name = "cli_version_timing"

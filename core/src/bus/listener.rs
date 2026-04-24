@@ -126,7 +126,7 @@ async fn handle_connection(
                 let err = BusMessage::Error(ErrorMsg {
                     category: "version-mismatch".into(),
                     detail: format!(
-                        "client protocol v{protocol_version:#x}, core supports v{BUS_PROTOCOL_VERSION:#x}"
+                        "bus protocol {BUS_PROTOCOL_VERSION:#04x} required; received {protocol_version:#04x}"
                     ),
                     context: None,
                 });
@@ -377,7 +377,7 @@ async fn handle_client_message(
                     let detail = format!(
                         "{family}/* for entity {} already claimed by {}",
                         entity.as_u64(),
-                        existing.kind_label(),
+                        existing.identifying_label(),
                     );
                     let err = BusMessage::Error(ErrorMsg {
                         category: "authority-conflict".into(),
@@ -389,13 +389,19 @@ async fn handle_client_message(
                 ServicePublishOutcome::IdentityDrift { bound, attempted } => {
                     // F14: this connection already published under a
                     // different identity; refuse to let the second
-                    // attribution silently overwrite the first.
+                    // attribution silently overwrite the first. Detail
+                    // renders via `identifying_label` so an operator
+                    // diagnosing drift sees WHICH service-id the
+                    // connection bound to and WHICH it tried to
+                    // impersonate — kind labels alone ("bound to
+                    // service; refusing FactAssert as service") leave
+                    // no forensic signal.
                     let err = BusMessage::Error(ErrorMsg {
                         category: "identity-drift".into(),
                         detail: format!(
                             "connection bound to {}; refusing FactAssert as {}",
-                            bound.kind_label(),
-                            attempted.kind_label(),
+                            bound.identifying_label(),
+                            attempted.identifying_label(),
                         ),
                         context: None,
                     });
@@ -566,5 +572,59 @@ mod classify_tests {
         let _listener = StdUnixListener::bind(&p).unwrap();
         assert_eq!(classify_path_to_unlink(&p).unwrap(), Some("socket"));
         std::fs::remove_file(&p).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod handshake_tests {
+    use super::*;
+    use crate::bus::codec::{read_message, write_message};
+    use crate::types::message::{BusMessage, HelloMsg};
+    use tokio::net::UnixStream;
+
+    #[tokio::test]
+    async fn mismatched_hello_is_rejected_with_contract_detail() {
+        let (server, mut client) = UnixStream::pair().expect("pair");
+        let dispatcher = Arc::new(Dispatcher::new());
+
+        let server_task = tokio::spawn(handle_connection(server, dispatcher));
+
+        // Client announces the prior protocol version. The contract
+        // (specs/003-buffer-service/contracts/bus-messages.md §Connection
+        // lifecycle) pins the exact `detail` wording the core must
+        // emit so operators see a consistent diagnostic.
+        let stale_version: u8 = 0x02;
+        write_message(
+            &mut client,
+            &BusMessage::Hello(HelloMsg {
+                protocol_version: stale_version,
+                client_kind: "test".into(),
+            }),
+        )
+        .await
+        .expect("write Hello");
+
+        let response = read_message(&mut client).await.expect("read Error");
+        match response {
+            BusMessage::Error(err) => {
+                assert_eq!(err.category, "version-mismatch");
+                assert_eq!(
+                    err.detail,
+                    format!(
+                        "bus protocol {BUS_PROTOCOL_VERSION:#04x} required; received {stale_version:#04x}"
+                    ),
+                );
+            }
+            other => panic!("expected Error, got {other:?}"),
+        }
+
+        // The listener returns VersionMismatch; `serve` would log this,
+        // but for the unit test we just confirm the task terminates
+        // promptly rather than hanging.
+        let outcome = server_task.await.expect("server task joins");
+        assert!(matches!(
+            outcome,
+            Err(ListenerError::VersionMismatch { .. })
+        ));
     }
 }

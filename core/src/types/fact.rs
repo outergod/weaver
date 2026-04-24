@@ -50,14 +50,19 @@ impl std::fmt::Display for FactKey {
     }
 }
 
-/// The value side of a fact. Slice 001 exercises `Bool`; other variants
-/// land as fact families grow.
+/// The value side of a fact. Slice 001 exercises `Bool`; slice 003 adds
+/// `U64` for `buffer/byte-size`. Other variants land as fact families
+/// grow.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "value", rename_all = "snake_case")]
 pub enum FactValue {
     Bool(bool),
     String(String),
     Int(i64),
+    /// Unsigned 64-bit integer. Slice 003 uses it for `buffer/byte-size`
+    /// (see `specs/003-buffer-service/contracts/bus-messages.md`). Wire
+    /// form: `{"type":"u64","value":<n>}`.
+    U64(u64),
     Null,
 }
 
@@ -105,6 +110,63 @@ mod tests {
             value: FactValue::Bool(false),
             provenance: Provenance::new(ActorIdentity::Tui, 456, None).unwrap(),
         };
+        let mut buf = Vec::new();
+        ciborium::into_writer(&f, &mut buf).unwrap();
+        let back: Fact = ciborium::from_reader(buf.as_slice()).unwrap();
+        assert_eq!(f, back);
+    }
+
+    #[test]
+    fn factvalue_u64_json_round_trip() {
+        for n in [0u64, 1, 42, 4096, u64::MAX / 2, u64::MAX] {
+            let v = FactValue::U64(n);
+            let s = serde_json::to_string(&v).unwrap();
+            let back: FactValue = serde_json::from_str(&s).unwrap();
+            assert_eq!(v, back);
+            // Wire shape spot-check: adjacent-tag + snake_case variant name.
+            assert!(
+                s.contains("\"type\":\"u64\""),
+                "wire form missing type=u64: {s}"
+            );
+        }
+    }
+
+    #[test]
+    fn factvalue_u64_ciborium_round_trip() {
+        for n in [0u64, 1, 42, u64::MAX] {
+            let v = FactValue::U64(n);
+            let mut buf = Vec::new();
+            ciborium::into_writer(&v, &mut buf).unwrap();
+            let back: FactValue = ciborium::from_reader(buf.as_slice()).unwrap();
+            assert_eq!(v, back);
+        }
+    }
+
+    #[test]
+    fn factvalue_u64_distinguishable_from_int() {
+        // `Int(i64)` and `U64(u64)` are distinct variants on the wire; a
+        // round-trip MUST preserve which one was authored.
+        let u = FactValue::U64(42);
+        let i = FactValue::Int(42);
+        let u_s = serde_json::to_string(&u).unwrap();
+        let i_s = serde_json::to_string(&i).unwrap();
+        assert_ne!(u_s, i_s);
+        assert!(u_s.contains("u64"));
+        assert!(i_s.contains("int"));
+    }
+
+    #[test]
+    fn fact_with_u64_value_round_trip() {
+        // Fact carrying a `U64` payload (per `buffer/byte-size`) must
+        // round-trip through both wire formats.
+        let f = Fact {
+            key: FactKey::new(EntityRef::new(3), "buffer/byte-size"),
+            value: FactValue::U64(18342),
+            provenance: Provenance::new(ActorIdentity::Core, 789, None).unwrap(),
+        };
+        let s = serde_json::to_string(&f).unwrap();
+        let back: Fact = serde_json::from_str(&s).unwrap();
+        assert_eq!(f, back);
         let mut buf = Vec::new();
         ciborium::into_writer(&f, &mut buf).unwrap();
         let back: Fact = ciborium::from_reader(buf.as_slice()).unwrap();

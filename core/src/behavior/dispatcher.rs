@@ -552,9 +552,11 @@ mod tests {
         let d = Dispatcher::new();
         let event = Event {
             id: EventId::new(1),
-            name: "buffer/edited".into(),
+            name: "buffer/open".into(),
             target: Some(EntityRef::new(1)),
-            payload: EventPayload::BufferEdited,
+            payload: EventPayload::BufferOpen {
+                path: "/tmp/weaver-fixture".into(),
+            },
             provenance: Provenance::new(ActorIdentity::Tui, 100, None).unwrap(),
         };
         d.process_event(event).await;

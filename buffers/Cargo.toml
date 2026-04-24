@@ -1,0 +1,36 @@
+[package]
+name = "weaver-buffers"
+description = "Weaver buffer service: first content-backed service actor on the bus; publishes buffer/* derived facts for opened files"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "weaver-buffers"
+path = "src/main.rs"
+
+[dependencies]
+weaver_core = { path = "../core" }
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+ciborium.workspace = true
+ciborium-io.workspace = true
+clap.workspace = true
+miette.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+uuid.workspace = true
+sha2.workspace = true
+humantime.workspace = true
+
+[build-dependencies]
+vergen.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
+tempfile.workspace = true

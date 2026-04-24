@@ -245,7 +245,23 @@ async fn rejects_identity_drift_on_same_connection() {
 
     let err = wait_for_error(&mut client).await;
     match err {
-        BusMessage::Error(e) => assert_eq!(e.category, "identity-drift", "got {e:?}"),
+        BusMessage::Error(e) => {
+            assert_eq!(e.category, "identity-drift", "got {e:?}");
+            // Regression guard: detail must identify BOTH the bound
+            // identity (svc-a) and the attempted impersonator (svc-b).
+            // A kind_label-only render would emit "bound to service;
+            // refusing FactAssert as service" — no forensic signal.
+            assert!(
+                e.detail.contains("svc-a"),
+                "identity-drift detail must name bound identity svc-a; got {:?}",
+                e.detail
+            );
+            assert!(
+                e.detail.contains("svc-b"),
+                "identity-drift detail must name attempted identity svc-b; got {:?}",
+                e.detail
+            );
+        }
         other => panic!("expected identity-drift, got {other:?}"),
     }
 
@@ -263,7 +279,14 @@ async fn rejects_identity_drift_on_same_connection() {
         .expect("send");
     let err = wait_for_error(&mut client).await;
     match err {
-        BusMessage::Error(e) => assert_eq!(e.category, "identity-drift", "got {e:?}"),
+        BusMessage::Error(e) => {
+            assert_eq!(e.category, "identity-drift", "got {e:?}");
+            assert!(
+                e.detail.contains("svc-a") && e.detail.contains("svc-b"),
+                "identity-drift detail must name both svc-a and svc-b; got {:?}",
+                e.detail
+            );
+        }
         other => panic!("expected identity-drift, got {other:?}"),
     }
 
@@ -364,9 +387,11 @@ async fn rejects_event_with_malformed_service_identity() {
     };
     let event = Event {
         id: EventId::new(now_ns()),
-        name: "buffer/edited".into(),
+        name: "buffer/open".into(),
         target: Some(EntityRef::new(1)),
-        payload: EventPayload::BufferEdited,
+        payload: EventPayload::BufferOpen {
+            path: "/tmp/weaver-fixture".into(),
+        },
         provenance: weaver_core::provenance::Provenance {
             source: malformed_source,
             timestamp_ns: now_ns(),

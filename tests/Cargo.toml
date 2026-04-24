@@ -14,6 +14,7 @@ publish = false
 
 [dev-dependencies]
 weaver_core = { path = "../core" }
+weaver-buffers = { path = "../buffers" }
 tokio.workspace = true
 ciborium.workspace = true
 serde_json.workspace = true
@@ -52,3 +53,35 @@ path = "e2e/fact_assert_identity_guard.rs"
 [[test]]
 name = "git_watcher_inspect"
 path = "e2e/git_watcher_inspect.rs"
+
+[[test]]
+name = "buffer_open_bootstrap"
+path = "e2e/buffer_open_bootstrap.rs"
+
+[[test]]
+name = "buffer_external_mutation"
+path = "e2e/buffer_external_mutation.rs"
+
+[[test]]
+name = "buffer_sigkill"
+path = "e2e/buffer_sigkill.rs"
+
+[[test]]
+name = "buffer_inspect_attribution"
+path = "e2e/buffer_inspect_attribution.rs"
+
+[[test]]
+name = "buffer_simulate_removed"
+path = "e2e/buffer_simulate_removed.rs"
+
+[[test]]
+name = "buffer_multi_buffer"
+path = "e2e/buffer_multi_buffer.rs"
+
+[[test]]
+name = "buffer_authority_conflict"
+path = "e2e/buffer_authority_conflict.rs"
+
+[[test]]
+name = "buffer_degraded_observable"
+path = "e2e/buffer_degraded_observable.rs"

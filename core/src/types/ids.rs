@@ -35,11 +35,10 @@ impl std::fmt::Display for EventId {
     }
 }
 
-/// Human-readable behavior identifier, e.g., `"core/dirty-tracking"`.
-///
-/// Embedded Rust behaviors use Rust-qualified path conventions. Steel
-/// behaviors (later slices) will use namespaced names such as
-/// `"user:my-package:auto-save"`.
+/// Human-readable behavior identifier, e.g., `"core/<name>"` for
+/// embedded behaviors or `"user:my-package:auto-save"` for Steel
+/// behaviors in later slices. BehaviorId accepts any non-empty string;
+/// `ActorIdentity::validate` enforces non-emptiness at the wire edge.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct BehaviorId(String);

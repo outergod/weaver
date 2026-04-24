@@ -1,10 +1,18 @@
-//! T073 — end-to-end disconnect: spawn `weaver run`, subscribe, publish
-//! `BufferEdited`, confirm `FactAssert` arrives, then SIGKILL the core
-//! and assert the client observes the disconnect within 5 s without
-//! panicking and exits cleanly.
+//! Core-disconnect e2e: SIGKILL the core; the buffer service must
+//! exit cleanly (`PublisherError::BusUnavailable`, exit code 2,
+//! per T038), and any live subscriber must surface the disconnect
+//! as a recv error — all within the slice-002 5s budget.
 //!
-//! Reference: `specs/001-hello-fact/tasks.md` T073 +
-//! `specs/001-hello-fact/spec.md` SC-004.
+//! History: originally T073 (slice 001) drove the retired
+//! `core/dirty-tracking` behavior via `BufferEdited`. Session 2
+//! `#[ignore]`-gated it for T053 rewrite. The *core dies → observers
+//! notice* shape is what slice 001 exercised; slice 003 preserves
+//! that shape but replaces the fact-producer with `weaver-buffers`.
+//!
+//! Complement to `buffer_sigkill.rs` (SC-303), which tests the
+//! opposite direction: service killed → core retracts. This test
+//! tests: core killed → service exits gracefully + subscribers
+//! see the disconnect.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -12,149 +20,169 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use tokio::time::{sleep, timeout};
 
-use uuid::Uuid;
 use weaver_core::bus::client::{Client, ClientError};
-use weaver_core::provenance::{ActorIdentity, Provenance};
-use weaver_core::types::entity_ref::EntityRef;
-use weaver_core::types::event::{Event, EventPayload};
-use weaver_core::types::ids::EventId;
+use weaver_core::provenance::ActorIdentity;
+use weaver_core::types::fact::Fact;
 use weaver_core::types::message::{BusMessage, SubscribePattern};
 
-const DISCONNECT_BUDGET: Duration = Duration::from_secs(5);
 const SOCKET_WAIT_TIMEOUT: Duration = Duration::from_secs(10);
+const DISCONNECT_BUDGET: Duration = Duration::from_secs(5);
+const BOOTSTRAP_WAIT: Duration = Duration::from_secs(10);
+
+/// Exit code for `PublisherError::BusUnavailable` per T038 /
+/// `contracts/cli-surfaces.md §weaver-buffers — exit codes`.
+const EXIT_BUS_UNAVAILABLE: i32 = 2;
 
 #[tokio::test]
-async fn sigkill_surfaces_disconnect_within_budget_without_panic() {
+async fn core_sigkill_surfaces_disconnect_to_service_and_subscriber() {
     let socket = unique_socket_path();
-    let guard = ChildGuard::new(spawn_weaver(&socket));
-    let child_pid = guard.pid();
 
+    build_weaver_binary();
+    build_buffer_service_binary();
+
+    let core = spawn_core(&socket);
+    let core_pid = core.id();
+    let _core_guard = ChildGuard::new(core);
     wait_for_socket(&socket).await;
 
-    let mut client = Client::connect(&socket, "e2e-disconnect")
-        .await
-        .expect("connect to bus");
-    client
-        .subscribe(SubscribePattern::FamilyPrefix("buffer/".into()))
-        .await
-        .expect("subscribe");
+    let fixture_dir = tempdir();
+    let fixture_path = fixture_dir.join("fixture.txt");
+    std::fs::write(&fixture_path, b"hello buffer\n").unwrap();
+    let canonical_fixture = std::fs::canonicalize(&fixture_path).expect("canonicalize fixture");
 
-    // Prime the connection with a FactAssert so the stale-view path is
-    // non-trivial.
-    let edit_id = EventId::new(now_ns());
-    client
-        .send(&BusMessage::Event(Event {
-            id: edit_id,
-            name: "buffer/edited".into(),
-            target: Some(EntityRef::new(1)),
-            payload: EventPayload::BufferEdited,
-            provenance: Provenance::new(
-                ActorIdentity::service("e2e-publisher", Uuid::new_v4()).unwrap(),
-                edit_id.as_u64(),
-                None,
-            )
-            .unwrap(),
-        }))
-        .await
-        .expect("send BufferEdited");
+    let mut buffers_reaper = Reaper::new(spawn_buffer_service(&socket, &canonical_fixture));
 
-    let _fact = timeout(Duration::from_secs(2), async {
+    // Subscriber waits for the bootstrap to land; otherwise we race
+    // the SIGKILL against the service's own startup.
+    let mut subscriber = Client::connect(&socket, "e2e-disconnect-observer")
+        .await
+        .expect("subscriber connect");
+    subscriber
+        .subscribe(SubscribePattern::AllFacts)
+        .await
+        .expect("subscribe all");
+
+    timeout(BOOTSTRAP_WAIT, async {
         loop {
-            let msg = client.recv().await.expect("recv");
-            if let BusMessage::FactAssert(f) = msg {
-                return f;
+            let msg = subscriber.recv().await.expect("recv");
+            if let BusMessage::FactAssert(fact) = msg
+                && is_weaver_buffers(&fact)
+                && fact.key.attribute.starts_with("buffer/")
+            {
+                return;
             }
         }
     })
     .await
-    .expect("FactAssert did not arrive before SIGKILL");
+    .expect("no buffer/* bootstrap FactAssert before SIGKILL");
 
-    // Hard-kill the core.
-    let _ = nix_signal(child_pid, libc::SIGKILL);
+    // Kill the core abruptly. No retract path here — the bus is gone.
+    // `_core_guard` will wait() on the already-dead process at end
+    // of scope (or panic) so the zombie is reaped.
+    unsafe {
+        assert_eq!(
+            libc::kill(core_pid as libc::pid_t, libc::SIGKILL),
+            0,
+            "SIGKILL core failed",
+        );
+    }
 
-    // Observe disconnect — either stream EOF (Ok(...) loop breaks to Err)
-    // or immediate Err — within the 5 s budget. Must not panic.
-    let disconnect_start = Instant::now();
-    let outcome: Result<(), ClientError> = timeout(DISCONNECT_BUDGET, async {
+    // 1) Subscriber's recv-loop must terminate with an error within
+    //    the disconnect budget.
+    let subscriber_start = Instant::now();
+    let subscriber_outcome: Result<(), ClientError> = timeout(DISCONNECT_BUDGET, async {
         loop {
-            match client.recv().await {
+            match subscriber.recv().await {
                 Ok(_) => continue,
                 Err(e) => return Err(e),
             }
         }
     })
     .await
-    .expect("disconnect did not surface within 5 seconds");
-
-    let disconnect_elapsed = disconnect_start.elapsed();
+    .expect("subscriber disconnect did not surface within budget");
+    let subscriber_elapsed = subscriber_start.elapsed();
     assert!(
-        outcome.is_err(),
-        "recv loop must terminate with an error on disconnect"
-    );
-    assert!(
-        disconnect_elapsed <= DISCONNECT_BUDGET,
-        "disconnect surfaced too slowly: {disconnect_elapsed:?}",
+        subscriber_outcome.is_err(),
+        "subscriber recv must terminate with an error once core is gone",
     );
 
-    // `ChildGuard::drop` will reap the already-SIGKILL'd child.
-    drop(guard);
+    // 2) weaver-buffers must exit with EXIT_BUS_UNAVAILABLE within
+    //    the same budget window. Use spawn_blocking to keep the
+    //    synchronous try_wait polling off the tokio runtime.
+    let budget_remaining = DISCONNECT_BUDGET.saturating_sub(subscriber_elapsed);
+    let (status, _buffers_reaper) = tokio::task::spawn_blocking(move || {
+        let status = buffers_reaper.try_wait_within(budget_remaining);
+        (status, buffers_reaper)
+    })
+    .await
+    .expect("join blocking");
+    let status = status.expect("try_wait io").expect(
+        "weaver-buffers did not exit within disconnect budget; the bus-EOF classification path (T038) is broken",
+    );
+    assert_eq!(
+        status.code(),
+        Some(EXIT_BUS_UNAVAILABLE),
+        "weaver-buffers exit code must be {EXIT_BUS_UNAVAILABLE} (BusUnavailable per T038); got {status:?}",
+    );
+
     let _ = std::fs::remove_file(&socket);
 }
 
-/// RAII guard that owns the spawned `weaver` subprocess.
-///
-/// On `Drop` (including panic unwind), it sends SIGTERM, briefly
-/// waits, then falls back to SIGKILL (`Child::kill`) and always
-/// `wait()`s to reap the zombie. Owning the `Child` directly satisfies
-/// clippy's `zombie_processes` lint: every code path, including
-/// panics, flows through this destructor.
-struct ChildGuard {
-    child: Option<std::process::Child>,
+fn is_weaver_buffers(fact: &Fact) -> bool {
+    matches!(
+        &fact.provenance.source,
+        ActorIdentity::Service { service_id, .. } if service_id == "weaver-buffers"
+    )
 }
 
-impl ChildGuard {
-    fn new(child: std::process::Child) -> Self {
-        Self { child: Some(child) }
-    }
+// ---- subprocess helpers ----
 
-    fn pid(&self) -> u32 {
-        self.child.as_ref().map(|c| c.id()).unwrap_or(0)
-    }
-}
-
-impl Drop for ChildGuard {
-    fn drop(&mut self) {
-        if let Some(mut child) = self.child.take() {
-            let _ = nix_signal(child.id(), libc::SIGTERM);
-            std::thread::sleep(Duration::from_millis(100));
-            let _ = child.kill();
-            let _ = child.wait();
-        }
-    }
+fn tempdir() -> PathBuf {
+    let pid = std::process::id();
+    let tick = now_ns();
+    let p = std::env::temp_dir().join(format!("weaver-disconnect-{pid}-{tick}"));
+    std::fs::create_dir_all(&p).unwrap();
+    p
 }
 
 fn build_weaver_binary() -> PathBuf {
     let status = Command::new("cargo")
         .args(["build", "--quiet", "-p", "weaver_core", "--bin", "weaver"])
         .status()
-        .expect("cargo build weaver binary");
-    assert!(status.success(), "cargo build failed");
-    weaver_bin_path()
+        .expect("cargo build weaver");
+    assert!(status.success());
+    bin_path("weaver")
 }
 
-fn weaver_bin_path() -> PathBuf {
-    let target_dir = std::env::var("CARGO_TARGET_DIR")
+fn build_buffer_service_binary() -> PathBuf {
+    let status = Command::new("cargo")
+        .args([
+            "build",
+            "--quiet",
+            "-p",
+            "weaver-buffers",
+            "--bin",
+            "weaver-buffers",
+        ])
+        .status()
+        .expect("cargo build weaver-buffers");
+    assert!(status.success());
+    bin_path("weaver-buffers")
+}
+
+fn bin_path(name: &str) -> PathBuf {
+    let target = std::env::var("CARGO_TARGET_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|_| {
             Path::new(env!("CARGO_MANIFEST_DIR"))
                 .parent()
-                .expect("workspace root")
+                .unwrap()
                 .join("target")
         });
-    target_dir.join("debug").join("weaver")
+    target.join("debug").join(name)
 }
 
-fn spawn_weaver(socket: &Path) -> std::process::Child {
+fn spawn_core(socket: &Path) -> std::process::Child {
     let bin = build_weaver_binary();
     Command::new(&bin)
         .arg("run")
@@ -163,7 +191,20 @@ fn spawn_weaver(socket: &Path) -> std::process::Child {
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
-        .expect("spawn weaver subprocess")
+        .expect("spawn weaver")
+}
+
+fn spawn_buffer_service(socket: &Path, path: &Path) -> std::process::Child {
+    let bin = build_buffer_service_binary();
+    Command::new(&bin)
+        .arg(path)
+        .arg("--socket")
+        .arg(socket)
+        .arg("--poll-interval=100ms")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn weaver-buffers")
 }
 
 async fn wait_for_socket(socket: &Path) {
@@ -180,7 +221,7 @@ async fn wait_for_socket(socket: &Path) {
 fn unique_socket_path() -> PathBuf {
     let pid = std::process::id();
     let tick = now_ns();
-    std::env::temp_dir().join(format!("weaver-e2e-disconnect-{pid}-{tick}.sock"))
+    std::env::temp_dir().join(format!("weaver-disconnect-{pid}-{tick}.sock"))
 }
 
 fn now_ns() -> u64 {
@@ -190,12 +231,64 @@ fn now_ns() -> u64 {
         .unwrap_or(0)
 }
 
-fn nix_signal(pid: u32, sig: libc::c_int) -> std::io::Result<()> {
-    // Safety: `libc::kill` is a syscall with scalar args.
-    let rc = unsafe { libc::kill(pid as libc::pid_t, sig) };
-    if rc == 0 {
-        Ok(())
-    } else {
-        Err(std::io::Error::last_os_error())
+/// Owns a spawned child; reaps on drop. Matches the inline pattern
+/// used by the other slice-003 e2e tests.
+struct ChildGuard {
+    child: Option<std::process::Child>,
+}
+
+impl ChildGuard {
+    fn new(child: std::process::Child) -> Self {
+        Self { child: Some(child) }
+    }
+}
+
+impl Drop for ChildGuard {
+    fn drop(&mut self) {
+        if let Some(mut child) = self.child.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+}
+
+/// Variant guard that additionally exposes a synchronous
+/// `try_wait_within` for the exit-status inspection T053 needs.
+/// On `Drop` (including panic), falls back to kill + wait so no
+/// zombies leak on the failure path.
+struct Reaper {
+    child: Option<std::process::Child>,
+}
+
+impl Reaper {
+    fn new(child: std::process::Child) -> Self {
+        Self { child: Some(child) }
+    }
+
+    fn try_wait_within(
+        &mut self,
+        deadline: Duration,
+    ) -> std::io::Result<Option<std::process::ExitStatus>> {
+        let start = Instant::now();
+        loop {
+            if let Some(child) = self.child.as_mut()
+                && let Some(status) = child.try_wait()?
+            {
+                return Ok(Some(status));
+            }
+            if start.elapsed() >= deadline {
+                return Ok(None);
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+}
+
+impl Drop for Reaper {
+    fn drop(&mut self) {
+        if let Some(mut child) = self.child.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
     }
 }

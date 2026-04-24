@@ -84,23 +84,19 @@ fn arb_fact() -> impl Strategy<Value = Fact> {
 }
 
 fn arb_event() -> impl Strategy<Value = Event> {
-    (0u64..100, 0u64..100, any::<bool>(), arb_provenance()).prop_map(
-        |(id, target, is_edit, provenance)| Event {
-            id: EventId::new(id),
-            name: if is_edit {
-                "buffer/edited".into()
-            } else {
-                "buffer/cleaned".into()
-            },
-            target: Some(EntityRef::new(target)),
-            payload: if is_edit {
-                EventPayload::BufferEdited
-            } else {
-                EventPayload::BufferCleaned
-            },
-            provenance,
-        },
+    (
+        0u64..100,
+        0u64..100,
+        "/tmp/[a-z]{1,8}\\.txt",
+        arb_provenance(),
     )
+        .prop_map(|(id, target, path, provenance)| Event {
+            id: EventId::new(id),
+            name: "buffer/open".into(),
+            target: Some(EntityRef::new(target)),
+            payload: EventPayload::BufferOpen { path },
+            provenance,
+        })
 }
 
 fn arb_provenanced_message() -> impl Strategy<Value = BusMessage> {

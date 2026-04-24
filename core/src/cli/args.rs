@@ -57,18 +57,6 @@ pub enum Command {
         /// (e.g., `1:buffer/dirty`).
         fact_key: String,
     },
-
-    /// Publish a `buffer/edited` event for a synthetic buffer.
-    SimulateEdit {
-        /// Buffer entity identifier (slice 001 uses `1`).
-        buffer_id: u64,
-    },
-
-    /// Publish a `buffer/cleaned` event for a synthetic buffer.
-    SimulateClean {
-        /// Buffer entity identifier (slice 001 uses `1`).
-        buffer_id: u64,
-    },
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]

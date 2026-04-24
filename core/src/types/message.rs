@@ -13,19 +13,22 @@ use serde::{Deserialize, Serialize};
 ///
 /// - `0x01` / `0.1.0` — slice 001 shipped this with opaque
 ///   `SourceId::External(String)` in provenance.
-/// - `0x02` / `0.2.0` — **current**, slice 002. Breaking wire change:
+/// - `0x02` / `0.2.0` — slice 002. Breaking wire change:
 ///   provenance carries structured [`crate::provenance::ActorIdentity`]
 ///   (new CBOR tag 1002), and [`LifecycleSignal`] gains
-///   `Degraded` / `Unavailable` / `Restarting` variants. See
-///   `specs/002-git-watcher-actor/contracts/bus-messages.md`.
+///   `Degraded` / `Unavailable` / `Restarting` variants.
+/// - `0x03` / `0.3.0` — **current**, slice 003. Breaking wire change:
+///   [`EventPayload`] drops `BufferEdited` / `BufferCleaned` in favor
+///   of `BufferOpen { path }`; `FactValue` gains a `U64` variant. See
+///   `specs/003-buffer-service/contracts/bus-messages.md`.
 ///
 /// Public surface per L2 P7. Increments follow the policy in
-/// `specs/002-git-watcher-actor/contracts/bus-messages.md` §Versioning.
-pub const BUS_PROTOCOL_VERSION: u8 = 0x02;
+/// `specs/003-buffer-service/contracts/bus-messages.md` §Versioning.
+pub const BUS_PROTOCOL_VERSION: u8 = 0x03;
 
 /// Semver-style string representation of [`BUS_PROTOCOL_VERSION`].
 /// Used in CLI output (e.g., `weaver --version`).
-pub const BUS_PROTOCOL_VERSION_STR: &str = "0.2.0";
+pub const BUS_PROTOCOL_VERSION_STR: &str = "0.3.0";
 
 /// The top-level enum of bus messages.
 ///
@@ -345,9 +348,11 @@ mod tests {
     fn sample_event() -> Event {
         Event {
             id: EventId::new(42),
-            name: "buffer/edited".into(),
+            name: "buffer/open".into(),
             target: Some(EntityRef::new(1)),
-            payload: EventPayload::BufferEdited,
+            payload: EventPayload::BufferOpen {
+                path: "/tmp/weaver-fixture".into(),
+            },
             provenance: Provenance::new(ActorIdentity::Tui, 999, None).unwrap(),
         }
     }

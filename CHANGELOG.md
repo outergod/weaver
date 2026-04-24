@@ -9,8 +9,11 @@ Per-public-surface versioning is per L2 constitution Principle 8 (`.specify/memo
 
 Per L2 Principle 7, each public surface carries its own version.
 
-- **Bus protocol** v0.2.0 (was v0.1.0) — message categories, delivery classes (lossy / authoritative), CBOR tag scheme entries 1000 (entity-ref), 1001 (keyword), **1002 (structured actor identity, slice 002)**. See `specs/002-git-watcher-actor/contracts/bus-messages.md`.
-- **Fact-family schema `buffer/dirty`** v0.1.0 — unchanged since slice 001.
+- **Bus protocol** v0.3.0 (was v0.2.0) — message categories, delivery classes (lossy / authoritative), CBOR tag scheme entries 1000 (entity-ref), 1001 (keyword), 1002 (structured actor identity, slice 002). Slice 003 wire changes: `EventPayload::BufferEdited` / `BufferCleaned` removed; `EventPayload::BufferOpen { path }` added; `FactValue::U64(u64)` added. `Hello.protocol_version` advances `0x02 → 0x03`. See `specs/003-buffer-service/contracts/bus-messages.md`.
+- **Fact-family schema `buffer/dirty`** v0.1.0 — wire shape unchanged from slice 001. **Authority transferred** from the `core/dirty-tracking` behavior to the `weaver-buffers` service in slice 003; the shipped core no longer registers an embedded producer.
+- **Fact-family schema `buffer/path`** v0.1.0 (slice 003, new) — `FactValue::String` (canonical absolute path). Bootstrap fact asserted once per opened buffer; never updated (path change ≡ entity change). Authored by `weaver-buffers`.
+- **Fact-family schema `buffer/byte-size`** v0.1.0 (slice 003, new) — `FactValue::U64` (the new variant lands under the bus-protocol MAJOR bump). Byte count of the service's in-memory content. Authored by `weaver-buffers`.
+- **Fact-family schema `buffer/observable`** v0.1.0 (slice 003, new) — `FactValue::Bool`. Per-buffer file observability; `false` during transient unreadability, `true` on recovery. Edge-triggered per slice-002 F21. Authored by `weaver-buffers`.
 - **Fact-family schema `repo/dirty`** v0.1.0 (slice 002, new) — `FactValue::Bool`; asserted by `weaver-git-watcher` per Clarification Q5 (index-or-working-tree differs from HEAD; untracked-only is clean). See `specs/002-git-watcher-actor/data-model.md`.
 - **Fact-family schema `repo/head-commit`** v0.1.0 (slice 002, new) — `FactValue::String` holding the lowercase hex-encoded object id from `gix::rev_parse_single("HEAD")` — 40 chars for SHA-1 repositories, 64 for SHA-256. Retracted in the `Unborn` state.
 - **Fact-family schema `repo/state/on-branch`** v0.1.0 (slice 002, new) — `FactValue::String` (branch name). Asserted iff HEAD points at `refs/heads/<name>`.
@@ -19,10 +22,79 @@ Per L2 Principle 7, each public surface carries its own version.
 - **Fact-family schema `repo/observable`** v0.1.0 (slice 002, new) — `FactValue::Bool`. `false` during watcher-`Degraded`; flips `true` on recovery. Suppresses dirty rendering in the TUI when `false` per `contracts/cli-surfaces.md`.
 - **Fact-family schema `repo/path`** v0.1.0 (slice 002, new) — `FactValue::String` (canonical working-tree root). The three `repo/state/*` attributes obey a mutex invariant: at most one asserted per repository entity at any trace prefix (`docs/07-open-questions.md §26`).
 - **Fact-family schema `watcher/status`** v0.1.0 (slice 002, new) — `FactValue::String` mirroring `LifecycleSignal` (`started` / `ready` / `degraded` / …). Keyed by the watcher's per-invocation instance-UUID entity, not the repository.
-- **CLI surface** v0.1.0 — shape unchanged; `weaver inspect --output=json` gains an always-present `asserting_kind` discriminator (MINOR additive per cli-surfaces.md §wire compatibility). Slice 002 also adds the new `weaver-git-watcher` binary — its own versioning tracks the crate's `Cargo.toml` (`0.1.0`).
+- **CLI surface `weaver`** v0.2.0 — MAJOR bump. Slice 003 removes the `simulate-edit` and `simulate-clean` subcommands (the events they produced are no longer on the wire). `weaver inspect --output=json` gains an always-present `asserting_kind` discriminator (slice 002 MINOR additive, carried into v0.2.0); behavior-authored inspection was removed from the shipped surface as a consequence of retiring `core/dirty-tracking`.
+- **CLI surface `weaver-buffers`** v0.1.0 (slice 003, new) — `weaver-buffers <PATH>... [--poll-interval=<duration>] [--socket=<path>] [--output=human|json] [-v/-vv/-vvv] [--version]`. Exit codes 0/1/2/3/10 per `specs/003-buffer-service/contracts/cli-surfaces.md`.
+- **CLI surface `weaver-git-watcher`** v0.1.0 — shape unchanged; `--version` JSON field `bus_protocol` advances `"0.2.0" → "0.3.0"` as a by-product of the protocol bump (constant-driven, not a CLI-surface change).
+- **CLI surface `weaver-tui`** v0.1.0 — MINOR additive. Slice 003 adds a Buffers render section below the existing Repositories section; no new keybindings. The `e`/`c` simulate-edit/simulate-clean keystrokes are removed (their target events are gone from the protocol); the command bar now shows `Commands: [i]nspect  [q]uit`. (NB: this is keybinding removal, which under `cli-surfaces.md §Versioning policy` is reserved for a future MAJOR — handled here as a slice-coordinated simultaneous removal with the wire variants rather than as a standalone TUI break.)
 - **Configuration schema** v0.1.0 — unchanged.
 
-## [Unreleased] — slice 002 Phase 2 — Foundational (ActorIdentity migration)
+## [Unreleased] — slice 003 — Buffer Service
+
+**Breaking bus-protocol change** — version advances `0.2.0 → 0.3.0`. Slice-002 clients cannot connect to a v0.3.0 core; every in-tree bus client (core, TUI, git-watcher, new `weaver-buffers`, e2e test harness) rebuilds together. CLI `weaver` surface bumps MAJOR for the `simulate-edit` / `simulate-clean` removal. New `weaver-buffers` binary ships at 0.1.0. The slice adds Weaver's first content-backed service and retires the slice-001 embedded `DirtyTrackingBehavior`, leaving `buffer/dirty` authored only by a process on the bus.
+
+### Changed — bus protocol (MAJOR)
+
+- **`Hello.protocol_version`** advances `0x02 → 0x03`. Mismatched clients receive `Error { category: "version-mismatch", detail: "bus protocol 0x03 required; received 0x02" }` and connection close. Detail-string format is pinned by `specs/003-buffer-service/contracts/bus-messages.md §Connection lifecycle`.
+- **`EventPayload::BufferEdited`** and **`EventPayload::BufferCleaned`** removed. The `weaver simulate-edit` / `simulate-clean` subcommands that produced them are removed in lockstep.
+- **`EventPayload::BufferOpen { path }`** added. Kebab-case variant tag `"buffer-open"` per Amendment 5. Slice 003 dispatches this event in-process from `weaver-buffers`'s bootstrap loop; slice 004+ will accept it over the wire from external producers.
+- **`FactValue::U64(u64)`** added under the existing adjacent-tag `#[serde(tag = "type", content = "value", rename_all = "kebab-case")]`. Wire form `{"type":"u64","value":<n>}`. Carries `buffer/byte-size` where file sizes above `i64::MAX` would otherwise truncate.
+
+### Removed — core (MAJOR)
+
+- **`core/dirty-tracking` behavior** and its registration call in `core/src/cli/run.rs` are gone. `buffer/dirty` is no longer produced in-core; the family's authority transfers to `weaver-buffers` (service-only). The `DirtyTrackingBehavior` test fixture migration to a payload-agnostic `StubBehavior` in `core/tests/common/mod.rs` keeps the slice-002 inspection + property tests intact.
+- **`weaver simulate-edit`** / **`simulate-clean`** CLI subcommands removed. Clap exits code 2 with `"unrecognized subcommand"` for either invocation.
+- **TUI `e` / `c` keystrokes** removed (their events no longer exist on the wire); command bar now renders `Commands: [i]nspect  [q]uit`. Keybinding removal is a MAJOR under `cli-surfaces.md §Versioning policy`, bundled here with the simultaneous wire-variant removal.
+
+### Added — buffers crate scaffold
+
+- New workspace member `buffers/` — produces the `weaver-buffers` binary. `Cargo.toml` inherits `tokio`, `clap` (`derive`), `miette`, `thiserror`, `tracing`, `tracing-subscriber`, `uuid`, `sha2`, `humantime`, `serde`, `ciborium`, and a path dep on `weaver-core`; dev-deps inherit `tempfile` + `proptest`.
+- Workspace dep: `sha2 = "0.10"` (new) for SHA-256 digests.
+- `buffer_entity_ref(&Path) -> EntityRef` derives a stable entity with reserved bit 61 (buffer namespace) and bits 62 / 63 cleared — distinct from slice-002's watcher-instance (bit 62) and slice-001's repo (bit 63) namespaces. Trace inspection classifies an entity's namespace at a glance by the bit layout.
+- `watcher_instance_entity_ref(&Uuid) -> EntityRef` mirrors slice-002's derivation: bit 62 set, bit 63 cleared. The two services share the watcher-instance namespace; the TUI/inspect machinery distinguishes them by asserted facts, not bit layout.
+- `BufferState` with private fields (`path`, `entity`, `content`, `memory_digest`, `last_dirty`, `last_observable`); the fallible `open()` constructor establishes the `memory_digest == Sha256(content)` invariant structurally. A custom `Debug` impl redacts `content` so accidental `tracing::debug!(?state)` never emits file bytes (FR-002a).
+- `BufferObservation` / `ObserverError` / `StartupKind` typed outputs for the observer path; `StartupKind` selects the CLI's `WEAVER-BUF-00{1,2,3}` miette diagnostic code.
+
+### Added — Phase 3: `weaver-buffers` end-to-end (US1)
+
+- **Observer** (`buffers/src/observer.rs`): streams the on-disk file through a SHA-256 hasher, compares `disk_digest` to `state.memory_digest`, emits a `BufferObservation { byte_size, dirty, observable: true }`. `std::io::ErrorKind::NotFound` maps to `Missing`; a successful metadata with `!is_file()` maps to `NotRegularFile`; other I/O errors map to `TransientRead`.
+- **Publisher** (`buffers/src/publisher.rs`): one `weaver-buffers` process asserts authority over the `buffer/*` families for the opened buffer set via `ActorIdentity::Service { service_id: "weaver-buffers", instance_id }` with a fresh UUID v4 per invocation. Stream splits post-handshake; a reader task drains server-sent `Error` frames (`authority-conflict` → exit 3, `not-owner` → soft AuthorityConflict with prefix → exit 3, other → exit 10). Slice-002 F31 follow-up remains out of scope per `research.md §9`.
+- **Bootstrap sequence** (C11): `watcher/status=started` (causal_parent=None) → per-buffer 4-fact bootstrap (`buffer/path`, `buffer/byte-size`, `buffer/dirty=false`, `buffer/observable=true`, each carrying a per-buffer synthesised `EventId` as `causal_parent`) → `watcher/status=ready`. Fail-fast on any open failure: partial-retract every fact already asserted, emit a miette diagnostic on stderr, exit 1.
+- **Poll loop** (C12, default 250 ms interval): sequential per-buffer iteration via `observer::observe_buffer`; edge-triggered `buffer/dirty` (republish only when the flag flips) and `buffer/observable` (false on first failed observation, true on recovery). Service-level `watcher/status=degraded` fires only when every currently-open buffer is simultaneously unobservable (FR-016a); recovery republishes `ready`.
+- **Shutdown** (C13): on SIGTERM / SIGINT, retract every tracked `buffer/*` fact, then overwrite `watcher/status` with `unavailable` → `stopped`, abort the reader task, exit 0. On reader-loop EOF (core gone), no retract attempt (`PublisherError::BusUnavailable` → exit 2); core's `release_connection` covers cleanup server-side.
+- **CLI surface (new binary)** — `weaver-buffers <PATH>... [--poll-interval=250ms] [--socket=<path>] [--output=human|json] [-v/-vv/-vvv] [--version]`. `--socket` folds `WEAVER_SOCKET` (parity with `weaver`, `weaver-git-watcher`). `--poll-interval=0ms` is rejected at parse time. Documented exit codes: 0 clean, 1 startup failure, 2 bus unavailable, 3 authority conflict, 10 internal. Startup failures render WEAVER-BUF-001 (not openable), WEAVER-BUF-002 (not a regular file), WEAVER-BUF-003 (too large, currently `std::io::ErrorKind::OutOfMemory`), WEAVER-BUF-004 (authority conflict) miette diagnostics.
+
+### Added — Phase 3: TUI Buffers render section
+
+- `tui/src/render.rs` renders a **Buffers** section below the existing Repositories section — one row per buffer entity, showing `<path> [<bytes> bytes] <dirty-badge>` plus the authoring-actor line `by service weaver-buffers (inst <short-uuid>), event <id>, <t>s ago`. The `[observability lost]` badge replaces the dirty indicator when `buffer/observable = false`; `[stale]` is appended per-row when the TUI loses its core subscription. Row ordering is deterministic by `(entity, attribute)` per slice 002 convention.
+- `FamilyPrefix("buffer/")` added to the TUI's subscription set in `tui/src/client.rs`.
+
+### Added — Phase 4: authority handoff (US2)
+
+- `weaver inspect <buffer-entity>:buffer/dirty` attributes the fact to `weaver-buffers` (`asserting_kind = "service"`, `asserting_service = "weaver-buffers"`, `asserting_instance = <uuid>`, `asserting_behavior = absent`). e2e coverage in `tests/e2e/buffer_inspect_attribution.rs` (SC-305).
+- Cross-authority overwrite scenario (`core/tests/inspect/buffer_behavior_service_overwrite.rs`): a behavior-authored `buffer/dirty=true` injected into the fact store is overwritten by a service-authored `buffer/dirty=false` via the bus; `weaver inspect` returns the service's provenance, not the behavior's. Exercises FR-013 + the slice-002 F23 live-fact-provenance invariant through the slice-003 authority boundary.
+- Slice-001 e2e tests transformed onto `weaver-buffers`: `hello_fact.rs` retains its structural smoke shape (assert-post-bootstrap + SIGTERM-retracts, no latency assertions — the per-SC tests own those budgets); `disconnect.rs` flips to core-killed → service-exits (exit code 2 pins T038's bus-EOF classification); `subscribe_snapshot.rs` verifies late-subscriber snapshot replay for service-authored facts with `weaver-buffers` attribution.
+- `tests/e2e/buffer_simulate_removed.rs` pins the CLI-level removal of `weaver simulate-edit` / `simulate-clean` — exit code 2 with `"unrecognized subcommand"` in stderr.
+
+### Added — Phase 5: multi-buffer within one invocation (US3)
+
+- CLI-level path canonicalization + dedup at parse time (FR-006a). `buffers/src/cli.rs::canonicalise_and_dedup` collapses duplicate expressions of the same path (`./foo.txt`, `foo.txt`) into one unique-canonical set; a `debug!()` log fires when the dedup count differs. Incidentally fixed a pre-slice-003 latent bug where `./foo.txt` and `foo.txt` would have derived distinct buffer entities had the service ever been run with argv-as-typed (which slice 003 never does).
+- Defensive `BufferOpen` idempotence at the publisher dispatch layer: `BufferRegistry` + `pub(crate) fn dispatch_buffer_open` + `BufferOpenOutcome::{Fresh, AlreadyOwned}`. CLI hot path never triggers `AlreadyOwned` under slice-003 argv (T055 dedups upstream); slice-004+ wire producers that emit `BufferOpen` over the bus will exercise the branch. The seam is `pub(crate)`, not `pub` — slice 004 threads the handler into its `reader_loop` arm.
+- Authority-conflict enforcement: a second `weaver-buffers` instance launched on an overlapping path receives `Error { category: "authority-conflict" }` from core, maps to `PublisherError::AuthorityConflict`, exits code 3 within 1 s (SC-304). The first instance's facts remain unperturbed. e2e coverage in `tests/e2e/buffer_authority_conflict.rs` pins exit code 3 the same way `tests/e2e/disconnect.rs` pins exit code 2.
+- Per-buffer `buffer/observable` is edge-triggered per buffer; service-level `watcher/status=degraded` is the aggregate — `ready` stays asserted while any buffer remains observable. Recovery (file restored) re-publishes `buffer/observable=true` for the restored entity and `watcher/status=ready` if the service had flipped to `degraded`.
+
+### Added — Phase 6 test coverage
+
+- e2e: `buffer_{open_bootstrap, external_mutation, sigkill}.rs` — SC-301 (≤1 s cold start), SC-302 (≤500 ms external mutation), SC-303 (≤5 s SIGKILL retract).
+- e2e: `buffer_{inspect_attribution, simulate_removed}.rs` + `core/tests/inspect/buffer_behavior_service_overwrite.rs` — SC-305 + F23.
+- e2e: `buffer_{multi_buffer, authority_conflict, degraded_observable}.rs` — US3 scenarios.
+- Property tests: `buffers/tests/component_discipline.rs` (T062, SC-306) pins the attribute→`FactValue` type map through a `pub fn buffer_bootstrap_facts` seam; `buffers/tests/path_canonicalization.rs` (T064) exercises `buffer_entity_ref` determinism + reserved-bit invariants + canonicalize idempotence; `core/tests/property/factvalue_u64_roundtrip.rs` (T063) lifts the new variant's JSON + CBOR round-trip to the full `u64` domain.
+
+### Migration notes
+
+- Slice-001 e2e tests were **transformed**, not retired. Every slice-001 scenario that named `weaver publish` / `simulate-edit` / `simulate-clean` now drives `weaver-buffers` with a `tempfile::TempDir` fixture + `std::fs::write` to flip dirty. The `#[ignore]` gates added during slice 003 Phase 2 are all removed as of Phase 4.
+- Third-party bus clients upgrading to v0.3.0 must: (a) rebuild against the new `BUS_PROTOCOL_VERSION` constant, (b) drop any code that sends or handles `BufferEdited` / `BufferCleaned`, (c) handle `BufferOpen { path }` on the receive path if they consume events, (d) accept `FactValue::U64` as a valid value variant. The protocol-version-mismatch path logs the required version verbatim for operator diagnosis.
+
+## [0.2.0] — 2026-04-23 — slice 002 "Git-Watcher Actor"
 
 **Breaking bus-protocol change** — version bumps `0.1.0 → 0.2.0`. Slice 001 clients cannot connect to a v0.2.0 core; all in-tree bus clients (core, TUI, CLI, e2e test harness, test client) rebuild together.
 

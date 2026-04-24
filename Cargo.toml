@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["core", "git-watcher", "tests", "tui", "ui"]
+members = ["buffers", "core", "git-watcher", "tests", "tui", "ui"]
 
 [workspace.package]
 version = "0.1.0"
@@ -68,3 +68,8 @@ gix = { version = "0.66", default-features = false, features = [
 # Human-readable duration parsing for --poll-interval per slice 002
 # contracts/cli-surfaces.md.
 humantime = "2"
+
+# Content-digest hashing for the slice-003 buffer service
+# (`research.md §1`). RustCrypto SHA-256 implementation, already
+# AGPL-compatible (MIT/Apache-2.0) per Amendment 4.
+sha2 = "0.10"
