@@ -77,3 +77,7 @@ path = "e2e/buffer_simulate_removed.rs"
 [[test]]
 name = "buffer_multi_buffer"
 path = "e2e/buffer_multi_buffer.rs"
+
+[[test]]
+name = "buffer_authority_conflict"
+path = "e2e/buffer_authority_conflict.rs"
