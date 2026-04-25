@@ -33,7 +33,7 @@ use weaver_core::types::entity_ref::EntityRef;
 use weaver_core::types::event::{Event, EventPayload};
 use weaver_core::types::fact::{Fact, FactKey, FactValue};
 use weaver_core::types::ids::EventId;
-use weaver_core::types::message::{BusMessage, LifecycleSignal};
+use weaver_core::types::message::{BusMessage, EventSubscribePattern, LifecycleSignal};
 
 use crate::model::{
     ApplyError, BufferState, ObserverError, buffer_bootstrap_facts, buffer_entity_ref,
@@ -336,17 +336,32 @@ pub async fn run(
         "weaver-buffers starting",
     );
 
-    let client = Client::connect(&socket, SERVICE_ID)
+    let mut client = Client::connect(&socket, SERVICE_ID)
         .await
         .map_err(|source| PublisherError::BusUnavailable { source })?;
     info!("connected to core; bus protocol handshake complete");
+
+    // Slice 004: subscribe to BufferEdit events BEFORE splitting the
+    // connection — the SubscribeAck is consumed inline. After this
+    // returns Ok, the listener has registered the subscription and any
+    // BufferEdit dispatched by `weaver edit` will arrive on the read
+    // half. Filtering by target entity happens at dispatch time via
+    // `dispatch_buffer_edit`'s NotOwned outcome (the registry is the
+    // ownership source of truth; subscribing per-entity here would
+    // duplicate that gate without payoff).
+    client
+        .subscribe_events(EventSubscribePattern::PayloadType("buffer-edit".into()))
+        .await
+        .map_err(|source| PublisherError::BusUnavailable { source })?;
+    debug!("subscribed to buffer-edit events");
 
     let (reader, writer_half) = client.stream.into_split();
     let mut writer = BusWriter {
         writer: writer_half,
     };
     let (err_tx, mut err_rx) = mpsc::channel::<ServerSentError>(4);
-    let reader_task = tokio::spawn(reader_loop(reader, err_tx));
+    let (event_tx, mut event_rx) = mpsc::channel::<Event>(32);
+    let reader_task = tokio::spawn(reader_loop(reader, err_tx, event_tx));
 
     // Track every buffer/* fact we publish so the shutdown path (C13)
     // — and the fail-fast open-error branch below — can retract them
@@ -464,6 +479,17 @@ pub async fn run(
                     None => Err(bus_closed_error()),
                 };
             }
+            maybe_event = event_rx.recv() => {
+                if let Some(event) = maybe_event {
+                    if let Err(e) = handle_event(
+                        &mut writer, &identity, &mut registry, &mut tracked, event,
+                    ).await {
+                        break 'poll Err(e);
+                    }
+                }
+                // None: event channel closed; the bus EOF will surface
+                // via err_rx on the next iteration.
+            }
         }
 
         // Per-tick event id: one synthesised EventId shared across
@@ -520,6 +546,32 @@ pub async fn run(
 
     reader_task.abort();
     outcome
+}
+
+/// Handle one bus event delivered to the publisher (slice 004 T009C
+/// stub; T010 fills in the BufferEdit dispatch + fact re-emit path).
+///
+/// For T009C the body is a single debug log: events flow through the
+/// channel, but the publisher does not act on them yet. T010 will
+/// match on `event.payload`, route `BufferEdit` through
+/// `dispatch_buffer_edit`, and re-emit `buffer/byte-size` /
+/// `buffer/version` / `buffer/dirty` on accepted edits with
+/// `causal_parent = Some(event.id)`.
+#[allow(clippy::too_many_arguments)]
+async fn handle_event(
+    _writer: &mut BusWriter,
+    _identity: &ActorIdentity,
+    _registry: &mut BufferRegistry,
+    _tracked: &mut HashSet<FactKey>,
+    event: Event,
+) -> Result<(), PublisherError> {
+    debug!(
+        event_id = event.id.as_u64(),
+        payload_type = event.payload.type_tag(),
+        target = ?event.target.map(|e| e.as_u64()),
+        "received bus event (T010 wires the BufferEdit dispatch path)",
+    );
+    Ok(())
 }
 
 /// Drive one poll tick for a single buffer: observe, then emit
@@ -741,11 +793,21 @@ async fn publish_buffer_bootstrap(
     Ok(())
 }
 
-/// Reader task: drains server-sent `BusMessage`s from the read half,
-/// filters `Error` frames into [`ServerSentError`] for the main loop,
-/// and exits cleanly on EOF (dropping `err_tx`, which wakes the main
-/// loop's `recv` arm with `None`).
-async fn reader_loop(mut reader: OwnedReadHalf, err_tx: mpsc::Sender<ServerSentError>) {
+/// Reader task: drains server-sent `BusMessage`s from the read half.
+/// Forwards `Error` frames into [`ServerSentError`] for the main loop's
+/// control flow, and `Event` frames into the slice-004 event channel
+/// (T009C — events are dispatched by [`handle_event`] via
+/// [`dispatch_buffer_edit`]). Other server frames (SubscribeAck,
+/// lifecycle, peer facts) are not actionable in the buffer service's
+/// control flow and are dropped.
+///
+/// Exits cleanly on EOF: dropping `err_tx` and `event_tx` wakes the
+/// main loop's `recv` arms with `None`, signalling bus tear-down.
+async fn reader_loop(
+    mut reader: OwnedReadHalf,
+    err_tx: mpsc::Sender<ServerSentError>,
+    event_tx: mpsc::Sender<Event>,
+) {
     loop {
         match read_message(&mut reader).await {
             Ok(BusMessage::Error(msg)) => {
@@ -758,14 +820,29 @@ async fn reader_loop(mut reader: OwnedReadHalf, err_tx: mpsc::Sender<ServerSentE
                     return;
                 }
             }
+            Ok(BusMessage::Event(event)) => {
+                // Best-effort forward; a closed channel means the main
+                // loop has torn down. The event-channel is bounded
+                // (lossy class per docs/02-architecture.md §3.1) — a
+                // full channel drops the event silently. Slice-004's
+                // weaver-buffers is the only event consumer; if it
+                // can't keep up, the producer (weaver edit) sees
+                // fire-and-forget exit 0 and the dropped edit is
+                // indistinguishable from a stale-version drop at the
+                // service. Future bounded-with-drop-oldest semantics
+                // land alongside the fact-store bounding work.
+                if event_tx.try_send(event).is_err() {
+                    debug!("event channel full or closed; dropping event");
+                }
+            }
             Ok(_) => {
-                // Non-error server frames (SubscribeAck, lifecycle, facts
-                // from peers) aren't actionable in the buffer service's
-                // control flow yet; ignore.
+                // Non-error / non-event server frames (SubscribeAck,
+                // lifecycle, facts from peers) aren't actionable in
+                // the buffer service's control flow yet; ignore.
             }
             Err(_) => {
-                // EOF or codec error; drop err_tx by returning so the
-                // main loop's recv arm surfaces None.
+                // EOF or codec error; drop err_tx + event_tx by
+                // returning so the main loop's recv arms surface None.
                 return;
             }
         }
