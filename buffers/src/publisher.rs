@@ -28,6 +28,7 @@ use uuid::Uuid;
 use weaver_core::bus::client::{Client, ClientError};
 use weaver_core::bus::codec::{CodecError, read_message, write_message};
 use weaver_core::provenance::{ActorIdentity, Provenance};
+use weaver_core::types::edit::TextEdit;
 use weaver_core::types::entity_ref::EntityRef;
 use weaver_core::types::event::{Event, EventPayload};
 use weaver_core::types::fact::{Fact, FactKey, FactValue};
@@ -35,7 +36,7 @@ use weaver_core::types::ids::EventId;
 use weaver_core::types::message::{BusMessage, LifecycleSignal};
 
 use crate::model::{
-    BufferState, ObserverError, buffer_bootstrap_facts, buffer_entity_ref,
+    ApplyError, BufferState, ObserverError, buffer_bootstrap_facts, buffer_entity_ref,
     watcher_instance_entity_ref,
 };
 use crate::observer;
@@ -142,6 +143,117 @@ pub(crate) fn dispatch_buffer_open(
     }
     let state = BufferState::open(path.to_path_buf())?;
     Ok(BufferOpenOutcome::Fresh(state))
+}
+
+/// Outcome of dispatching a single `BufferEdit` event for a given
+/// `(entity, emitted_version)` tuple. Mirrors slice-003's
+/// [`BufferOpenOutcome`] shape: pure-ish dispatch returns one variant
+/// per receipt; the caller (the reader-loop arm in [`reader_loop`]
+/// once T010 wires it) decides what to publish.
+///
+/// All non-`Applied` variants are silent drops on the wire per
+/// FR-018; the publisher emits a categorised `tracing::debug!` line
+/// keyed off the variant so post-mortem trace inspection can
+/// reconstruct *why* an edit was dropped without any subscriber
+/// observing the rejection.
+//
+// `dead_code` is silenced until T010 wires this into `reader_loop`;
+// the enum is fully exercised by the unit tests below.
+#[allow(dead_code)]
+#[derive(Debug)]
+pub(crate) enum BufferEditOutcome {
+    /// Validated batch was applied. The post-apply state lives in
+    /// `registry.buffers[entity]`; the variant carries the metadata
+    /// the reader-loop arm needs to publish `buffer/byte-size` and
+    /// `buffer/version` directly, plus the post-apply
+    /// `memory_digest` for the dirty calculation (which still
+    /// requires re-reading the file from disk).
+    Applied {
+        entity: EntityRef,
+        new_version: u64,
+        new_byte_size: u64,
+        new_memory_digest: [u8; 32],
+    },
+    /// This service does not own the target entity (no `BufferOpen`
+    /// has been processed for it on this instance). No publish.
+    NotOwned,
+    /// Emitted version is older than current — almost certainly a
+    /// concurrent-edit conflict where two emitters saw the same
+    /// version and one landed first. Drop per FR-005 step 2.
+    StaleVersion { current: u64, emitted: u64 },
+    /// Emitted version is newer than current — defensive drop for an
+    /// emitter that saw a version this service did not issue.
+    FutureVersion { current: u64, emitted: u64 },
+    /// Per-edit or batch-overlap validation rejected the batch. No
+    /// state mutation per [`BufferState::apply_edits`]'s atomicity
+    /// guarantee; no publish.
+    ValidationFailure(ApplyError),
+}
+
+/// Handler for a single `BufferEdit` event: gates ownership + version,
+/// applies the batch atomically (via [`BufferState::apply_edits`]),
+/// and bumps the per-buffer version on accept. Pure-ish (no bus
+/// writes, no tracing) so unit tests exercise the full outcome matrix
+/// without a mock writer; FR-018 categorisation lives in the
+/// reader-loop arm that consumes the outcome.
+///
+/// Ordering is significant:
+///
+/// 1. Ownership gate — non-owned entities short-circuit first; we
+///    must not even peek at the version map for entities other
+///    services own.
+/// 2. Version gate — stale and future drops happen before validation
+///    so a malformed batch under a concurrent-edit conflict surfaces
+///    as a version drop, not a validation failure (the operator's
+///    diagnostic priority is the conflict, not the malformed edit).
+/// 3. Validation + apply — `BufferState::apply_edits` validates the
+///    full batch before mutating anything; on failure the buffer is
+///    untouched.
+/// 4. Version bump — only on accepted apply.
+//
+// `dead_code` is silenced until T010 wires this into `reader_loop`;
+// the function is fully exercised by the unit tests below.
+#[allow(dead_code)]
+pub(crate) fn dispatch_buffer_edit(
+    registry: &mut BufferRegistry,
+    entity: EntityRef,
+    version: u64,
+    edits: &[TextEdit],
+) -> BufferEditOutcome {
+    if !registry.is_owned(entity) {
+        return BufferEditOutcome::NotOwned;
+    }
+    let current = registry.versions.get(&entity).copied().unwrap_or(0);
+    if version < current {
+        return BufferEditOutcome::StaleVersion {
+            current,
+            emitted: version,
+        };
+    }
+    if version > current {
+        return BufferEditOutcome::FutureVersion {
+            current,
+            emitted: version,
+        };
+    }
+    // version == current — eligible for application.
+    let state = registry
+        .buffers
+        .get_mut(&entity)
+        .expect("is_owned(entity) implies buffers contains the key");
+    if let Err(err) = state.apply_edits(edits) {
+        return BufferEditOutcome::ValidationFailure(err);
+    }
+    let new_byte_size = state.byte_size();
+    let new_memory_digest = *state.memory_digest();
+    let new_version = current + 1;
+    registry.versions.insert(entity, new_version);
+    BufferEditOutcome::Applied {
+        entity,
+        new_version,
+        new_byte_size,
+        new_memory_digest,
+    }
 }
 
 #[derive(Debug, Error)]
@@ -1088,5 +1200,166 @@ mod tests {
             }
             other => panic!("expected Observer(StartupFailure), got {other:?}"),
         }
+    }
+
+    // ───────────────────────────────────────────────────────────────────
+    // Slice-004: dispatch_buffer_edit + BufferEditOutcome (T009).
+    // ───────────────────────────────────────────────────────────────────
+
+    use weaver_core::types::edit::{Position, Range, TextEdit};
+
+    /// Build a single-buffer registry and return it together with the
+    /// derived entity and the backing tempfile (caller binds the
+    /// tempfile to keep the disk path alive for the test scope, even
+    /// though dispatch_buffer_edit operates on in-memory content only).
+    fn registry_with_buffer(
+        content: &[u8],
+    ) -> (BufferRegistry, EntityRef, tempfile::NamedTempFile) {
+        use std::io::Write;
+        let mut tf = tempfile::NamedTempFile::new().expect("tempfile");
+        tf.write_all(content).expect("write");
+        let canonical = std::fs::canonicalize(tf.path()).expect("canonicalize");
+        let state = BufferState::open(canonical).expect("open");
+        let entity = state.entity();
+        let mut reg = BufferRegistry::default();
+        reg.insert(state);
+        (reg, entity, tf)
+    }
+
+    fn pure_insert(line: u32, character: u32, text: &str) -> TextEdit {
+        TextEdit {
+            range: Range {
+                start: Position { line, character },
+                end: Position { line, character },
+            },
+            new_text: text.into(),
+        }
+    }
+
+    #[test]
+    fn dispatch_buffer_edit_returns_not_owned_for_unknown_entity() {
+        let mut reg = BufferRegistry::default();
+        let entity = EntityRef::new(0xDEAD_BEEF);
+        let outcome = dispatch_buffer_edit(&mut reg, entity, 0, &[]);
+        assert!(matches!(outcome, BufferEditOutcome::NotOwned));
+    }
+
+    #[test]
+    fn dispatch_buffer_edit_returns_stale_version_when_emitted_below_current() {
+        let (mut reg, entity, _tf) = registry_with_buffer(b"hello");
+        // Bump current to 5 to set up the stale scenario.
+        reg.versions.insert(entity, 5);
+        let outcome = dispatch_buffer_edit(&mut reg, entity, 3, &[]);
+        match outcome {
+            BufferEditOutcome::StaleVersion { current, emitted } => {
+                assert_eq!(current, 5);
+                assert_eq!(emitted, 3);
+            }
+            other => panic!("expected StaleVersion, got {other:?}"),
+        }
+        // No mutation: version stays at 5.
+        assert_eq!(reg.versions.get(&entity).copied(), Some(5));
+    }
+
+    #[test]
+    fn dispatch_buffer_edit_returns_future_version_when_emitted_above_current() {
+        let (mut reg, entity, _tf) = registry_with_buffer(b"hello");
+        reg.versions.insert(entity, 5);
+        let outcome = dispatch_buffer_edit(&mut reg, entity, 7, &[]);
+        match outcome {
+            BufferEditOutcome::FutureVersion { current, emitted } => {
+                assert_eq!(current, 5);
+                assert_eq!(emitted, 7);
+            }
+            other => panic!("expected FutureVersion, got {other:?}"),
+        }
+        assert_eq!(reg.versions.get(&entity).copied(), Some(5));
+    }
+
+    #[test]
+    fn dispatch_buffer_edit_returns_validation_failure_for_malformed_batch() {
+        // Buffer "hi" — line 0 length is 2; character 99 is OOB.
+        let (mut reg, entity, _tf) = registry_with_buffer(b"hi");
+        let bad = pure_insert(0, 99, "boom");
+        let outcome = dispatch_buffer_edit(&mut reg, entity, 0, std::slice::from_ref(&bad));
+        match outcome {
+            BufferEditOutcome::ValidationFailure(err) => {
+                assert_eq!(err.reason(), "validation-failure-out-of-bounds");
+                assert_eq!(err.edit_index(), Some(0));
+            }
+            other => panic!("expected ValidationFailure, got {other:?}"),
+        }
+        // Atomicity: version + content unchanged.
+        assert_eq!(reg.versions.get(&entity).copied(), Some(0));
+        assert_eq!(reg.buffers.get(&entity).unwrap().content(), b"hi");
+    }
+
+    #[test]
+    fn dispatch_buffer_edit_returns_applied_for_valid_batch() {
+        use sha2::{Digest, Sha256};
+        let (mut reg, entity, _tf) = registry_with_buffer(b"world");
+        let edit = pure_insert(0, 0, "hello ");
+        let outcome = dispatch_buffer_edit(&mut reg, entity, 0, std::slice::from_ref(&edit));
+        match outcome {
+            BufferEditOutcome::Applied {
+                entity: e,
+                new_version,
+                new_byte_size,
+                new_memory_digest,
+            } => {
+                assert_eq!(e, entity);
+                assert_eq!(new_version, 1);
+                assert_eq!(new_byte_size, b"hello world".len() as u64);
+                let expected: [u8; 32] = Sha256::digest(b"hello world").into();
+                assert_eq!(new_memory_digest, expected);
+            }
+            other => panic!("expected Applied, got {other:?}"),
+        }
+        // Registry post-state matches the outcome's snapshot.
+        assert_eq!(reg.versions.get(&entity).copied(), Some(1));
+        let state = reg.buffers.get(&entity).unwrap();
+        assert_eq!(state.content(), b"hello world");
+        assert_eq!(state.byte_size(), b"hello world".len() as u64);
+    }
+
+    #[test]
+    fn dispatch_buffer_edit_increments_version_only_on_accept() {
+        let (mut reg, entity, _tf) = registry_with_buffer(b"x");
+        let valid = pure_insert(0, 0, "a");
+
+        // Accept: bumps to 1.
+        let _ = dispatch_buffer_edit(&mut reg, entity, 0, std::slice::from_ref(&valid));
+        assert_eq!(reg.versions.get(&entity).copied(), Some(1));
+
+        // Stale (emit=0, current=1): no bump.
+        let _ = dispatch_buffer_edit(&mut reg, entity, 0, std::slice::from_ref(&valid));
+        assert_eq!(reg.versions.get(&entity).copied(), Some(1));
+
+        // Future (emit=99, current=1): no bump.
+        let _ = dispatch_buffer_edit(&mut reg, entity, 99, std::slice::from_ref(&valid));
+        assert_eq!(reg.versions.get(&entity).copied(), Some(1));
+
+        // Validation failure at the correct version: no bump.
+        let bad = pure_insert(0, 99, "boom");
+        let _ = dispatch_buffer_edit(&mut reg, entity, 1, std::slice::from_ref(&bad));
+        assert_eq!(reg.versions.get(&entity).copied(), Some(1));
+    }
+
+    #[test]
+    fn dispatch_buffer_edit_empty_batch_at_correct_version_bumps_version() {
+        // Per FR-008 + data-model: empty batch is structurally an
+        // identity on content, but it IS still an accepted edit at
+        // the wire level; the version bumps by 1. (Subscribers see
+        // an empty re-emit burst — byte-size unchanged but version
+        // advances.) This pins the boundary between "dropped at
+        // wire" and "applied as identity".
+        let (mut reg, entity, _tf) = registry_with_buffer(b"hello");
+        let outcome = dispatch_buffer_edit(&mut reg, entity, 0, &[]);
+        match outcome {
+            BufferEditOutcome::Applied { new_version, .. } => assert_eq!(new_version, 1),
+            other => panic!("expected Applied (empty batch), got {other:?}"),
+        }
+        assert_eq!(reg.versions.get(&entity).copied(), Some(1));
+        assert_eq!(reg.buffers.get(&entity).unwrap().content(), b"hello");
     }
 }
