@@ -12,7 +12,7 @@
 //! bus-EOF classification). The CLI wrapper that invokes [`run`]
 //! lands in C14.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -67,31 +67,44 @@ impl BusWriter {
     }
 }
 
-/// Set of buffer entities currently owned by this service instance.
+/// Per-instance buffer registry: holds owned [`BufferState`]s and the
+/// `buffer/version` counters for each owned entity.
 ///
-/// Drives the FR-011a idempotence invariant: when a `BufferOpen`
-/// event names a path whose derived entity is already in the
-/// registry, the dispatch handler short-circuits to a no-op — no
-/// re-read of the file, no fact re-publication, no trace emission.
+/// The `buffers` map is the single source of truth for ownership
+/// (entity ownership lookup is `buffers.contains_key(&e)`) and for the
+/// in-memory content the poll loop and the slice-004 edit-dispatch
+/// arm operate on. The `versions` map tracks per-buffer
+/// `buffer/version`: initialised to `0` at bootstrap (matches the
+/// slice-003 PR #10 forward-compat bootstrap fact); bumped by each
+/// accepted `EventPayload::BufferEdit` in slice 004; never
+/// decremented.
 ///
-/// Slice 003's CLI bootstrap calls [`dispatch_buffer_open`] per
-/// deduped path, so the registry is populated as part of the hot
-/// path; the "already-owned" branch is unreachable under slice-003
-/// argv (T055's canonicalisation+dedup at parse time collapses
-/// duplicates upstream). Slice 004+ external producers that emit
+/// Drives the FR-011a idempotence invariant for `BufferOpen`: a
+/// repeat dispatch whose derived entity is already in `buffers`
+/// short-circuits to a no-op — no re-read, no fact re-publication,
+/// no trace emission. Slice-003's CLI bootstrap deduplicates paths
+/// at parse time (T055) so the already-owned branch is unreachable
+/// under slice-003 argv; slice 004+ external producers that emit
 /// `BufferOpen` over the wire will exercise the branch for real.
 #[derive(Default)]
 pub(crate) struct BufferRegistry {
-    owned: HashSet<EntityRef>,
+    pub(crate) buffers: HashMap<EntityRef, BufferState>,
+    pub(crate) versions: HashMap<EntityRef, u64>,
 }
 
 impl BufferRegistry {
     pub(crate) fn is_owned(&self, entity: EntityRef) -> bool {
-        self.owned.contains(&entity)
+        self.buffers.contains_key(&entity)
     }
 
-    pub(crate) fn mark_owned(&mut self, entity: EntityRef) {
-        self.owned.insert(entity);
+    /// Insert a freshly-opened buffer's state and initialise its
+    /// `buffer/version` counter to `0`. Caller MUST have confirmed
+    /// `is_owned(state.entity()) == false` (the FR-011a check happens
+    /// at [`dispatch_buffer_open`]'s decision point, not here).
+    pub(crate) fn insert(&mut self, state: BufferState) {
+        let entity = state.entity();
+        self.versions.insert(entity, 0);
+        self.buffers.insert(entity, state);
     }
 }
 
@@ -101,8 +114,8 @@ impl BufferRegistry {
 #[derive(Debug)]
 pub(crate) enum BufferOpenOutcome {
     /// First sighting — caller MUST publish the 4-fact bootstrap
-    /// and [`BufferRegistry::mark_owned`] the returned state's
-    /// entity so subsequent dispatches short-circuit.
+    /// and [`BufferRegistry::insert`] the returned state so
+    /// subsequent dispatches short-circuit.
     Fresh(BufferState),
     /// Entity already owned. Caller MUST NOT publish or retract
     /// anything — FR-011a.
@@ -241,9 +254,12 @@ pub async fn run(
 
     // T030 + T032: per-buffer open + bootstrap in CLI order, fail-fast
     // with partial-retract on any open error.
-    let mut states: Vec<BufferState> =
-        match open_and_bootstrap_all(&mut writer, &identity, &paths, &mut tracked).await {
-            Ok(states) => states,
+    let mut registry = BufferRegistry::default();
+    let bootstrap_anchors: Vec<(EntityRef, EventId)> =
+        match open_and_bootstrap_all(&mut writer, &identity, &paths, &mut tracked, &mut registry)
+            .await
+        {
+            Ok(anchors) => anchors,
             Err(e) => {
                 // Retract any facts the partial-bootstrap published so
                 // subscribers see retract-before-disconnect. Core's
@@ -277,10 +293,16 @@ pub async fn run(
 
     // Drain cleared: the core accepted every bootstrap `FactAssert`.
     // Now emit the `buffer/open` events that anchor each buffer's
-    // causal_parent chain, in the same CLI order as the bootstrap
-    // facts used when they referenced `EventId::new(idx as u64)`.
-    for (idx, state) in states.iter().enumerate() {
-        publish_buffer_open_event(&mut writer, &identity, state, EventId::new(idx as u64)).await?;
+    // causal_parent chain, in the same CLI order the bootstrap facts
+    // used. Each anchor pairs the entity with the bootstrap-tick
+    // `EventId` that was already used as the bootstrap `causal_parent`,
+    // so `weaver inspect --why` walkbacks land on the matching event.
+    for (entity, bootstrap_id) in &bootstrap_anchors {
+        let state = registry
+            .buffers
+            .get(entity)
+            .expect("bootstrap_anchors mirrors registry.buffers keys");
+        publish_buffer_open_event(&mut writer, &identity, state, *bootstrap_id).await?;
     }
 
     // T031: lifecycle ready.
@@ -338,7 +360,7 @@ pub async fn run(
         // `buffer/dirty` correlate to the same poll tick.
         let poll_tick_id = EventId::new(now_ns());
 
-        for state in &mut states {
+        for state in registry.buffers.values_mut() {
             if let Err(e) =
                 poll_tick_per_buffer(&mut writer, &identity, state, &mut tracked, poll_tick_id)
                     .await
@@ -351,7 +373,8 @@ pub async fn run(
         // `degraded` fires only when every currently-open buffer is
         // simultaneously unobservable; recovery (any buffer regains
         // observability) republishes `ready`. Edge-triggered.
-        let all_unobservable = !states.is_empty() && states.iter().all(|s| !s.last_observable());
+        let all_unobservable =
+            !registry.buffers.is_empty() && registry.buffers.values().all(|s| !s.last_observable());
         match (all_unobservable, was_degraded) {
             (true, false) => {
                 if let Err(e) = publish_watcher_status(
@@ -489,11 +512,11 @@ async fn open_and_bootstrap_all(
     identity: &ActorIdentity,
     paths: &[PathBuf],
     tracked: &mut HashSet<FactKey>,
-) -> Result<Vec<BufferState>, PublisherError> {
-    let mut states = Vec::with_capacity(paths.len());
-    let mut registry = BufferRegistry::default();
+    registry: &mut BufferRegistry,
+) -> Result<Vec<(EntityRef, EventId)>, PublisherError> {
+    let mut anchors = Vec::with_capacity(paths.len());
     for (idx, path) in paths.iter().enumerate() {
-        let outcome = match dispatch_buffer_open(&registry, path) {
+        let outcome = match dispatch_buffer_open(registry, path) {
             Ok(o) => o,
             Err(source) => {
                 warn!(
@@ -528,11 +551,12 @@ async fn open_and_bootstrap_all(
         // the "event emission only once ownership is confirmed"
         // ordering.
         let bootstrap_tick = EventId::new(idx as u64);
+        let entity = state.entity();
         publish_buffer_bootstrap(writer, identity, &state, tracked, bootstrap_tick).await?;
-        registry.mark_owned(state.entity());
-        states.push(state);
+        registry.insert(state);
+        anchors.push((entity, bootstrap_tick));
     }
-    Ok(states)
+    Ok(anchors)
 }
 
 /// Publish the `BufferOpen` event that anchors a buffer's bootstrap
@@ -1007,7 +1031,10 @@ mod tests {
         let mut registry = BufferRegistry::default();
 
         // First dispatch: fresh. Caller (the bootstrap loop) would
-        // publish the 4-fact bootstrap and mark_owned the entity.
+        // publish the 4-fact bootstrap and insert the state into the
+        // registry — which simultaneously sets the version counter to
+        // 0 and marks the entity as owned (HashMap keyset is the
+        // ownership marker post-T008).
         let first =
             dispatch_buffer_open(&registry, &canonical).expect("first dispatch must succeed");
         let state = match first {
@@ -1015,7 +1042,10 @@ mod tests {
             BufferOpenOutcome::AlreadyOwned => panic!("first dispatch must be Fresh"),
         };
         assert_eq!(state.path(), canonical.as_path());
-        registry.mark_owned(state.entity());
+        let entity = state.entity();
+        registry.insert(state);
+        assert!(registry.is_owned(entity));
+        assert_eq!(registry.versions.get(&entity).copied(), Some(0));
 
         // Second dispatch on the same canonical path: registry hit,
         // so the handler returns AlreadyOwned and performs no file
