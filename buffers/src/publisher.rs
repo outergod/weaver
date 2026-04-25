@@ -656,6 +656,16 @@ async fn handle_event(
                         tracked,
                     )
                     .await?;
+                    // Sync the edge-tracker so the next poll tick does
+                    // NOT re-publish buffer/dirty=<same value> with a
+                    // poll-tick `causal_parent`. The reader-loop arm is
+                    // authoritative for this transition; the poll loop
+                    // observes external mutations only.
+                    let state = registry
+                        .buffers
+                        .get_mut(&entity)
+                        .expect("Applied implies the entity is in the registry");
+                    state.set_last_dirty(dirty);
                 }
                 BufferEditOutcome::NotOwned => {
                     debug!(
