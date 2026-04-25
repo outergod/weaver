@@ -842,7 +842,7 @@ fn annotation(fact: &Fact, asserted_at_wall_ns: u64, stale: bool) -> String {
             let short = inst.get(..8).unwrap_or(inst.as_str());
             format!("service {service_id} (inst {short})")
         }
-        ActorIdentity::User { id } => format!("user {id}"),
+        ActorIdentity::User => "user".into(),
         ActorIdentity::Host { host_id, .. } => format!("host {host_id}"),
         ActorIdentity::Agent { agent_id, .. } => format!("agent {agent_id}"),
     };

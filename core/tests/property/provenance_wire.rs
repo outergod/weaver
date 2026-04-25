@@ -44,6 +44,7 @@ fn arb_identity() -> impl Strategy<Value = ActorIdentity> {
     prop_oneof![
         Just(ActorIdentity::Core),
         Just(ActorIdentity::Tui),
+        Just(ActorIdentity::User),
         "[a-z]{1,10}/[a-z]{1,20}".prop_map(|id| ActorIdentity::behavior(BehaviorId::new(id))),
         (
             proptest::collection::vec("[a-z0-9]{1,6}", 1..=4),
@@ -112,13 +113,12 @@ fn arb_provenanced_message() -> impl Strategy<Value = BusMessage> {
 
 fn identity_is_non_empty(source: &ActorIdentity) -> bool {
     match source {
-        ActorIdentity::Core | ActorIdentity::Tui => true,
+        ActorIdentity::Core | ActorIdentity::Tui | ActorIdentity::User => true,
         ActorIdentity::Behavior { id } => !id.as_str().is_empty(),
         ActorIdentity::Service {
             service_id,
             instance_id: _,
         } => !service_id.is_empty(),
-        ActorIdentity::User { id } => !id.as_str().is_empty(),
         ActorIdentity::Host { host_id, .. } => !host_id.is_empty(),
         ActorIdentity::Agent { agent_id, .. } => !agent_id.is_empty(),
     }

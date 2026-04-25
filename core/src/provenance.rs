@@ -62,8 +62,17 @@ pub enum ActorIdentity {
         instance_id: Uuid,
     },
 
-    /// A human user (reserved — not emitted this slice).
-    User { id: UserId },
+    /// A human user.
+    ///
+    /// Slice 002 reserved this as a struct variant carrying an opaque
+    /// `UserId` for forward-compatibility. Slice 004 — the first
+    /// production user (CLI emitter for `weaver edit` / `weaver edit-json`)
+    /// — finalised it as a unit variant: a single-process local editor
+    /// has no need to attribute edits across multiple users, and the
+    /// timestamp distinguishes successive User-emitted events. If a
+    /// future slice introduces multi-user attribution, it can land as
+    /// a richer variant under another protocol bump.
+    User,
 
     /// A language host proxying user code (reserved — not emitted this slice).
     Host {
@@ -84,28 +93,6 @@ pub enum ActorIdentity {
         #[serde(rename = "on-behalf-of")]
         on_behalf_of: Option<Box<ActorIdentity>>,
     },
-}
-
-/// Opaque human-user identity. Reserved for forward compatibility;
-/// not emitted by any producer in slice 002.
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct UserId(String);
-
-impl UserId {
-    pub fn new(id: impl Into<String>) -> Self {
-        Self(id.into())
-    }
-
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-}
-
-impl std::fmt::Display for UserId {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.0)
-    }
 }
 
 /// Origin of language-hosted user code within a language host's
@@ -160,11 +147,6 @@ impl ActorIdentity {
         Self::Behavior { id }
     }
 
-    /// Convenience constructor for [`ActorIdentity::User`].
-    pub fn user(id: UserId) -> Self {
-        Self::User { id }
-    }
-
     /// Short, human-readable label for diagnostic rendering.
     /// **Not** a wire format — wire serialization uses serde.
     pub fn kind_label(&self) -> &'static str {
@@ -173,7 +155,7 @@ impl ActorIdentity {
             Self::Behavior { .. } => "behavior",
             Self::Tui => "tui",
             Self::Service { .. } => "service",
-            Self::User { .. } => "user",
+            Self::User => "user",
             Self::Host { .. } => "host",
             Self::Agent { .. } => "agent",
         }
@@ -188,12 +170,13 @@ impl ActorIdentity {
     ///
     /// The format per variant:
     ///
-    /// - `Core` / `Tui` — just the kind label (no identifier carried).
+    /// - `Core` / `Tui` / `User` — just the kind label (no identifier
+    ///   carried; `User` was finalised as a unit variant in slice 004).
     /// - `Behavior` — `"behavior <id>"`.
     /// - `Service` — `"service <service-id> (inst <8-hex>)"`, matching
     ///   the TUI rendering in `tui/src/render.rs`.
-    /// - `User` / `Host` / `Agent` — `"<kind> <id>"` using the
-    ///   variant's primary identifier.
+    /// - `Host` / `Agent` — `"<kind> <id>"` using the variant's primary
+    ///   identifier.
     ///
     /// **Not** a wire format — use serde for serialization. Purely a
     /// diagnostic surface; the exact string shape may tighten in
@@ -202,6 +185,7 @@ impl ActorIdentity {
         match self {
             Self::Core => "core".into(),
             Self::Tui => "tui".into(),
+            Self::User => "user".into(),
             Self::Behavior { id } => format!("behavior {id}"),
             Self::Service {
                 service_id,
@@ -211,7 +195,6 @@ impl ActorIdentity {
                 let short = hyphenated.get(..8).unwrap_or(hyphenated.as_str());
                 format!("service {service_id} (inst {short})")
             }
-            Self::User { id } => format!("user {id}"),
             Self::Host { host_id, .. } => format!("host {host_id}"),
             Self::Agent { agent_id, .. } => format!("agent {agent_id}"),
         }
@@ -229,15 +212,17 @@ impl ActorIdentity {
     ///
     /// F19 review fix: every identity-carrying variant gets a
     /// non-empty check on its payload fields. The reserved
-    /// variants (`User`, `Host`, `Agent`) aren't emitted this
-    /// slice, but [`validate`] is now the single wire gate — so
-    /// malformed frames carrying empty strings must not slip
-    /// through into trace/inspection. Kebab-case validation stays
-    /// scoped to `Service` since that's the only variant whose
-    /// identifier vocabulary the slice commits to. Nested
-    /// identities (`Agent::on_behalf_of`) are recursively
-    /// validated so a chain with a malformed delegator is
-    /// caught at the top.
+    /// variants (`Host`, `Agent`) aren't emitted this slice, but
+    /// [`validate`] is now the single wire gate — so malformed frames
+    /// carrying empty strings must not slip through into
+    /// trace/inspection. Kebab-case validation stays scoped to
+    /// `Service` since that's the only variant whose identifier
+    /// vocabulary the slice commits to. Nested identities
+    /// (`Agent::on_behalf_of`) are recursively validated so a chain
+    /// with a malformed delegator is caught at the top.
+    ///
+    /// Slice 004 finalised `User` as a unit variant; it carries no
+    /// payload to validate.
     pub fn validate(&self) -> Result<(), ProvenanceError> {
         match self {
             Self::Service { service_id, .. } => validate_kebab_case(service_id),
@@ -253,13 +238,6 @@ impl ActorIdentity {
                     Err(ProvenanceError::EmptyIdentityField {
                         field: "behavior-id",
                     })
-                } else {
-                    Ok(())
-                }
-            }
-            Self::User { id } => {
-                if id.as_str().is_empty() {
-                    Err(ProvenanceError::EmptyIdentityField { field: "user-id" })
                 } else {
                     Ok(())
                 }
@@ -297,7 +275,7 @@ impl ActorIdentity {
             }
             // Payload-less variants have no further invariants to
             // check beyond their type-level structure.
-            Self::Core | Self::Tui => Ok(()),
+            Self::Core | Self::Tui | Self::User => Ok(()),
         }
     }
 }
@@ -386,17 +364,6 @@ mod tests {
     }
 
     #[test]
-    fn validate_rejects_empty_user_id() {
-        let id = ActorIdentity::User {
-            id: UserId::new(""),
-        };
-        assert_eq!(
-            id.validate().unwrap_err(),
-            ProvenanceError::EmptyIdentityField { field: "user-id" }
-        );
-    }
-
-    #[test]
     fn validate_rejects_empty_host_id() {
         let id = ActorIdentity::Host {
             host_id: "".into(),
@@ -477,10 +444,8 @@ mod tests {
 
     #[test]
     fn validate_accepts_well_formed_reserved_variants() {
-        let user = ActorIdentity::User {
-            id: UserId::new("alice"),
-        };
-        assert!(user.validate().is_ok());
+        // User is unit since slice 004 — no payload to validate.
+        assert!(ActorIdentity::User.validate().is_ok());
         let host = ActorIdentity::Host {
             host_id: "lua".into(),
             hosted_origin: HostedOrigin {
@@ -492,9 +457,7 @@ mod tests {
         assert!(host.validate().is_ok());
         let agent = ActorIdentity::Agent {
             agent_id: "researcher".into(),
-            on_behalf_of: Some(Box::new(ActorIdentity::User {
-                id: UserId::new("alice"),
-            })),
+            on_behalf_of: Some(Box::new(ActorIdentity::User)),
         };
         assert!(agent.validate().is_ok());
     }
@@ -549,6 +512,7 @@ mod tests {
     fn kind_label_matches_serde_tag() {
         assert_eq!(ActorIdentity::Core.kind_label(), "core");
         assert_eq!(ActorIdentity::Tui.kind_label(), "tui");
+        assert_eq!(ActorIdentity::User.kind_label(), "user");
         assert_eq!(
             ActorIdentity::behavior(BehaviorId::new("x")).kind_label(),
             "behavior"
@@ -561,12 +525,24 @@ mod tests {
         );
     }
 
+    /// Slice 004 contract: `User` is a unit variant on the wire.
+    /// Pin the JSON shape so a future refactor can't quietly add a
+    /// payload field.
+    #[test]
+    fn user_unit_variant_json_wire_shape() {
+        let s = serde_json::to_string(&ActorIdentity::User).unwrap();
+        assert_eq!(s, r#"{"type":"user"}"#);
+        let back: ActorIdentity = serde_json::from_str(&s).unwrap();
+        assert_eq!(back, ActorIdentity::User);
+    }
+
     proptest! {
         #[test]
         fn ciborium_round_trip_basic_variants(ts in 0u64..u64::MAX) {
             for src in [
                 ActorIdentity::Core,
                 ActorIdentity::Tui,
+                ActorIdentity::User,
                 ActorIdentity::behavior(BehaviorId::new("core/dirty-tracking")),
             ] {
                 let p = Provenance::new(src, ts, None).unwrap();

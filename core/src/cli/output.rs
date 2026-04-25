@@ -150,7 +150,7 @@ fn format_source(src: &crate::provenance::ActorIdentity) -> String {
             service_id,
             instance_id,
         } => format!("service:{service_id}:{instance_id}"),
-        ActorIdentity::User { id } => format!("user:{id}"),
+        ActorIdentity::User => "user".into(),
         ActorIdentity::Host { host_id, .. } => format!("host:{host_id}"),
         ActorIdentity::Agent { agent_id, .. } => format!("agent:{agent_id}"),
     }
