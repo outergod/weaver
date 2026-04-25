@@ -56,6 +56,12 @@ pub enum Command {
         /// Fact key in `<entity-id>:<attribute>` format
         /// (e.g., `1:buffer/dirty`).
         fact_key: String,
+        /// Walk from the fact back to its source event and render the
+        /// emitter's `ActorIdentity`. See
+        /// `specs/004-buffer-edit/contracts/cli-surfaces.md
+        /// §weaver inspect --why`.
+        #[arg(long)]
+        why: bool,
     },
 
     /// Dispatch a batch of text edits to an opened buffer.
