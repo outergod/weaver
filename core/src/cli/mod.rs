@@ -35,6 +35,9 @@ pub fn run() -> miette::Result<()> {
         Some(Command::Status) => status::run(output, socket),
         Some(Command::Inspect { fact_key, why }) => inspect::run(&fact_key, output, why, socket),
         Some(Command::Edit { path, pairs }) => edit::handle_edit(path, pairs, output, socket),
+        Some(Command::EditJson { path, from }) => {
+            edit::handle_edit_json(path, from, output, socket)
+        }
         None => {
             print_help();
             Ok(())

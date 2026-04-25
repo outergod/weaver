@@ -263,6 +263,28 @@ pub fn handle_edit(
     })
 }
 
+/// `weaver edit-json <PATH> --from <PATH-or-dash>` handler stub.
+///
+/// T019 lands the grammar; T020 replaces this body with the JSON-read,
+/// parse, size-check, and dispatch flow that reuses the canonicalise,
+/// inspect-lookup, and envelope-construction path from `handle_edit`.
+/// Until then this returns a `not yet wired` parse-error so the
+/// integration is build-green and `weaver edit-json` exits 1 with a
+/// self-explaining diagnostic if invoked.
+pub fn handle_edit_json(
+    _path: PathBuf,
+    _from: PathBuf,
+    output: OutputFormat,
+    _socket_override: Option<PathBuf>,
+) -> miette::Result<()> {
+    let err = WeaverCliError::ParseError {
+        message: "weaver edit-json: handler lands in T020 (Phase 5 US3)".into(),
+        context: Some("weaver edit-json".into()),
+    };
+    render_error(&err, output)?;
+    std::process::exit(err.exit_code());
+}
+
 /// Monotonic per-process inspect request-id counter. One
 /// `weaver edit` invocation issues exactly one InspectRequest, but the
 /// counter is process-scoped to keep the shape consistent with

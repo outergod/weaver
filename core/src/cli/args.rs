@@ -81,6 +81,23 @@ pub enum Command {
         #[arg(num_args = 0..)]
         pairs: Vec<String>,
     },
+
+    /// Dispatch a JSON-encoded `Vec<TextEdit>` to an opened buffer.
+    ///
+    /// Identical semantics to `weaver edit` but reads the batch from
+    /// stdin or a file. Fire-and-forget; same atomic-batch and
+    /// fire-and-forget exit conventions. See
+    /// `specs/004-buffer-edit/contracts/cli-surfaces.md
+    /// §weaver edit-json`.
+    EditJson {
+        /// File path identifying the buffer.
+        path: PathBuf,
+        /// Source for the JSON `Vec<TextEdit>`. Pass `-` for stdin or
+        /// a filesystem path. The flag is REQUIRED; there is no
+        /// implicit-stdin default per the contract.
+        #[arg(long)]
+        from: PathBuf,
+    },
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
@@ -152,6 +169,48 @@ mod tests {
             }
             other => panic!("expected Command::Edit, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn parses_edit_json_subcommand_with_named_file() {
+        let cli = Cli::try_parse_from([
+            "weaver",
+            "edit-json",
+            "/tmp/foo.txt",
+            "--from",
+            "/tmp/edits.json",
+        ])
+        .unwrap();
+        match cli.command {
+            Some(Command::EditJson { path, from }) => {
+                assert_eq!(path, PathBuf::from("/tmp/foo.txt"));
+                assert_eq!(from, PathBuf::from("/tmp/edits.json"));
+            }
+            other => panic!("expected Command::EditJson, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_edit_json_subcommand_with_stdin_dash() {
+        let cli =
+            Cli::try_parse_from(["weaver", "edit-json", "/tmp/foo.txt", "--from", "-"]).unwrap();
+        match cli.command {
+            Some(Command::EditJson { from, .. }) => {
+                assert_eq!(from, PathBuf::from("-"));
+            }
+            other => panic!("expected Command::EditJson, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rejects_edit_json_without_from_flag() {
+        let err = Cli::try_parse_from(["weaver", "edit-json", "/tmp/foo.txt"])
+            .expect_err("missing --from");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("--from"),
+            "expected --from in error message, got: {msg}"
+        );
     }
 
     #[test]
