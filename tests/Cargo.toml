@@ -93,3 +93,7 @@ path = "e2e/buffer_edit_single.rs"
 [[test]]
 name = "buffer_edit_inspect_why"
 path = "e2e/buffer_edit_inspect_why.rs"
+
+[[test]]
+name = "buffer_edit_atomic_batch"
+path = "e2e/buffer_edit_atomic_batch.rs"
