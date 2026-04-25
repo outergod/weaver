@@ -156,23 +156,19 @@ pub(crate) fn dispatch_buffer_open(
 /// keyed off the variant so post-mortem trace inspection can
 /// reconstruct *why* an edit was dropped without any subscriber
 /// observing the rejection.
-//
-// `dead_code` is silenced until T010 wires this into `reader_loop`;
-// the enum is fully exercised by the unit tests below.
-#[allow(dead_code)]
 #[derive(Debug)]
 pub(crate) enum BufferEditOutcome {
-    /// Validated batch was applied. The post-apply state lives in
-    /// `registry.buffers[entity]`; the variant carries the metadata
-    /// the reader-loop arm needs to publish `buffer/byte-size` and
-    /// `buffer/version` directly, plus the post-apply
-    /// `memory_digest` for the dirty calculation (which still
-    /// requires re-reading the file from disk).
+    /// Validated non-empty batch was applied. The post-apply state
+    /// lives in `registry.buffers[entity]`; the variant carries the
+    /// metadata the reader-loop arm needs to publish
+    /// `buffer/byte-size` and `buffer/version` directly. The dirty
+    /// flag is computed by re-observing the file on disk against
+    /// the registry's post-apply `memory_digest`, so the digest
+    /// itself doesn't need to ride on the outcome.
     Applied {
         entity: EntityRef,
         new_version: u64,
         new_byte_size: u64,
-        new_memory_digest: [u8; 32],
     },
     /// This service does not own the target entity (no `BufferOpen`
     /// has been processed for it on this instance). No publish.
@@ -184,6 +180,11 @@ pub(crate) enum BufferEditOutcome {
     /// Emitted version is newer than current — defensive drop for an
     /// emitter that saw a version this service did not issue.
     FutureVersion { current: u64, emitted: u64 },
+    /// Well-formed batch with `edits: []` and matching version.
+    /// Silent no-op per `contracts/bus-messages.md §Failure modes`:
+    /// no fact re-emission, no version bump. The reader-loop arm
+    /// emits a `tracing::debug` line with `reason="empty-batch"`.
+    EmptyBatch,
     /// Per-edit or batch-overlap validation rejected the batch. No
     /// state mutation per [`BufferState::apply_edits`]'s atomicity
     /// guarantee; no publish.
@@ -209,11 +210,10 @@ pub(crate) enum BufferEditOutcome {
 /// 3. Validation + apply — `BufferState::apply_edits` validates the
 ///    full batch before mutating anything; on failure the buffer is
 ///    untouched.
-/// 4. Version bump — only on accepted apply.
-//
-// `dead_code` is silenced until T010 wires this into `reader_loop`;
-// the function is fully exercised by the unit tests below.
-#[allow(dead_code)]
+/// 4. Empty-batch gate — well-formed batches with no edits are a
+///    silent no-op per `contracts/bus-messages.md §Failure modes`;
+///    no version bump.
+/// 5. Version bump — only on accepted non-empty apply.
 pub(crate) fn dispatch_buffer_edit(
     registry: &mut BufferRegistry,
     entity: EntityRef,
@@ -236,7 +236,14 @@ pub(crate) fn dispatch_buffer_edit(
             emitted: version,
         };
     }
-    // version == current — eligible for application.
+    if edits.is_empty() {
+        // Well-formed but semantically null — silent no-op per the
+        // bus-messages failure-modes table. Distinguished from a
+        // never-arriving event by the dispatcher's debug log; no
+        // observable effect on the fact space.
+        return BufferEditOutcome::EmptyBatch;
+    }
+    // version == current AND non-empty batch — eligible for application.
     let state = registry
         .buffers
         .get_mut(&entity)
@@ -245,14 +252,12 @@ pub(crate) fn dispatch_buffer_edit(
         return BufferEditOutcome::ValidationFailure(err);
     }
     let new_byte_size = state.byte_size();
-    let new_memory_digest = *state.memory_digest();
     let new_version = current + 1;
     registry.versions.insert(entity, new_version);
     BufferEditOutcome::Applied {
         entity,
         new_version,
         new_byte_size,
-        new_memory_digest,
     }
 }
 
@@ -548,29 +553,168 @@ pub async fn run(
     outcome
 }
 
-/// Handle one bus event delivered to the publisher (slice 004 T009C
-/// stub; T010 fills in the BufferEdit dispatch + fact re-emit path).
+/// Handle one bus event delivered to the publisher (slice 004 T010).
 ///
-/// For T009C the body is a single debug log: events flow through the
-/// channel, but the publisher does not act on them yet. T010 will
-/// match on `event.payload`, route `BufferEdit` through
-/// `dispatch_buffer_edit`, and re-emit `buffer/byte-size` /
-/// `buffer/version` / `buffer/dirty` on accepted edits with
-/// `causal_parent = Some(event.id)`.
+/// `BufferEdit` events route through [`dispatch_buffer_edit`]; on
+/// `Applied` the publisher emits the three-fact re-emission burst
+/// (`buffer/byte-size`, `buffer/version`, `buffer/dirty`) with
+/// `causal_parent = Some(event.id)` so `weaver inspect --why` walks
+/// from any of those facts back to the originating `BufferEdit`
+/// event. All other outcomes (`NotOwned`, `StaleVersion`,
+/// `FutureVersion`, `EmptyBatch`, `ValidationFailure`) are silent
+/// drops with categorised `tracing::debug` lines per FR-018.
+///
+/// `BufferOpen` events arriving over the bus are ignored — the
+/// publisher does not subscribe to them; the bootstrap-side
+/// `BufferOpen` it emits itself never reaches its own subscription
+/// (the listener does not echo a publisher's own events back).
 #[allow(clippy::too_many_arguments)]
 async fn handle_event(
-    _writer: &mut BusWriter,
-    _identity: &ActorIdentity,
-    _registry: &mut BufferRegistry,
-    _tracked: &mut HashSet<FactKey>,
+    writer: &mut BusWriter,
+    identity: &ActorIdentity,
+    registry: &mut BufferRegistry,
+    tracked: &mut HashSet<FactKey>,
     event: Event,
 ) -> Result<(), PublisherError> {
-    debug!(
-        event_id = event.id.as_u64(),
-        payload_type = event.payload.type_tag(),
-        target = ?event.target.map(|e| e.as_u64()),
-        "received bus event (T010 wires the BufferEdit dispatch path)",
-    );
+    let event_id = event.id;
+    match event.payload {
+        EventPayload::BufferEdit {
+            entity,
+            version,
+            edits,
+        } => {
+            let outcome = dispatch_buffer_edit(registry, entity, version, &edits);
+            match outcome {
+                BufferEditOutcome::Applied {
+                    entity,
+                    new_version,
+                    new_byte_size,
+                } => {
+                    info!(
+                        entity = entity.as_u64(),
+                        event_id = event_id.as_u64(),
+                        new_version,
+                        new_byte_size,
+                        edits = edits.len(),
+                        "buffer edit applied",
+                    );
+                    let causal = Some(event_id);
+                    publish_fact(
+                        writer,
+                        FactKey::new(entity, "buffer/byte-size"),
+                        FactValue::U64(new_byte_size),
+                        identity,
+                        causal,
+                        tracked,
+                    )
+                    .await?;
+                    publish_fact(
+                        writer,
+                        FactKey::new(entity, "buffer/version"),
+                        FactValue::U64(new_version),
+                        identity,
+                        causal,
+                        tracked,
+                    )
+                    .await?;
+                    // Re-observe disk to compute the dirty flag.
+                    // observe_buffer streams the file through SHA-256
+                    // and compares against the BufferState's stored
+                    // memory_digest (now post-apply). In slice 004
+                    // this is always `true` after a non-empty edit
+                    // since there's no save-to-disk path; slice 005
+                    // will let `dirty=false` flip back after a
+                    // successful save.
+                    let state = registry
+                        .buffers
+                        .get(&entity)
+                        .expect("Applied implies the entity is in the registry");
+                    let dirty = match observer::observe_buffer(state) {
+                        Ok(obs) => obs.dirty,
+                        Err(e) => {
+                            // Disk read failed mid-flight (file
+                            // vanished, permission flicker). Default
+                            // to dirty=true — in-memory state has
+                            // diverged from any observable disk
+                            // state. The poll loop's next tick will
+                            // surface the unobservable transition
+                            // separately via buffer/observable.
+                            warn!(
+                                entity = entity.as_u64(),
+                                error = %e,
+                                "post-edit observe failed; defaulting buffer/dirty=true",
+                            );
+                            true
+                        }
+                    };
+                    publish_fact(
+                        writer,
+                        FactKey::new(entity, "buffer/dirty"),
+                        FactValue::Bool(dirty),
+                        identity,
+                        causal,
+                        tracked,
+                    )
+                    .await?;
+                }
+                BufferEditOutcome::NotOwned => {
+                    debug!(
+                        entity = entity.as_u64(),
+                        event_id = event_id.as_u64(),
+                        reason = "unowned-entity",
+                        "buffer edit dropped",
+                    );
+                }
+                BufferEditOutcome::StaleVersion { current, emitted } => {
+                    debug!(
+                        entity = entity.as_u64(),
+                        event_id = event_id.as_u64(),
+                        reason = "stale-version",
+                        emitted_version = emitted,
+                        current_version = current,
+                        "buffer edit dropped",
+                    );
+                }
+                BufferEditOutcome::FutureVersion { current, emitted } => {
+                    debug!(
+                        entity = entity.as_u64(),
+                        event_id = event_id.as_u64(),
+                        reason = "future-version",
+                        emitted_version = emitted,
+                        current_version = current,
+                        "buffer edit dropped",
+                    );
+                }
+                BufferEditOutcome::EmptyBatch => {
+                    debug!(
+                        entity = entity.as_u64(),
+                        event_id = event_id.as_u64(),
+                        reason = "empty-batch",
+                        "buffer edit dropped",
+                    );
+                }
+                BufferEditOutcome::ValidationFailure(err) => {
+                    debug!(
+                        entity = entity.as_u64(),
+                        event_id = event_id.as_u64(),
+                        reason = err.reason(),
+                        edit_index = ?err.edit_index(),
+                        error = %err,
+                        "buffer edit dropped",
+                    );
+                }
+            }
+        }
+        EventPayload::BufferOpen { .. } => {
+            // Out of slice-004 scope — publisher does not subscribe
+            // to "buffer-open" events. If one arrives anyway (a
+            // future producer subscribes us to it), ignore.
+            debug!(
+                event_id = event_id.as_u64(),
+                "ignoring BufferOpen event on the publisher subscription path",
+            );
+        }
+    }
     Ok(())
 }
 
@@ -1382,21 +1526,22 @@ mod tests {
                 entity: e,
                 new_version,
                 new_byte_size,
-                new_memory_digest,
             } => {
                 assert_eq!(e, entity);
                 assert_eq!(new_version, 1);
                 assert_eq!(new_byte_size, b"hello world".len() as u64);
-                let expected: [u8; 32] = Sha256::digest(b"hello world").into();
-                assert_eq!(new_memory_digest, expected);
             }
             other => panic!("expected Applied, got {other:?}"),
         }
-        // Registry post-state matches the outcome's snapshot.
+        // Registry post-state matches the outcome's snapshot AND the
+        // memory_digest invariant (the reader-loop arm reads the
+        // post-apply digest from the registry to compute dirty).
         assert_eq!(reg.versions.get(&entity).copied(), Some(1));
         let state = reg.buffers.get(&entity).unwrap();
         assert_eq!(state.content(), b"hello world");
         assert_eq!(state.byte_size(), b"hello world".len() as u64);
+        let expected_digest: [u8; 32] = Sha256::digest(b"hello world").into();
+        assert_eq!(state.memory_digest(), &expected_digest);
     }
 
     #[test]
@@ -1423,20 +1568,21 @@ mod tests {
     }
 
     #[test]
-    fn dispatch_buffer_edit_empty_batch_at_correct_version_bumps_version() {
-        // Per FR-008 + data-model: empty batch is structurally an
-        // identity on content, but it IS still an accepted edit at
-        // the wire level; the version bumps by 1. (Subscribers see
-        // an empty re-emit burst — byte-size unchanged but version
-        // advances.) This pins the boundary between "dropped at
-        // wire" and "applied as identity".
+    fn dispatch_buffer_edit_empty_batch_at_correct_version_is_silent_noop() {
+        // Per `contracts/bus-messages.md §Failure modes`, a well-formed
+        // batch with `edits: []` and matching version is a silent
+        // no-op: no fact re-emission, NO version bump. This pins the
+        // dispatch contract — the reader-loop arm consumes EmptyBatch
+        // by emitting `tracing::debug` with `reason="empty-batch"` and
+        // does not publish.
         let (mut reg, entity, _tf) = registry_with_buffer(b"hello");
         let outcome = dispatch_buffer_edit(&mut reg, entity, 0, &[]);
-        match outcome {
-            BufferEditOutcome::Applied { new_version, .. } => assert_eq!(new_version, 1),
-            other => panic!("expected Applied (empty batch), got {other:?}"),
-        }
-        assert_eq!(reg.versions.get(&entity).copied(), Some(1));
+        assert!(
+            matches!(outcome, BufferEditOutcome::EmptyBatch),
+            "expected EmptyBatch, got {outcome:?}",
+        );
+        // Version stays at 0; content untouched.
+        assert_eq!(reg.versions.get(&entity).copied(), Some(0));
         assert_eq!(reg.buffers.get(&entity).unwrap().content(), b"hello");
     }
 }
