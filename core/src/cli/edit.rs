@@ -5,9 +5,26 @@
 //!
 //! See `specs/004-buffer-edit/contracts/cli-surfaces.md`.
 
-use thiserror::Error;
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::types::edit::{Position, Range};
+use miette::{IntoDiagnostic, miette};
+use thiserror::Error;
+use tokio::runtime::Builder;
+use tracing::warn;
+
+use crate::bus::client::{Client, ClientError};
+use crate::cli::args::OutputFormat;
+use crate::cli::config::Config;
+use crate::cli::errors::{WeaverCliError, render_error};
+use crate::provenance::{ActorIdentity, Provenance};
+use crate::types::buffer_entity::buffer_entity_ref;
+use crate::types::edit::{Position, Range, TextEdit};
+use crate::types::event::{Event, EventPayload};
+use crate::types::fact::{FactKey, FactValue};
+use crate::types::ids::EventId;
+use crate::types::message::{BusMessage, InspectionError};
 
 /// Failure modes for [`parse_range`]. Each variant carries the offending
 /// input so the caller can render WEAVER-EDIT-002 with a precise
@@ -42,6 +59,224 @@ pub fn parse_range(input: &str) -> Result<Range, RangeParseError> {
     let start = parse_position(start_str, input, "start")?;
     let end = parse_position(end_str, input, "end")?;
     Ok(Range { start, end })
+}
+
+/// Convert a flat `Vec<String>` of `[<RANGE>, <TEXT>, <RANGE>, <TEXT>, ...]`
+/// into a `Vec<TextEdit>`. Validates pair-count parity AND range
+/// shape. Surfaces failures as [`WeaverCliError::InvalidRange`] with
+/// the offending input + detail string for WEAVER-EDIT-002 rendering.
+///
+/// Empty input → empty Vec (the zero-pair "no edits provided" case is
+/// handled higher up in [`handle_edit`] before parsing).
+pub fn parse_pairs(pairs: &[String]) -> Result<Vec<TextEdit>, WeaverCliError> {
+    if pairs.len() % 2 != 0 {
+        return Err(WeaverCliError::InvalidRange {
+            input: pairs.last().cloned().unwrap_or_default(),
+            detail: format!(
+                "expected an even number of <RANGE> <TEXT> arguments, got {}",
+                pairs.len()
+            ),
+            context: Some("weaver edit".into()),
+        });
+    }
+    let mut edits = Vec::with_capacity(pairs.len() / 2);
+    for chunk in pairs.chunks_exact(2) {
+        let range_str = &chunk[0];
+        let new_text = chunk[1].clone();
+        let range = parse_range(range_str).map_err(|e| WeaverCliError::InvalidRange {
+            input: range_str.clone(),
+            detail: e.to_string(),
+            context: Some("weaver edit".into()),
+        })?;
+        edits.push(TextEdit { range, new_text });
+    }
+    Ok(edits)
+}
+
+/// Run `weaver edit <PATH> [<RANGE> <TEXT>]*` end-to-end.
+///
+/// Flow per `specs/004-buffer-edit/contracts/cli-surfaces.md
+/// §weaver edit §Pre-dispatch flow`:
+///
+/// 1. Zero-pair invocation → warn-stderr + exit 0 (FR-014).
+/// 2. Parse pairs into `Vec<TextEdit>`; on failure render
+///    WEAVER-EDIT-002 (exit 1).
+/// 3. Canonicalise path; on failure render parse-error (exit 1).
+/// 4. Derive `entity = buffer_entity_ref(canonical)`.
+/// 5. Connect to bus.
+/// 6. Inspect-lookup `(entity, buffer/version)`:
+///    - `FactNotFound` → render WEAVER-EDIT-001 (exit 1).
+///    - `Found` with `value: FactValue::U64(version)` → use `version`.
+///    - Other shapes → exit 10 (constitutional violation).
+/// 7. Construct `Event { payload: BufferEdit { entity, version, edits } }`
+///    with `Provenance { source: ActorIdentity::User, .. }`.
+/// 8. Dispatch via `BusMessage::Event`; close + exit 0
+///    (fire-and-forget per FR-012).
+pub fn handle_edit(
+    path: PathBuf,
+    pairs: Vec<String>,
+    output: OutputFormat,
+    socket_override: Option<PathBuf>,
+) -> miette::Result<()> {
+    // Step 1: zero-pair → warn + exit 0 (FR-014).
+    if pairs.is_empty() {
+        warn!("no edits provided; nothing dispatched");
+        eprintln!("weaver edit: no edits provided; nothing dispatched");
+        return Ok(());
+    }
+
+    // Step 2: parse pairs.
+    let edits = match parse_pairs(&pairs) {
+        Ok(e) => e,
+        Err(err) => {
+            render_error(&err, output)?;
+            std::process::exit(err.exit_code());
+        }
+    };
+
+    // Step 3: canonicalise path.
+    let canonical = match std::fs::canonicalize(&path) {
+        Ok(c) => c,
+        Err(source) => {
+            let err = WeaverCliError::ParseError {
+                message: format!("cannot canonicalise path {}: {source}", path.display()),
+                context: Some(format!("weaver edit {}", path.display())),
+            };
+            render_error(&err, output)?;
+            std::process::exit(err.exit_code());
+        }
+    };
+
+    // Step 4: derive entity.
+    let entity = buffer_entity_ref(&canonical);
+
+    // Steps 5-8: bus interaction.
+    let cfg = Config::from_cli(socket_override);
+    let runtime = Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .into_diagnostic()?;
+    runtime.block_on(async move {
+        let mut client = match Client::connect(&cfg.socket_path, "weaver-edit").await {
+            Ok(c) => c,
+            Err(ClientError::Connect {
+                path: socket_path,
+                source,
+            }) => {
+                let err = WeaverCliError::CoreUnavailable {
+                    message: format!("core not reachable at {socket_path}: {source}"),
+                    context: Some("weaver edit".into()),
+                };
+                render_error(&err, output)?;
+                std::process::exit(err.exit_code());
+            }
+            Err(e) => return Err(miette!("{e}")),
+        };
+
+        // Step 6: inspect-lookup buffer/version.
+        let key = FactKey::new(entity, "buffer/version");
+        let request_id = next_request_id();
+        client
+            .send(&BusMessage::InspectRequest {
+                request_id,
+                fact: key.clone(),
+            })
+            .await
+            .map_err(|e| miette!("{e}"))?;
+        let response = loop {
+            match client.recv().await.map_err(|e| miette!("{e}"))? {
+                BusMessage::InspectResponse {
+                    request_id: rid,
+                    result,
+                } if rid == request_id => break result,
+                // Defensive: ignore spurious frames from a non-
+                // subscribed connection. Should not happen.
+                _ => continue,
+            }
+        };
+        let version = match response {
+            Err(InspectionError::FactNotFound) => {
+                let err = WeaverCliError::BufferNotOpened {
+                    path: canonical.display().to_string(),
+                    entity: entity.as_u64(),
+                    context: Some(format!("weaver edit {}", canonical.display())),
+                };
+                render_error(&err, output)?;
+                std::process::exit(err.exit_code());
+            }
+            Err(InspectionError::NoProvenance) => {
+                let err = WeaverCliError::ProtocolError {
+                    message: format!(
+                        "buffer/version exists for entity {} but has no provenance",
+                        entity.as_u64()
+                    ),
+                    context: Some("weaver edit inspect-lookup".into()),
+                };
+                render_error(&err, output)?;
+                std::process::exit(10);
+            }
+            Ok(detail) => match detail.value {
+                FactValue::U64(v) => v,
+                other => {
+                    let err = WeaverCliError::ProtocolError {
+                        message: format!(
+                            "buffer/version (entity {}) expected U64 but got {other:?}",
+                            entity.as_u64()
+                        ),
+                        context: Some("weaver edit inspect-lookup".into()),
+                    };
+                    render_error(&err, output)?;
+                    std::process::exit(10);
+                }
+            },
+        };
+
+        // Step 7: construct event envelope. Provenance carries
+        // ActorIdentity::User per research §6 — this is the first
+        // production use of the variant reserved at slice 002.
+        // EventId is synthesised from wall-clock ns; uniqueness
+        // within a single CLI invocation is enough (the trace
+        // dedupes via stable ordering, not via id collisions).
+        let now = now_ns();
+        let provenance = Provenance::new(ActorIdentity::User, now, None)
+            .expect("ActorIdentity::User has no fields to validate");
+        let event = Event {
+            id: EventId::new(now),
+            name: "buffer/edit".into(),
+            target: Some(entity),
+            payload: EventPayload::BufferEdit {
+                entity,
+                version,
+                edits,
+            },
+            provenance,
+        };
+
+        // Step 8: dispatch + exit 0. Drop closes the connection
+        // gracefully — the kernel flushes the queued Event to the
+        // listener before SHUT_WR is observed.
+        client
+            .send(&BusMessage::Event(event))
+            .await
+            .map_err(|e| miette!("{e}"))?;
+        Ok(())
+    })
+}
+
+/// Monotonic per-process inspect request-id counter. One
+/// `weaver edit` invocation issues exactly one InspectRequest, but the
+/// counter is process-scoped to keep the shape consistent with
+/// `cli::inspect::next_request_id`.
+fn next_request_id() -> u64 {
+    static COUNTER: AtomicU64 = AtomicU64::new(1);
+    COUNTER.fetch_add(1, Ordering::Relaxed)
+}
+
+fn now_ns() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| u64::try_from(d.as_nanos()).unwrap_or(u64::MAX))
+        .unwrap_or(0)
 }
 
 fn parse_position(
@@ -160,5 +395,79 @@ mod tests {
         // → character parse fails on the trailing "-extra".
         let err = parse_range("0:0-0:5-extra").unwrap_err();
         assert!(matches!(err, RangeParseError::Component { .. }));
+    }
+
+    // ───────────────────────────────────────────────────────────────────
+    // T013: parse_pairs handler-helper tests. The full handle_edit
+    // dispatch path (canonicalise → connect → inspect → dispatch) is
+    // covered by tests/e2e/buffer_edit_single.rs since it requires a
+    // running core + buffer-service; here we cover the pure-logic
+    // parsing seam in isolation.
+    // ───────────────────────────────────────────────────────────────────
+
+    fn s(v: &str) -> String {
+        v.to_string()
+    }
+
+    #[test]
+    fn parse_pairs_empty_returns_empty() {
+        let out = parse_pairs(&[]).expect("empty input is Ok");
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn parse_pairs_single_valid_pair() {
+        let out = parse_pairs(&[s("0:0-0:0"), s("hello ")]).expect("ok");
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].new_text, "hello ");
+        assert_eq!(out[0].range.start, pos(0, 0));
+        assert_eq!(out[0].range.end, pos(0, 0));
+    }
+
+    #[test]
+    fn parse_pairs_three_valid_pairs() {
+        let out = parse_pairs(&[
+            s("0:0-0:0"),
+            s("A"),
+            s("1:0-1:0"),
+            s("B"),
+            s("2:0-2:0"),
+            s("C"),
+        ])
+        .expect("ok");
+        assert_eq!(out.len(), 3);
+        assert_eq!(out[0].new_text, "A");
+        assert_eq!(out[1].new_text, "B");
+        assert_eq!(out[2].new_text, "C");
+    }
+
+    #[test]
+    fn parse_pairs_odd_count_rejects_with_invalid_range() {
+        let err = parse_pairs(&[s("0:0-0:0"), s("A"), s("1:0-1:0")]).expect_err("odd count");
+        match err {
+            WeaverCliError::InvalidRange { detail, .. } => {
+                assert!(detail.contains("even number"), "got: {detail}");
+            }
+            other => panic!("expected InvalidRange, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_pairs_bad_range_in_middle_rejects() {
+        let err = parse_pairs(&[
+            s("0:0-0:0"),
+            s("A"),
+            s("not-a-range"),
+            s("B"),
+            s("2:0-2:0"),
+            s("C"),
+        ])
+        .expect_err("bad range");
+        match err {
+            WeaverCliError::InvalidRange { input, .. } => {
+                assert_eq!(input, "not-a-range");
+            }
+            other => panic!("expected InvalidRange, got {other:?}"),
+        }
     }
 }

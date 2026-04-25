@@ -34,14 +34,7 @@ pub fn run() -> miette::Result<()> {
         Some(Command::Run) => run_core(socket),
         Some(Command::Status) => status::run(output, socket),
         Some(Command::Inspect { fact_key }) => inspect::run(&fact_key, output, socket),
-        Some(Command::Edit { path: _, pairs: _ }) => {
-            // T013 wires the full handler. The stub keeps the build
-            // green for T011/T012/T014's foundational landing while
-            // signalling the missing piece via a structured error.
-            Err(miette::miette!(
-                "weaver edit handler lands in T013 (parser + diagnostics ready)"
-            ))
-        }
+        Some(Command::Edit { path, pairs }) => edit::handle_edit(path, pairs, output, socket),
         None => {
             print_help();
             Ok(())
