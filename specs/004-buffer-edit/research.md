@@ -22,6 +22,8 @@ Phase 0 decisions. Each entry resolves an implementation-level question that the
 
 **Decision**: The `weaver edit` and `weaver edit-json` subcommand handlers reuse the existing `weaver_core::cli::inspect` library function — calling it as an in-process Rust function with the `<entity>:buffer/version` fact key as input. They do NOT spawn a child `weaver inspect` process; they do NOT invent a new RPC primitive. The library function's existing `BusMessage::InspectRequest` / `InspectResponse` round-trip handles the bus interaction.
 
+**Wire-shape extension (added mid-flight, T013)**: `InspectionDetail` gains a `value: FactValue` field so the response carries both provenance (existing) AND the fact's current value. Slice-001/002/003 only needed provenance for `weaver inspect`'s human/JSON renderings; slice-004's emitter needs the value to construct `EventPayload::BufferEdit { entity, version, .. }` from the current `buffer/version`. The field rides the slice-004 0x04 protocol envelope (no second handshake bump within one slice) and is REQUIRED — the protocol-mismatch handshake already rejects mixed-version clients, so no backward-compat shim is needed for the field's deserialization.
+
 **Rationale**:
 
 - The `weaver inspect <entity>:<attribute>` machinery already exists (slice 002 introduced `BusMessage::InspectRequest`, slice 003 used it for `weaver-buffers` attribution). Re-using it from a sibling subcommand is a one-line library call, not new architecture.

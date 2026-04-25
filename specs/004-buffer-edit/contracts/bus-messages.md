@@ -7,6 +7,7 @@ CBOR-encoded messages on the local Unix-domain-socket bus between `weaver` (core
 - `EventPayload::BufferEdit { entity: EntityRef, version: u64, edits: Vec<TextEdit> }` is ADDED.
 - Supporting struct types `TextEdit { range: Range, new_text: String }`, `Range { start: Position, end: Position }`, `Position { line: u32, character: u32 }` are ADDED. No new CBOR tags are introduced — the new types ride plain ciborium struct serialisation through the existing adjacent-tag enum machinery.
 - `EventSubscribePattern { PayloadType(String) }` enum and `BusMessage::SubscribeEvents(EventSubscribePattern)` variant are ADDED — the bus gains lossy-class **event broadcast** to external subscribers, parallel to the existing fact subscription. See `research.md §13` for the gap-and-resolution context.
+- `InspectionDetail` gains a required `value: FactValue` field. Slices 001-003 only carried provenance (where the fact came from); slice 004's `weaver edit` emitter needs the fact value (the current `buffer/version`) to construct the `BufferEdit` envelope. Required-field on the wire — the 0x04 protocol-mismatch handshake rejects mixed-version clients, so no backward-compat shim is needed. See `research.md §2`.
 
 Old (0x03) clients cannot connect; the handshake rejects mismatched versions with a structured error. No provenance-shape change; `ActorIdentity` (CBOR tag 1002) is unchanged from slice 002. The `ActorIdentity::User` variant — reserved at slice 002 — has its first production use this slice as the emitter identity stamped by `weaver edit` / `weaver edit-json`.
 

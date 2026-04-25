@@ -5,7 +5,7 @@
 
 use crate::provenance::Provenance;
 use crate::types::event::Event;
-use crate::types::fact::{Fact, FactKey};
+use crate::types::fact::{Fact, FactKey, FactValue};
 use crate::types::ids::{BehaviorId, EventId};
 use serde::{Deserialize, Serialize};
 
@@ -231,8 +231,8 @@ pub struct ErrorMsg {
 ///   - reserved (`"user" | "host" | "agent"`) — `asserting_kind` only;
 ///     richer payload defers to the slice that actually emits them.
 ///
-/// **Backward compatibility (F30 review fix)**: the slice added
-/// `asserting_kind` as an additive, MINOR-grade field per
+/// **Backward compatibility (F30 review fix)**: the slice-002 update
+/// added `asserting_kind` as an additive, MINOR-grade field per
 /// cli-surfaces.md §wire compatibility. Making it required on
 /// deserialization would, however, break mixed-version deployments —
 /// a new client could not decode an `InspectResponse` from a
@@ -244,6 +244,13 @@ pub struct ErrorMsg {
 /// is populated, else `core` as a lossy reconstruction of the
 /// pre-slice `opaque()` case). Serialization is unaffected — new
 /// producers always emit the field.
+///
+/// **Slice-004 mid-flight extension**: the `value` field is added as
+/// REQUIRED on the wire — the 0x04 protocol-mismatch handshake
+/// already rejects mixed-version clients, so a separate compat shim
+/// would be dead code. Slice-004's `weaver edit` emitter consumes
+/// `value` to extract the current `buffer/version` for the
+/// `BufferEdit` envelope. See `specs/004-buffer-edit/research.md §2`.
 ///
 /// See `specs/002-git-watcher-actor/contracts/cli-surfaces.md`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -259,12 +266,20 @@ pub struct InspectionDetail {
     pub asserting_instance: Option<uuid::Uuid>,
     pub asserted_at_ns: u64,
     pub trace_sequence: u64,
+    /// The fact's current value at inspection time (slice-004
+    /// addition). Slices 001-003 returned only provenance via this
+    /// struct; slice 004's `weaver edit` emitter needs the value to
+    /// construct `BufferEdit { entity, version, .. }` from the
+    /// current `buffer/version` fact.
+    pub value: FactValue,
 }
 
 /// Wire-compat deserialization shape for [`InspectionDetail`].
 /// `asserting_kind` is optional here so pre-upgrade-core responses
 /// (which never emit the field) still decode; the `From` impl below
-/// fills in a best-effort kind when absent.
+/// fills in a best-effort kind when absent. `value` is REQUIRED on
+/// the wire post-slice-004 (the 0x04 handshake rejects pre-slice-004
+/// clients, so there's no version-mixed deployment to compat-shim).
 #[derive(Deserialize)]
 struct InspectionDetailRepr {
     source_event: EventId,
@@ -275,6 +290,7 @@ struct InspectionDetailRepr {
     asserting_instance: Option<uuid::Uuid>,
     asserted_at_ns: u64,
     trace_sequence: u64,
+    value: FactValue,
 }
 
 impl From<InspectionDetailRepr> for InspectionDetail {
@@ -301,18 +317,21 @@ impl From<InspectionDetailRepr> for InspectionDetail {
             asserting_instance: r.asserting_instance,
             asserted_at_ns: r.asserted_at_ns,
             trace_sequence: r.trace_sequence,
+            value: r.value,
         }
     }
 }
 
 impl InspectionDetail {
     /// Build an `InspectionDetail` for a behavior-authored fact.
-    /// Slice-001 shape extended with `asserting_kind = "behavior"`.
+    /// Slice-001 shape extended with `asserting_kind = "behavior"`
+    /// (slice 002) and `value` (slice 004).
     pub fn behavior(
         source_event: EventId,
         asserting_behavior: BehaviorId,
         asserted_at_ns: u64,
         trace_sequence: u64,
+        value: FactValue,
     ) -> Self {
         Self {
             source_event,
@@ -322,17 +341,20 @@ impl InspectionDetail {
             asserting_instance: None,
             asserted_at_ns,
             trace_sequence,
+            value,
         }
     }
 
     /// Build an `InspectionDetail` for a service-authored fact.
-    /// Slice-002 shape extended with `asserting_kind = "service"`.
+    /// Slice-002 shape extended with `asserting_kind = "service"`
+    /// and (slice 004) `value`.
     pub fn service(
         source_event: EventId,
         service_id: String,
         instance_id: uuid::Uuid,
         asserted_at_ns: u64,
         trace_sequence: u64,
+        value: FactValue,
     ) -> Self {
         Self {
             source_event,
@@ -342,6 +364,7 @@ impl InspectionDetail {
             asserting_instance: Some(instance_id),
             asserted_at_ns,
             trace_sequence,
+            value,
         }
     }
 
@@ -359,6 +382,7 @@ impl InspectionDetail {
         source_event: EventId,
         asserted_at_ns: u64,
         trace_sequence: u64,
+        value: FactValue,
     ) -> Self {
         Self {
             source_event,
@@ -368,6 +392,7 @@ impl InspectionDetail {
             asserting_instance: None,
             asserted_at_ns,
             trace_sequence,
+            value,
         }
     }
 }
@@ -438,6 +463,7 @@ mod tests {
                     BehaviorId::new("core/dirty-tracking"),
                     1000,
                     17,
+                    FactValue::Bool(true),
                 )),
             },
             BusMessage::InspectResponse {
@@ -478,17 +504,25 @@ mod tests {
         }
     }
 
-    /// F30 regression: a pre-slice `InspectResponse` (no
-    /// `asserting_kind` field) must still decode cleanly.
-    /// Behavior-authored shape infers `"behavior"` from the
-    /// presence of `asserting_behavior`.
+    /// F30 regression: a pre-slice-002 `InspectResponse` (no
+    /// `asserting_kind` field) must still decode cleanly under the
+    /// repr's inference rule. Behavior-authored shape infers
+    /// `"behavior"` from the presence of `asserting_behavior`.
+    ///
+    /// Slice-004 update: `value` is a REQUIRED field on the wire post-
+    /// 0x04 (the protocol-mismatch handshake rejects mixed-version
+    /// clients, so a missing-value compat shim would be unreachable).
+    /// The fixture below carries `value` to exercise the post-0x04
+    /// shape; the asserting_kind inference path being tested is
+    /// orthogonal to the value field's presence.
     #[test]
     fn inspection_detail_decodes_legacy_behavior_shape() {
         let legacy = r#"{
             "source_event": 42,
             "asserting_behavior": "core/dirty-tracking",
             "asserted_at_ns": 1000,
-            "trace_sequence": 7
+            "trace_sequence": 7,
+            "value": {"type": "bool", "value": true}
         }"#;
         let d: InspectionDetail = serde_json::from_str(legacy).expect("decode");
         assert_eq!(d.asserting_kind, "behavior");
@@ -497,10 +531,13 @@ mod tests {
             Some(BehaviorId::new("core/dirty-tracking"))
         );
         assert_eq!(d.source_event, EventId::new(42));
+        assert_eq!(d.value, FactValue::Bool(true));
     }
 
     /// F30 regression: service-authored legacy shape infers
-    /// `"service"` from the presence of `asserting_service`.
+    /// `"service"` from the presence of `asserting_service`. Carries
+    /// `value` per the slice-004 wire requirement (see the behavior-
+    /// shape test above for context).
     #[test]
     fn inspection_detail_decodes_legacy_service_shape() {
         let legacy = r#"{
@@ -508,29 +545,34 @@ mod tests {
             "asserting_service": "git-watcher",
             "asserting_instance": "2e1a4f8b-4d13-4b0e-b4e3-6a6b00b35c90",
             "asserted_at_ns": 1000,
-            "trace_sequence": 7
+            "trace_sequence": 7,
+            "value": {"type": "string", "value": "ready"}
         }"#;
         let d: InspectionDetail = serde_json::from_str(legacy).expect("decode");
         assert_eq!(d.asserting_kind, "service");
         assert_eq!(d.asserting_service.as_deref(), Some("git-watcher"));
         assert!(d.asserting_instance.is_some());
+        assert_eq!(d.value, FactValue::String("ready".into()));
     }
 
     /// F30 regression: the pre-slice opaque shape (all identifier
     /// fields absent) decodes with the lossy `"core"` fallback —
     /// pre-T064 the wire couldn't distinguish Core / Tui / reserved
-    /// anyway, so inference can't recover the exact variant.
+    /// anyway, so inference can't recover the exact variant. Carries
+    /// `value` per the slice-004 wire requirement.
     #[test]
     fn inspection_detail_decodes_legacy_opaque_shape() {
         let legacy = r#"{
             "source_event": 9,
             "asserted_at_ns": 1000,
-            "trace_sequence": 7
+            "trace_sequence": 7,
+            "value": {"type": "u64", "value": 42}
         }"#;
         let d: InspectionDetail = serde_json::from_str(legacy).expect("decode");
         assert_eq!(d.asserting_kind, "core");
         assert!(d.asserting_behavior.is_none());
         assert!(d.asserting_service.is_none());
+        assert_eq!(d.value, FactValue::U64(42));
     }
 
     // ───────────────────────────────────────────────────────────────────

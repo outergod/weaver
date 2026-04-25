@@ -51,8 +51,8 @@ The replacement text. Standard shell-quoted UTF-8 string. Empty string (`""`) me
 2. Connect to bus at `--socket`. Send `Hello { protocol_version: 0x04, client_kind: "weaver-edit" }`.
 3. Send `BusMessage::InspectRequest { request_id: <fresh>, fact: FactKey::new(entity, "buffer/version") }`. Receive `InspectResponse`.
    - **`FactNotFound`** → exit `1` with `WEAVER-EDIT-001 — buffer not opened: <path> — no fact (entity:<derived>, attribute:buffer/version) is asserted by any authority`.
-   - **`Found(Fact { value: FactValue::U64(version), .. })`** → use `version` as the dispatch value.
-   - **`Found(other-shape)`** → exit `10` with internal-error diagnostic (constitutional invariant violation).
+   - **`Found(InspectionDetail { value: FactValue::U64(version), .. })`** → use `version` as the dispatch value. (Slice-004 mid-flight wire extension: `InspectionDetail` carries the fact value alongside its provenance fields — see `research.md §2`.)
+   - **`Found(other-shape)`** → exit `10` with internal-error diagnostic (constitutional invariant violation — `buffer/version` MUST be `FactValue::U64` per slice-003).
 4. Construct `EventPayload::BufferEdit { entity, version, edits: <parsed> }`. Construct envelope `Event { id: <fresh EventId>, name: "buffer/edit", target: Some(entity), payload, provenance: Provenance { source: ActorIdentity::User, timestamp_ns: now_ns(), causal_parent: None } }`.
 5. Dispatch via `BusMessage::Event(envelope)`. Connection close on send error.
 6. Exit `0`.
