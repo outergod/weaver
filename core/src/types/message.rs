@@ -17,18 +17,24 @@ use serde::{Deserialize, Serialize};
 ///   provenance carries structured [`crate::provenance::ActorIdentity`]
 ///   (new CBOR tag 1002), and [`LifecycleSignal`] gains
 ///   `Degraded` / `Unavailable` / `Restarting` variants.
-/// - `0x03` / `0.3.0` — **current**, slice 003. Breaking wire change:
+/// - `0x03` / `0.3.0` — slice 003. Breaking wire change:
 ///   [`EventPayload`] drops `BufferEdited` / `BufferCleaned` in favor
 ///   of `BufferOpen { path }`; `FactValue` gains a `U64` variant. See
 ///   `specs/003-buffer-service/contracts/bus-messages.md`.
+/// - `0x04` / `0.4.0` — **current**, slice 004. Breaking wire change:
+///   [`crate::types::event::EventPayload`] gains a `BufferEdit { entity,
+///   version, edits }` variant carrying the new
+///   [`crate::types::edit::TextEdit`] / [`crate::types::edit::Range`] /
+///   [`crate::types::edit::Position`] struct types. See
+///   `specs/004-buffer-edit/contracts/bus-messages.md`.
 ///
 /// Public surface per L2 P7. Increments follow the policy in
 /// `specs/003-buffer-service/contracts/bus-messages.md` §Versioning.
-pub const BUS_PROTOCOL_VERSION: u8 = 0x03;
+pub const BUS_PROTOCOL_VERSION: u8 = 0x04;
 
 /// Semver-style string representation of [`BUS_PROTOCOL_VERSION`].
 /// Used in CLI output (e.g., `weaver --version`).
-pub const BUS_PROTOCOL_VERSION_STR: &str = "0.3.0";
+pub const BUS_PROTOCOL_VERSION_STR: &str = "0.4.0";
 
 /// The top-level enum of bus messages.
 ///

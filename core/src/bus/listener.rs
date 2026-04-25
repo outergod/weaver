@@ -590,10 +590,10 @@ mod handshake_tests {
         let server_task = tokio::spawn(handle_connection(server, dispatcher));
 
         // Client announces the prior protocol version. The contract
-        // (specs/003-buffer-service/contracts/bus-messages.md §Connection
+        // (specs/004-buffer-edit/contracts/bus-messages.md §Connection
         // lifecycle) pins the exact `detail` wording the core must
         // emit so operators see a consistent diagnostic.
-        let stale_version: u8 = 0x02;
+        let stale_version: u8 = 0x03;
         write_message(
             &mut client,
             &BusMessage::Hello(HelloMsg {

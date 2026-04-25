@@ -11,7 +11,7 @@
 //!
 //! ```text
 //! ┌─ Weaver TUI ────────────────────────────────────────────────────┐
-//! │ Connection: ready (bus v0.3.0)                                  │
+//! │ Connection: ready (bus v0.4.0)                                  │
 //! │                                                                 │
 //! │ Facts:                                                          │
 //! │   buffer/dirty(EntityRef(1)) = true                             │
