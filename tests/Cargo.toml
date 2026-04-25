@@ -89,3 +89,7 @@ path = "e2e/buffer_degraded_observable.rs"
 [[test]]
 name = "buffer_edit_single"
 path = "e2e/buffer_edit_single.rs"
+
+[[test]]
+name = "buffer_edit_inspect_why"
+path = "e2e/buffer_edit_inspect_why.rs"
