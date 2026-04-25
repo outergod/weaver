@@ -125,6 +125,32 @@ pub enum WeaverCliError {
         detail: String,
         context: Option<String>,
     },
+
+    /// WEAVER-EDIT-003 — `weaver edit-json` could not parse its input
+    /// as a JSON `Vec<TextEdit>`. The `detail` field carries the
+    /// serde-json error chain so the operator can locate the offending
+    /// span. Exit 1.
+    #[error("malformed edit-json input: {detail}")]
+    #[diagnostic(code("WEAVER-EDIT-003"))]
+    MalformedEditJson {
+        detail: String,
+        context: Option<String>,
+    },
+
+    /// WEAVER-EDIT-004 — the serialised `EventPayload::BufferEdit`
+    /// envelope exceeds the 64 KiB wire-frame limit. The serialised
+    /// byte count is captured pre-dispatch so the operator gets a
+    /// precise diagnostic rather than a generic codec error after a
+    /// partial round-trip. Exit 1.
+    #[error(
+        "serialised BufferEdit ({actual_bytes} bytes) exceeds wire-frame limit ({max_bytes} bytes). Reduce the batch size or shorten new-text fields."
+    )]
+    #[diagnostic(code("WEAVER-EDIT-004"))]
+    EditWireFrameTooLarge {
+        actual_bytes: usize,
+        max_bytes: usize,
+        context: Option<String>,
+    },
 }
 
 impl WeaverCliError {
@@ -137,6 +163,8 @@ impl WeaverCliError {
             WeaverCliError::ProtocolError { .. } => "protocol-error",
             WeaverCliError::BufferNotOpened { .. } => "buffer-not-opened",
             WeaverCliError::InvalidRange { .. } => "invalid-range",
+            WeaverCliError::MalformedEditJson { .. } => "malformed-edit-json",
+            WeaverCliError::EditWireFrameTooLarge { .. } => "edit-wire-frame-too-large",
         }
     }
 
@@ -150,6 +178,8 @@ impl WeaverCliError {
             WeaverCliError::ProtocolError { .. } => "WEAVER-301",
             WeaverCliError::BufferNotOpened { .. } => "WEAVER-EDIT-001",
             WeaverCliError::InvalidRange { .. } => "WEAVER-EDIT-002",
+            WeaverCliError::MalformedEditJson { .. } => "WEAVER-EDIT-003",
+            WeaverCliError::EditWireFrameTooLarge { .. } => "WEAVER-EDIT-004",
         }
     }
 
@@ -160,7 +190,9 @@ impl WeaverCliError {
             | WeaverCliError::ParseError { context, .. }
             | WeaverCliError::ProtocolError { context, .. }
             | WeaverCliError::BufferNotOpened { context, .. }
-            | WeaverCliError::InvalidRange { context, .. } => context.as_deref(),
+            | WeaverCliError::InvalidRange { context, .. }
+            | WeaverCliError::MalformedEditJson { context, .. }
+            | WeaverCliError::EditWireFrameTooLarge { context, .. } => context.as_deref(),
         }
     }
 
@@ -179,7 +211,9 @@ impl WeaverCliError {
             WeaverCliError::ParseError { .. }
             | WeaverCliError::ProtocolError { .. }
             | WeaverCliError::BufferNotOpened { .. }
-            | WeaverCliError::InvalidRange { .. } => exit_code::GENERAL,
+            | WeaverCliError::InvalidRange { .. }
+            | WeaverCliError::MalformedEditJson { .. }
+            | WeaverCliError::EditWireFrameTooLarge { .. } => exit_code::GENERAL,
         }
     }
 
@@ -256,6 +290,21 @@ impl WeaverCliError {
                 detail: detail.clone(),
                 context: context.clone(),
             },
+            WeaverCliError::MalformedEditJson { detail, context } => {
+                WeaverCliError::MalformedEditJson {
+                    detail: detail.clone(),
+                    context: context.clone(),
+                }
+            }
+            WeaverCliError::EditWireFrameTooLarge {
+                actual_bytes,
+                max_bytes,
+                context,
+            } => WeaverCliError::EditWireFrameTooLarge {
+                actual_bytes: *actual_bytes,
+                max_bytes: *max_bytes,
+                context: context.clone(),
+            },
         }
     }
 }
@@ -321,6 +370,34 @@ mod tests {
         assert!(s.contains("\"category\":\"buffer-not-opened\""));
         assert!(s.contains("\"code\":\"WEAVER-EDIT-001\""));
         assert!(s.contains("/tmp/foo.txt"));
+        assert_eq!(err.exit_code(), exit_code::GENERAL);
+    }
+
+    #[test]
+    fn malformed_edit_json_envelope_shape() {
+        let err = WeaverCliError::MalformedEditJson {
+            detail: "expected `[` at line 1 column 1".into(),
+            context: Some("weaver edit-json /tmp/foo.txt".into()),
+        };
+        let s = serde_json::to_string(&err.envelope()).unwrap();
+        assert!(s.contains("\"category\":\"malformed-edit-json\""));
+        assert!(s.contains("\"code\":\"WEAVER-EDIT-003\""));
+        assert!(s.contains("expected `["));
+        assert_eq!(err.exit_code(), exit_code::GENERAL);
+    }
+
+    #[test]
+    fn edit_wire_frame_too_large_envelope_shape() {
+        let err = WeaverCliError::EditWireFrameTooLarge {
+            actual_bytes: 70_000,
+            max_bytes: 65_536,
+            context: Some("weaver edit-json".into()),
+        };
+        let s = serde_json::to_string(&err.envelope()).unwrap();
+        assert!(s.contains("\"category\":\"edit-wire-frame-too-large\""));
+        assert!(s.contains("\"code\":\"WEAVER-EDIT-004\""));
+        assert!(s.contains("70000"));
+        assert!(s.contains("65536"));
         assert_eq!(err.exit_code(), exit_code::GENERAL);
     }
 
