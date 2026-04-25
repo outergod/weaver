@@ -78,6 +78,20 @@ pub enum BusMessage {
         request_id: u64,
         result: Result<InspectionDetail, InspectionError>,
     },
+    /// Look up an event in the core's trace by id (slice 004 — see
+    /// `specs/004-buffer-edit/research.md §14`). Powers
+    /// `weaver inspect --why`'s chain walk: a fact's
+    /// `InspectionDetail.source_event` resolves to a `TraceSequence`
+    /// via `TraceStore::find_event`, which the listener fetches and
+    /// returns as the full `Event` envelope.
+    EventInspectRequest {
+        request_id: u64,
+        event_id: EventId,
+    },
+    EventInspectResponse {
+        request_id: u64,
+        result: Result<Event, EventInspectionError>,
+    },
     Lifecycle(LifecycleSignal),
     Error(ErrorMsg),
     /// One-shot snapshot request used by `weaver status`. Client →
@@ -404,6 +418,17 @@ pub enum InspectionError {
     NoProvenance,
 }
 
+/// Failure modes for [`BusMessage::EventInspectRequest`]. Slice 004
+/// ships only `EventNotFound`; the trace's [`crate::trace::store::TraceStore`]
+/// either has the event or doesn't. Other failure modes (decode errors,
+/// protocol violations) are caught at the listener boundary, not as
+/// `EventInspectResponse` errors.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum EventInspectionError {
+    EventNotFound,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -481,6 +506,18 @@ mod tests {
                 lifecycle: LifecycleSignal::Ready,
                 uptime_ns: 1_234_567_890,
                 facts: vec![sample_fact()],
+            },
+            BusMessage::EventInspectRequest {
+                request_id: 9,
+                event_id: EventId::new(0xCAFE),
+            },
+            BusMessage::EventInspectResponse {
+                request_id: 9,
+                result: Ok(sample_event()),
+            },
+            BusMessage::EventInspectResponse {
+                request_id: 10,
+                result: Err(EventInspectionError::EventNotFound),
             },
         ]
     }
@@ -666,6 +703,46 @@ mod tests {
         let mut buf = Vec::new();
         ciborium::into_writer(&msg, &mut buf).expect("encode");
         let back: BusMessage = ciborium::from_reader(buf.as_slice()).expect("decode");
+        assert_eq!(msg, back);
+    }
+
+    // ───────────────────────────────────────────────────────────────────
+    // Slice-004 T016A: EventInspect{Request,Response} wire shape.
+    // ───────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn event_inspect_request_json_wire_shape() {
+        let msg = BusMessage::EventInspectRequest {
+            request_id: 42,
+            event_id: EventId::new(7),
+        };
+        let s = serde_json::to_string(&msg).expect("serialize");
+        // Adjacent tag "event-inspect-request"; payload carries
+        // request_id + event_id.
+        assert!(
+            s.contains("\"type\":\"event-inspect-request\""),
+            "expected adjacent tag: {s}"
+        );
+        assert!(s.contains("\"request_id\":42"), "expected request_id: {s}");
+        assert!(s.contains("\"event_id\":7"), "expected event_id: {s}");
+        let back: BusMessage = serde_json::from_str(&s).expect("deserialize");
+        assert_eq!(msg, back);
+    }
+
+    #[test]
+    fn event_inspect_response_event_not_found_renders_kebab_case() {
+        let msg = BusMessage::EventInspectResponse {
+            request_id: 42,
+            result: Err(EventInspectionError::EventNotFound),
+        };
+        let s = serde_json::to_string(&msg).expect("serialize");
+        assert!(
+            s.contains("\"type\":\"event-inspect-response\""),
+            "expected adjacent tag: {s}"
+        );
+        // EventInspectionError uses kebab-case rename_all per Amendment 5.
+        assert!(s.contains("event-not-found"), "expected kebab-case: {s}");
+        let back: BusMessage = serde_json::from_str(&s).expect("deserialize");
         assert_eq!(msg, back);
     }
 }

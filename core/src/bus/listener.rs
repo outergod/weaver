@@ -343,6 +343,36 @@ async fn handle_client_message(
             write_message(writer, &resp).await?;
             Ok(HandlerOutcome::None)
         }
+        BusMessage::EventInspectRequest {
+            request_id,
+            event_id,
+        } => {
+            // Slice 004 — see specs/004-buffer-edit/research.md §14.
+            // Look up the event by id and return the full Event
+            // envelope (cheaper than designing a sub-shape; the trace
+            // already holds it).
+            let result = {
+                let trace = dispatcher.trace();
+                let trace = trace.lock().await;
+                trace
+                    .find_event(event_id)
+                    .and_then(|seq| trace.get(seq))
+                    .and_then(|entry| match &entry.payload {
+                        crate::trace::entry::TracePayload::Event { event } => Some(event.clone()),
+                        // Defensive: find_event's index should only point at
+                        // Event payloads; any other payload is a structural
+                        // bug in TraceStore::update_indexes. Treat as
+                        // EventNotFound rather than panic — the chain walk
+                        // surfaces the symptom cleanly without crashing the
+                        // listener.
+                        _ => None,
+                    })
+                    .ok_or(crate::types::message::EventInspectionError::EventNotFound)
+            };
+            let resp = BusMessage::EventInspectResponse { request_id, result };
+            write_message(writer, &resp).await?;
+            Ok(HandlerOutcome::None)
+        }
         BusMessage::StatusRequest => {
             let (lifecycle, uptime_ns, facts) = {
                 let fs = dispatcher.fact_store();
@@ -485,6 +515,7 @@ async fn handle_client_message(
         }
         BusMessage::SubscribeAck { .. }
         | BusMessage::InspectResponse { .. }
+        | BusMessage::EventInspectResponse { .. }
         | BusMessage::Lifecycle(_)
         | BusMessage::Error(_)
         | BusMessage::StatusResponse { .. } => {

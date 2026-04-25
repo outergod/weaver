@@ -8,6 +8,7 @@ CBOR-encoded messages on the local Unix-domain-socket bus between `weaver` (core
 - Supporting struct types `TextEdit { range: Range, new_text: String }`, `Range { start: Position, end: Position }`, `Position { line: u32, character: u32 }` are ADDED. No new CBOR tags are introduced — the new types ride plain ciborium struct serialisation through the existing adjacent-tag enum machinery.
 - `EventSubscribePattern { PayloadType(String) }` enum and `BusMessage::SubscribeEvents(EventSubscribePattern)` variant are ADDED — the bus gains lossy-class **event broadcast** to external subscribers, parallel to the existing fact subscription. See `research.md §13` for the gap-and-resolution context.
 - `InspectionDetail` gains a required `value: FactValue` field. Slices 001-003 only carried provenance (where the fact came from); slice 004's `weaver edit` emitter needs the fact value (the current `buffer/version`) to construct the `BufferEdit` envelope. Required-field on the wire — the 0x04 protocol-mismatch handshake rejects mixed-version clients, so no backward-compat shim is needed. See `research.md §2`.
+- `BusMessage::EventInspectRequest { request_id, event_id }` and `EventInspectResponse { request_id, result: Result<Event, EventInspectionError> }` are ADDED — event-by-id lookup that powers `weaver inspect --why`'s chain walk from a fact to its source-event's `ActorIdentity` (FR-016 + SC-405). See `research.md §14`.
 
 Old (0x03) clients cannot connect; the handshake rejects mismatched versions with a structured error. No provenance-shape change; `ActorIdentity` (CBOR tag 1002) is unchanged from slice 002. The `ActorIdentity::User` variant — reserved at slice 002 — has its first production use this slice as the emitter identity stamped by `weaver edit` / `weaver edit-json`.
 
@@ -210,6 +211,24 @@ Delivery class remains authoritative. `causal_parent` usage convention added for
 ### Other messages — unchanged shape
 
 `Event` (envelope), `Subscribe`, `SubscribeAck`, `InspectRequest`, `InspectResponse`, `StatusRequest`, `StatusResponse`, `Error` — no shape changes. The inspection render surface accommodates `EventPayload::BufferEdit` events transparently via existing causal-parent machinery; no new fields introduced.
+
+### `EventInspectRequest` / `EventInspectResponse` — NEW (slice 004)
+
+```text
+BusMessage::EventInspectRequest { request_id: u64, event_id: EventId }
+BusMessage::EventInspectResponse {
+    request_id: u64,
+    result: Result<Event, EventInspectionError>,
+}
+
+EventInspectionError = enum {
+    EventNotFound,
+}
+```
+
+Event-by-id lookup against the core's trace. Mirrors `InspectRequest` / `InspectResponse`'s shape (request_id correlation; sum-type result). The full [`Event`] envelope is returned on success — the trace already holds it, and copying once for the response is cheaper than designing a sub-shape. `EventInspectionError::EventNotFound` is the only failure variant this slice ships; `Hello`-pre-handshake and other protocol violations are rejected at the listener boundary, not as `EventInspectResponse` errors.
+
+`weaver inspect --why <fact-key>` chains: send `InspectRequest(fact-key)`; take `source_event` from the returned `InspectionDetail`; send `EventInspectRequest { event_id: source_event }`; render the walkback JSON whose `event.provenance` carries the original emitter's `ActorIdentity`. See `research.md §14` and `cli-surfaces.md §weaver inspect --why`.
 
 ### `SubscribeEvents` — NEW (slice 004)
 

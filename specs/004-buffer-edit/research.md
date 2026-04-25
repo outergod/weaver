@@ -221,3 +221,34 @@ Returns `Err(ApplyError)` with the first detected validation failure (caller tre
 - **Defer slice 004 until a slice 003.5 lands event delivery** — rejected: spec/PR fragmentation. The infrastructure is small enough (≤200 LOC core, ≤30 LOC publisher) to fit within slice 004's existing scope envelope.
 - **Reuse existing `Subscribe(SubscribePattern)` for both facts and events via a sum-typed pattern** — rejected: facts and events have structurally different delivery classes (authoritative vs lossy), reconnect semantics (snapshot vs no-replay), and idempotence semantics. A separate `EventSubscribePattern` keeps the surfaces honest.
 - **A distinct `BusMessage::SubscribeEventsAck` variant** — rejected: `SubscribeAck { sequence: u64 }` already returns `sequence: 0` for fact subscriptions in slice 001 (gap detection deferred). Reusing it for event subscriptions (also `sequence: 0`) keeps the message surface minimal.
+
+## 14. Event-by-id inspection — `weaver inspect --why` prerequisite (added mid-flight)
+
+**Decision**: Slice 004 adds `BusMessage::EventInspectRequest { request_id, event_id }` + `EventInspectResponse { request_id, result: Result<Event, EventInspectionError> }` and a `--why` flag on `weaver inspect`. The CLI handler chains: fact-inspect → take `source_event` from the returned `InspectionDetail` → event-inspect that id → render the walkback JSON whose `event.provenance` carries the original emitter's `ActorIdentity`. The full `Event` is returned (not a sub-shape) — the trace already holds it; copying once for the response is cheaper than designing a new view struct.
+
+**Why this lands in slice 004 (not deferred)**: discovered while planning T016. SC-405 + FR-016 commit slice 004 to "`weaver inspect --why <entity>:buffer/version` walks back to the accepted `BufferEdit` event and renders the emitter's `ActorIdentity`". The `TraceStore::find_event` server-side lookup already exists (slice 001); only the bus and CLI plumbing was missing. Operator decision (2026-04-25): close the gap inside slice 004 rather than ship a slice that fails its own committed acceptance criterion.
+
+**Wire shape**: `EventInspectRequest { request_id: u64, event_id: EventId }` mirrors `InspectRequest { request_id: u64, fact: FactKey }`. `EventInspectResponse { request_id: u64, result: Result<Event, EventInspectionError> }` mirrors `InspectResponse`'s adjacent shape; `EventInspectionError::EventNotFound` is the single variant this slice ships. Both messages ride the slice-004 0x04 protocol envelope.
+
+**CLI shape**: `weaver inspect <fact-key> [--why] [-o human|json]`. Without `--why`, behaviour is unchanged (slice-001 InspectionDetail rendering). With `--why`, the handler issues the chained second request and emits a walkback JSON shape:
+
+```json
+{
+  "fact": {"entity": <u64>, "attribute": "<attr>"},
+  "fact_inspection": { ... existing FoundJson fields ... },
+  "event": {
+    "id": <event_id_u64>,
+    "name": "<event-name>",
+    "target": <entity_u64_or_null>,
+    "payload_type": "<adjacent-tag-string>",
+    "provenance": { "source": {"type": "<kind>", ...}, "timestamp_ns": <u64>, "causal_parent": <u64_or_null> }
+  }
+}
+```
+
+**Alternatives considered**:
+
+- **Reuse `BusMessage::InspectRequest` with a `FactKey`-vs-`EventId` sum-typed key** — rejected: collapses two structurally distinct lookups into one polymorphic message; obscures the wire surface for `weaver inspect --why`'s consumers and complicates the response shape (would need a sum-typed result too).
+- **Embed the source-event's `Event` snapshot in `InspectionDetail` itself** — rejected: bloats every fact-inspect response (most callers don't want the whole event). The chained two-request shape costs one extra round-trip on `--why` only.
+- **Expose `--why` as a separate `weaver why <fact-key>` subcommand** — rejected: `--why` is a modifier of `inspect`'s existing semantic ("inspect this fact AND walk to its source"), not a new operation. CLI ergonomics + symmetry with the bus shape favour the flag.
+- **Defer to a slice 004.5** — rejected by operator decision (2026-04-25): SC-405 is a slice-committed acceptance criterion; deferring leaves slice 004 unable to assert its own contract.

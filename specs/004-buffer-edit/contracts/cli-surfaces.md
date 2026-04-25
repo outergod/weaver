@@ -134,6 +134,72 @@ echo '[{"range":{"start":{"line":0,"character":0},"end":{"line":0,"character":0}
   | weaver edit-json /tmp/foo.txt --from -
 ```
 
+### `weaver inspect --why` — NEW flag (slice 004)
+
+```
+weaver inspect <fact-key> [--why] [-o human|json] [--socket <PATH>]
+```
+
+**Semantics**: when `--why` is set, `weaver inspect` chains a second bus round-trip after the existing fact-inspect: it takes the returned `InspectionDetail.source_event`, issues `BusMessage::EventInspectRequest { event_id: source_event }`, and renders a walkback JSON shape that includes the original event's `ActorIdentity`. Without `--why`, behaviour is unchanged from slice 001.
+
+**Walkback JSON shape (`-o json --why`)**:
+
+```json
+{
+  "fact": {"entity": 42, "attribute": "buffer/version"},
+  "fact_inspection": {
+    "source_event": 17,
+    "asserting_kind": "service",
+    "asserting_service": "weaver-buffers",
+    "asserting_instance": "<uuid>",
+    "asserted_at_ns": 1700000000000000000,
+    "trace_sequence": 31,
+    "value": {"type": "u64", "value": 1}
+  },
+  "event": {
+    "id": 17,
+    "name": "buffer/edit",
+    "target": 42,
+    "payload_type": "buffer-edit",
+    "provenance": {
+      "source": {"type": "user"},
+      "timestamp_ns": 1700000000000000000,
+      "causal_parent": null
+    }
+  }
+}
+```
+
+`event.provenance.source.type` carries the kebab-case `ActorIdentity` discriminator (per Amendment 5 wire convention) — `"user"` for `ActorIdentity::User`, `"service"` for `ActorIdentity::Service`, etc. `event.id` always equals `fact_inspection.source_event` (invariant: the source-event lookup uses that exact id).
+
+**Exit codes** (`weaver inspect --why`):
+
+| Code | Meaning |
+|---|---|
+| `0` | Walkback succeeded; both the fact and its source event were resolvable. |
+| `2` | Either the fact or the source event was not found (`fact-not-found` from inspect, or `event-not-found` from event-inspect). Exit-2 mirrors the slice-001 inspect convention for "expected miss". |
+| `3` | Core unreachable. |
+
+**Human-mode output (`-o human --why`)**: extends slice-001's flat key-value rendering with a second block:
+
+```
+fact: (42, buffer/version)
+  source_event:       17
+  asserting_kind:     service
+  asserting_service:  weaver-buffers
+  asserting_instance: <uuid>
+  asserted_at_ns:     1700000000000000000
+  trace_sequence:     31
+  value:              U64(1)
+event: 17
+  name:               buffer/edit
+  target:             42
+  payload_type:       buffer-edit
+  provenance.source:  user
+  timestamp_ns:       1700000000000000000
+  causal_parent:      —
+```
+
 ## Diagnostic codes (miette)
 
 Per L2 P6 (Humane shell), errors reference fact-space state. The `WEAVER-EDIT-NNN` family is introduced this slice:
