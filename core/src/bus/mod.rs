@@ -4,4 +4,5 @@
 pub mod client;
 pub mod codec;
 pub mod delivery;
+pub mod event_subscriptions;
 pub mod listener;

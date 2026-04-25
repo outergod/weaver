@@ -23,6 +23,7 @@ use tokio::net::{UnixListener, UnixStream};
 
 use crate::behavior::dispatcher::Dispatcher;
 use crate::bus::codec::{CodecError, read_message, write_message};
+use crate::bus::event_subscriptions::EventSubscriptionHandle;
 use crate::fact_space::{FactEvent, FactStore, SubscriptionHandle};
 use crate::inspect::inspect_fact;
 use crate::types::message::{
@@ -174,27 +175,46 @@ async fn run_message_loop(
     dispatcher: &Arc<Dispatcher>,
     client_kind: &str,
 ) -> Result<(), ListenerError> {
-    let mut subscription: Option<SubscriptionHandle> = None;
+    let mut fact_subscription: Option<SubscriptionHandle> = None;
+    let mut event_subscription: Option<EventSubscriptionHandle> = None;
     loop {
-        // If the client is not subscribed yet, just read from the
-        // stream. Once subscribed, select between reading a client
-        // frame and a fact-space event.
-        let next = match subscription.as_mut() {
-            Some(sub) => {
-                tokio::select! {
-                    msg = read_message(stream) => Incoming::Client(msg),
-                    evt = sub.rx.recv() => Incoming::FactEvent(evt),
-                }
-            }
-            None => Incoming::Client(read_message(stream).await),
+        // The select! shape depends on which subscriptions are active
+        // (a connection MAY hold one, both, or neither). Each branch
+        // races client-stream reads against the active subscription
+        // channels; events and fact-events are independent streams,
+        // so we expand the cartesian-product cases inline rather than
+        // building a multi-source merger.
+        let next = match (fact_subscription.as_mut(), event_subscription.as_mut()) {
+            (Some(fs), Some(es)) => tokio::select! {
+                msg = read_message(stream) => Incoming::Client(msg),
+                evt = fs.rx.recv() => Incoming::FactEvent(evt),
+                evt = es.rx.recv() => Incoming::Event(evt),
+            },
+            (Some(fs), None) => tokio::select! {
+                msg = read_message(stream) => Incoming::Client(msg),
+                evt = fs.rx.recv() => Incoming::FactEvent(evt),
+            },
+            (None, Some(es)) => tokio::select! {
+                msg = read_message(stream) => Incoming::Client(msg),
+                evt = es.rx.recv() => Incoming::Event(evt),
+            },
+            (None, None) => Incoming::Client(read_message(stream).await),
         };
 
         match next {
             Incoming::Client(Ok(msg)) => {
-                if let Some(new_sub) =
-                    handle_client_message(conn_id, msg, dispatcher, stream).await?
-                {
-                    subscription = Some(new_sub);
+                match handle_client_message(conn_id, msg, dispatcher, stream).await? {
+                    HandlerOutcome::None => {}
+                    HandlerOutcome::FactSubscription(h) => {
+                        fact_subscription = Some(h);
+                    }
+                    HandlerOutcome::EventSubscription(h) => {
+                        // Last-wins per the SubscribeEvents contract:
+                        // overwriting drops the prior handle, whose
+                        // tx side is then closed; the registry prunes
+                        // it on the next broadcast.
+                        event_subscription = Some(h);
+                    }
                 }
             }
             Incoming::Client(Err(CodecError::Io(e)))
@@ -211,7 +231,15 @@ async fn run_message_loop(
                 // Subscription channel closed (should not happen in
                 // slice 001 — the fact store lives as long as the
                 // dispatcher). Drop the subscription and keep reading.
-                subscription = None;
+                fact_subscription = None;
+            }
+            Incoming::Event(Some(event)) => {
+                write_message(stream, &BusMessage::Event(event)).await?;
+            }
+            Incoming::Event(None) => {
+                // Event-subscription channel closed. Same defensive
+                // shape as the fact-subscription None branch.
+                event_subscription = None;
             }
         }
     }
@@ -220,15 +248,24 @@ async fn run_message_loop(
 enum Incoming {
     Client(Result<BusMessage, CodecError>),
     FactEvent(Option<FactEvent>),
+    Event(Option<crate::types::event::Event>),
 }
 
-/// Returns `Some(handle)` when a new subscription was established.
+/// Outcome of handling one client message. The dispatch loop folds
+/// subscription handles into its connection-local state; everything
+/// else collapses to `None`.
+enum HandlerOutcome {
+    None,
+    FactSubscription(SubscriptionHandle),
+    EventSubscription(EventSubscriptionHandle),
+}
+
 async fn handle_client_message(
     conn_id: u64,
     msg: BusMessage,
     dispatcher: &Arc<Dispatcher>,
     writer: &mut UnixStream,
-) -> Result<Option<SubscriptionHandle>, ListenerError> {
+) -> Result<HandlerOutcome, ListenerError> {
     match msg {
         BusMessage::Hello(_) => {
             let err = BusMessage::Error(ErrorMsg {
@@ -237,7 +274,7 @@ async fn handle_client_message(
                 context: None,
             });
             write_message(writer, &err).await?;
-            Ok(None)
+            Ok(HandlerOutcome::None)
         }
         BusMessage::Event(event) => {
             // F15 review fix: Events carry client-supplied provenance
@@ -254,10 +291,10 @@ async fn handle_client_message(
                     context: None,
                 });
                 write_message(writer, &err).await?;
-                return Ok(None);
+                return Ok(HandlerOutcome::None);
             }
             dispatcher.process_event(event).await;
-            Ok(None)
+            Ok(HandlerOutcome::None)
         }
         BusMessage::Subscribe(pattern) => {
             // Take the snapshot and register the subscription under the
@@ -289,7 +326,7 @@ async fn handle_client_message(
                     write_message(writer, &BusMessage::FactAssert(fact.clone())).await?;
                 }
             }
-            Ok(Some(handle))
+            Ok(HandlerOutcome::FactSubscription(handle))
         }
         BusMessage::InspectRequest { request_id, fact } => {
             let snapshot = {
@@ -304,7 +341,7 @@ async fn handle_client_message(
             };
             let resp = BusMessage::InspectResponse { request_id, result };
             write_message(writer, &resp).await?;
-            Ok(None)
+            Ok(HandlerOutcome::None)
         }
         BusMessage::StatusRequest => {
             let (lifecycle, uptime_ns, facts) = {
@@ -323,7 +360,7 @@ async fn handle_client_message(
                 },
             )
             .await?;
-            Ok(None)
+            Ok(HandlerOutcome::None)
         }
         BusMessage::FactAssert(fact) => {
             // Slice 002: only services publish authoritative facts
@@ -350,7 +387,7 @@ async fn handle_client_message(
                     context: None,
                 });
                 write_message(writer, &err).await?;
-                return Ok(None);
+                return Ok(HandlerOutcome::None);
             }
             // F12 review fix: wire deserialization bypasses
             // `ActorIdentity::service`'s kebab-case/non-empty
@@ -365,7 +402,7 @@ async fn handle_client_message(
                     context: None,
                 });
                 write_message(writer, &err).await?;
-                return Ok(None);
+                return Ok(HandlerOutcome::None);
             }
             match dispatcher.publish_from_service(conn_id, fact).await {
                 ServicePublishOutcome::Asserted => {}
@@ -408,7 +445,7 @@ async fn handle_client_message(
                     write_message(writer, &err).await?;
                 }
             }
-            Ok(None)
+            Ok(HandlerOutcome::None)
         }
         BusMessage::FactRetract { key, provenance } => {
             // F2 review fix: a connection may only retract facts it
@@ -444,7 +481,7 @@ async fn handle_client_message(
                 });
                 write_message(writer, &err).await?;
             }
-            Ok(None)
+            Ok(HandlerOutcome::None)
         }
         BusMessage::SubscribeAck { .. }
         | BusMessage::InspectResponse { .. }
@@ -458,21 +495,21 @@ async fn handle_client_message(
                 context: None,
             });
             write_message(writer, &err).await?;
-            Ok(None)
+            Ok(HandlerOutcome::None)
         }
-        BusMessage::SubscribeEvents(_) => {
-            // T009B wires the real subscription path. Until then the
-            // wire variant exists (the client side can dispatch it) but
-            // the listener responds with an Error frame so a misbehaving
-            // 0x04 client running ahead of the broadcast machinery gets
-            // a defined response rather than a panic.
-            let err = BusMessage::Error(ErrorMsg {
-                category: "not-implemented".into(),
-                detail: "subscribe-events handler lands in T009B".into(),
-                context: None,
-            });
-            write_message(writer, &err).await?;
-            Ok(None)
+        BusMessage::SubscribeEvents(pattern) => {
+            // Slice 004: register an event subscription on the
+            // dispatcher's broadcast registry. Unlike fact-Subscribe
+            // there is no snapshot — events are lossy-class with no
+            // replay (`docs/02-architecture.md §3.1`); subscribers
+            // see only events that arrive AFTER subscription. The
+            // ack reuses SubscribeAck { sequence: 0 } per the
+            // bus-messages contract (events have no per-publisher
+            // sequence; sequence=0 is consistent with the slice-001
+            // fact ack which also uses 0 until gap detection lands).
+            let handle = dispatcher.event_subscriptions().subscribe(pattern);
+            write_message(writer, &BusMessage::SubscribeAck { sequence: 0 }).await?;
+            Ok(HandlerOutcome::EventSubscription(handle))
         }
     }
 }
