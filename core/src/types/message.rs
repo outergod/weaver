@@ -60,6 +60,16 @@ pub enum BusMessage {
     SubscribeAck {
         sequence: u64,
     },
+    /// Subscribe to events matching an [`EventSubscribePattern`]
+    /// (slice 004 — see `specs/004-buffer-edit/research.md §13`).
+    /// Lossy-class delivery: the core forwards each
+    /// [`BusMessage::Event`] whose payload type-tag matches the
+    /// pattern. Replied with [`BusMessage::SubscribeAck`] using
+    /// `sequence: 0` (events have no per-publisher sequence).
+    /// A second `SubscribeEvents` on the same connection replaces the
+    /// prior pattern (last-wins; mirrors the fact-subscription
+    /// convention).
+    SubscribeEvents(EventSubscribePattern),
     InspectRequest {
         request_id: u64,
         fact: FactKey,
@@ -109,6 +119,45 @@ impl SubscribePattern {
         match self {
             SubscribePattern::AllFacts => true,
             SubscribePattern::FamilyPrefix(prefix) => key.attribute.starts_with(prefix.as_str()),
+        }
+    }
+}
+
+/// Event-subscription pattern (slice 004). Matches against an
+/// [`crate::types::event::EventPayload`]'s adjacent-tag discriminator.
+///
+/// Wire shape: adjacent tagging (`"type"` + `"pattern"`), kebab-case
+/// variant names (symmetric with [`SubscribePattern`]). For example,
+/// `PayloadType("buffer-edit".into())` →
+/// `{"type":"payload-type","pattern":"buffer-edit"}`.
+///
+/// **Why a separate enum from [`SubscribePattern`]**: facts and events
+/// have structurally different delivery classes (authoritative vs
+/// lossy), reconnect semantics (snapshot vs no-replay), and idempotence
+/// semantics. Folding them into one pattern would conflate concerns
+/// the listener already handles distinctly. See
+/// `specs/004-buffer-edit/research.md §13`.
+///
+/// Future variants (out of slice-004 scope; documented for the design
+/// ceiling): `TargetEntity(EntityRef)` for per-entity filtering;
+/// `EventNamePrefix(String)` for `Event.name`-based filtering. Deferred
+/// until a concrete user case appears.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "pattern", rename_all = "kebab-case")]
+pub enum EventSubscribePattern {
+    /// Match events whose [`EventPayload`]'s
+    /// [`crate::types::event::EventPayload::type_tag`] equals this string
+    /// (e.g., `"buffer-edit"`, `"buffer-open"`). Matches any target
+    /// entity; subscribers that only care about specific targets MUST
+    /// filter at receipt time.
+    PayloadType(String),
+}
+
+impl EventSubscribePattern {
+    /// Return `true` when the event matches this subscription.
+    pub fn matches(&self, event: &crate::types::event::Event) -> bool {
+        match self {
+            Self::PayloadType(tag) => event.payload.type_tag() == tag.as_str(),
         }
     }
 }
@@ -482,5 +531,99 @@ mod tests {
         assert_eq!(d.asserting_kind, "core");
         assert!(d.asserting_behavior.is_none());
         assert!(d.asserting_service.is_none());
+    }
+
+    // ───────────────────────────────────────────────────────────────────
+    // Slice-004 T009A: EventSubscribePattern + SubscribeEvents wire shape.
+    // ───────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn event_subscribe_pattern_payload_type_json_wire_shape() {
+        let p = EventSubscribePattern::PayloadType("buffer-edit".into());
+        let s = serde_json::to_string(&p).expect("serialize");
+        // Adjacent tag: "type" + "pattern" content field, kebab-case
+        // variant name (symmetric with SubscribePattern).
+        assert_eq!(s, r#"{"type":"payload-type","pattern":"buffer-edit"}"#);
+        let back: EventSubscribePattern = serde_json::from_str(&s).expect("deserialize");
+        assert_eq!(p, back);
+    }
+
+    #[test]
+    fn event_subscribe_pattern_payload_type_cbor_round_trip() {
+        let p = EventSubscribePattern::PayloadType("buffer-open".into());
+        let mut buf = Vec::new();
+        ciborium::into_writer(&p, &mut buf).expect("encode");
+        let back: EventSubscribePattern = ciborium::from_reader(buf.as_slice()).expect("decode");
+        assert_eq!(p, back);
+    }
+
+    #[test]
+    fn event_subscribe_pattern_matches_only_on_payload_type_tag() {
+        use crate::provenance::ActorIdentity;
+        use crate::types::event::{Event, EventPayload};
+        use crate::types::ids::EventId;
+
+        fn fixture(payload: EventPayload) -> Event {
+            Event {
+                id: EventId::new(0),
+                name: "test".into(),
+                target: None,
+                payload,
+                provenance: Provenance::new(ActorIdentity::Core, 0, None).unwrap(),
+            }
+        }
+
+        let buffer_edit = fixture(EventPayload::BufferEdit {
+            entity: crate::types::entity_ref::EntityRef::new(1),
+            version: 0,
+            edits: vec![],
+        });
+        let buffer_open = fixture(EventPayload::BufferOpen {
+            path: "/tmp/x".into(),
+        });
+
+        let edit_pat = EventSubscribePattern::PayloadType("buffer-edit".into());
+        assert!(edit_pat.matches(&buffer_edit), "edit pattern matches edit");
+        assert!(
+            !edit_pat.matches(&buffer_open),
+            "edit pattern does NOT match open"
+        );
+
+        let open_pat = EventSubscribePattern::PayloadType("buffer-open".into());
+        assert!(open_pat.matches(&buffer_open), "open pattern matches open");
+        assert!(
+            !open_pat.matches(&buffer_edit),
+            "open pattern does NOT match edit"
+        );
+
+        let unknown = EventSubscribePattern::PayloadType("nonexistent-variant".into());
+        assert!(!unknown.matches(&buffer_edit));
+        assert!(!unknown.matches(&buffer_open));
+    }
+
+    #[test]
+    fn bus_message_subscribe_events_json_wire_shape() {
+        let msg =
+            BusMessage::SubscribeEvents(EventSubscribePattern::PayloadType("buffer-edit".into()));
+        let s = serde_json::to_string(&msg).expect("serialize");
+        // BusMessage adjacent tag is "type" + "payload"; kebab-case
+        // "subscribe-events" variant name; payload is the
+        // EventSubscribePattern wire shape.
+        assert_eq!(
+            s,
+            r#"{"type":"subscribe-events","payload":{"type":"payload-type","pattern":"buffer-edit"}}"#,
+        );
+        let back: BusMessage = serde_json::from_str(&s).expect("deserialize");
+        assert_eq!(msg, back);
+    }
+
+    #[test]
+    fn bus_message_subscribe_events_cbor_round_trip() {
+        let msg =
+            BusMessage::SubscribeEvents(EventSubscribePattern::PayloadType("buffer-edit".into()));
+        let mut buf = Vec::new();
+        ciborium::into_writer(&msg, &mut buf).expect("encode");
+        let back: BusMessage = ciborium::from_reader(buf.as_slice()).expect("decode");
+        assert_eq!(msg, back);
     }
 }

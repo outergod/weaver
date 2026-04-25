@@ -60,6 +60,26 @@ pub enum EventPayload {
     },
 }
 
+impl EventPayload {
+    /// Adjacent-tag string used as the wire discriminator for this
+    /// payload (same value the serde `#[serde(rename_all =
+    /// "kebab-case")]` derive emits in the `"type"` field).
+    ///
+    /// Used by [`crate::types::message::EventSubscribePattern::matches`]
+    /// to filter events at broadcast time without having to round-trip
+    /// the payload through serde first.
+    ///
+    /// MUST stay in lockstep with the variant `rename_all` rule above —
+    /// the regression test `event_payload_type_tag_matches_serde_discriminant`
+    /// derives the discriminant via `serde_json::to_value` and pins both.
+    pub fn type_tag(&self) -> &'static str {
+        match self {
+            Self::BufferOpen { .. } => "buffer-open",
+            Self::BufferEdit { .. } => "buffer-edit",
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -242,6 +262,35 @@ mod tests {
             let s = serde_json::to_string(&e).unwrap();
             let back: Event = serde_json::from_str(&s).unwrap();
             prop_assert_eq!(e, back);
+        }
+    }
+
+    /// Pin EventPayload::type_tag() against the serde-emitted "type"
+    /// discriminator so the two cannot drift. EventSubscribePattern
+    /// matching depends on this being byte-identical with the wire
+    /// adjacent-tag string.
+    #[test]
+    fn event_payload_type_tag_matches_serde_discriminant() {
+        for payload in [
+            EventPayload::BufferOpen {
+                path: "/tmp/x".into(),
+            },
+            EventPayload::BufferEdit {
+                entity: EntityRef::new(1),
+                version: 0,
+                edits: vec![],
+            },
+        ] {
+            let v: serde_json::Value = serde_json::to_value(&payload).unwrap();
+            let serde_tag = v
+                .get("type")
+                .and_then(|t| t.as_str())
+                .expect("EventPayload always emits a `type` discriminator under adjacent tagging");
+            assert_eq!(
+                payload.type_tag(),
+                serde_tag,
+                "type_tag() must match the serde-emitted discriminator",
+            );
         }
     }
 }

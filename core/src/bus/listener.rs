@@ -460,6 +460,20 @@ async fn handle_client_message(
             write_message(writer, &err).await?;
             Ok(None)
         }
+        BusMessage::SubscribeEvents(_) => {
+            // T009B wires the real subscription path. Until then the
+            // wire variant exists (the client side can dispatch it) but
+            // the listener responds with an Error frame so a misbehaving
+            // 0x04 client running ahead of the broadcast machinery gets
+            // a defined response rather than a panic.
+            let err = BusMessage::Error(ErrorMsg {
+                category: "not-implemented".into(),
+                detail: "subscribe-events handler lands in T009B".into(),
+                context: None,
+            });
+            write_message(writer, &err).await?;
+            Ok(None)
+        }
     }
 }
 

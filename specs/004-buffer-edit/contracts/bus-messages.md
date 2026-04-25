@@ -25,7 +25,7 @@ Unchanged from slice 003. Adjacent-tagged sum types (`"type"` discriminator + co
 | `BusMessage`     | `payload`     | `{"type":"event","payload":{...}}` / `{"type":"subscribe-events","payload":{...}}` (NEW) |
 | `ActorIdentity`  | `id` or variant-specific fields | `{"type":"user"}` (slice 004 — first production use of `User` variant) |
 | `SubscribePattern`| `pattern`    | `{"type":"family-prefix","pattern":"buffer/"}` (facts; unchanged)           |
-| `EventSubscribePattern` | `payload-type` | `{"type":"payload-type","payload-type":"buffer-edit"}` (NEW) |
+| `EventSubscribePattern` | `pattern`     | `{"type":"payload-type","pattern":"buffer-edit"}` (NEW; symmetric with `SubscribePattern`'s content field) |
 | `FactValue`      | `value`       | `{"type":"u64","value":12345}` (slice 003) / `{"type":"bool","value":true}` |
 | `EventPayload`   | `payload` (struct variants only) | `{"type":"buffer-edit","payload":{"entity":42,"version":7,"edits":[...]}}` (NEW) |
 | `LifecycleSignal`| —             | Unit-only; serializes as bare string: `"ready"`, `"degraded"`, etc.         |
@@ -225,7 +225,7 @@ A connection MAY hold both a fact subscription and an event subscription concurr
 ```json
 {
   "type": "subscribe-events",
-  "payload": {"type": "payload-type", "payload-type": "buffer-edit"}
+  "payload": {"type": "payload-type", "pattern": "buffer-edit"}
 }
 ```
 
