@@ -100,6 +100,31 @@ pub enum WeaverCliError {
         message: String,
         context: Option<String>,
     },
+
+    /// WEAVER-EDIT-001 — the target buffer is not opened by any
+    /// `weaver-buffers` instance on the bus. Surfaced when
+    /// `weaver edit`'s pre-dispatch inspect-lookup of `buffer/version`
+    /// returns `FactNotFound`. Exit 1.
+    #[error(
+        "buffer not opened: {path} — no fact (entity:{entity}, attribute:buffer/version) is asserted by any authority. Run `weaver-buffers {path}` to open the buffer."
+    )]
+    #[diagnostic(code("WEAVER-EDIT-001"))]
+    BufferNotOpened {
+        path: String,
+        entity: u64,
+        context: Option<String>,
+    },
+
+    /// WEAVER-EDIT-002 — `weaver edit`'s positional `<RANGE>` argument
+    /// did not parse as `<sl>:<sc>-<el>:<ec>`, OR the variadic
+    /// `<RANGE> <TEXT>` pairs had an odd element count. Exit 1.
+    #[error("invalid range \"{input}\": {detail}")]
+    #[diagnostic(code("WEAVER-EDIT-002"))]
+    InvalidRange {
+        input: String,
+        detail: String,
+        context: Option<String>,
+    },
 }
 
 impl WeaverCliError {
@@ -110,6 +135,8 @@ impl WeaverCliError {
             WeaverCliError::FactNotFound { .. } => "fact-not-found",
             WeaverCliError::ParseError { .. } => "parse-error",
             WeaverCliError::ProtocolError { .. } => "protocol-error",
+            WeaverCliError::BufferNotOpened { .. } => "buffer-not-opened",
+            WeaverCliError::InvalidRange { .. } => "invalid-range",
         }
     }
 
@@ -121,6 +148,8 @@ impl WeaverCliError {
             WeaverCliError::FactNotFound { .. } => "WEAVER-201",
             WeaverCliError::ParseError { .. } => "WEAVER-101",
             WeaverCliError::ProtocolError { .. } => "WEAVER-301",
+            WeaverCliError::BufferNotOpened { .. } => "WEAVER-EDIT-001",
+            WeaverCliError::InvalidRange { .. } => "WEAVER-EDIT-002",
         }
     }
 
@@ -129,7 +158,9 @@ impl WeaverCliError {
             WeaverCliError::CoreUnavailable { context, .. }
             | WeaverCliError::FactNotFound { context, .. }
             | WeaverCliError::ParseError { context, .. }
-            | WeaverCliError::ProtocolError { context, .. } => context.as_deref(),
+            | WeaverCliError::ProtocolError { context, .. }
+            | WeaverCliError::BufferNotOpened { context, .. }
+            | WeaverCliError::InvalidRange { context, .. } => context.as_deref(),
         }
     }
 
@@ -145,9 +176,10 @@ impl WeaverCliError {
             WeaverCliError::CoreUnavailable { .. } | WeaverCliError::FactNotFound { .. } => {
                 exit_code::EXPECTED
             }
-            WeaverCliError::ParseError { .. } | WeaverCliError::ProtocolError { .. } => {
-                exit_code::GENERAL
-            }
+            WeaverCliError::ParseError { .. }
+            | WeaverCliError::ProtocolError { .. }
+            | WeaverCliError::BufferNotOpened { .. }
+            | WeaverCliError::InvalidRange { .. } => exit_code::GENERAL,
         }
     }
 
@@ -206,6 +238,24 @@ impl WeaverCliError {
                 message: message.clone(),
                 context: context.clone(),
             },
+            WeaverCliError::BufferNotOpened {
+                path,
+                entity,
+                context,
+            } => WeaverCliError::BufferNotOpened {
+                path: path.clone(),
+                entity: *entity,
+                context: context.clone(),
+            },
+            WeaverCliError::InvalidRange {
+                input,
+                detail,
+                context,
+            } => WeaverCliError::InvalidRange {
+                input: input.clone(),
+                detail: detail.clone(),
+                context: context.clone(),
+            },
         }
     }
 }
@@ -258,5 +308,33 @@ mod tests {
             .exit_code(),
             exit_code::EXPECTED,
         );
+    }
+
+    #[test]
+    fn buffer_not_opened_envelope_shape() {
+        let err = WeaverCliError::BufferNotOpened {
+            path: "/tmp/foo.txt".into(),
+            entity: 0xDEAD_BEEF,
+            context: Some("weaver edit /tmp/foo.txt".into()),
+        };
+        let s = serde_json::to_string(&err.envelope()).unwrap();
+        assert!(s.contains("\"category\":\"buffer-not-opened\""));
+        assert!(s.contains("\"code\":\"WEAVER-EDIT-001\""));
+        assert!(s.contains("/tmp/foo.txt"));
+        assert_eq!(err.exit_code(), exit_code::GENERAL);
+    }
+
+    #[test]
+    fn invalid_range_envelope_shape() {
+        let err = WeaverCliError::InvalidRange {
+            input: "0:0".into(),
+            detail: "expected <start-line>:<start-char>-<end-line>:<end-char>".into(),
+            context: None,
+        };
+        let s = serde_json::to_string(&err.envelope()).unwrap();
+        assert!(s.contains("\"category\":\"invalid-range\""));
+        assert!(s.contains("\"code\":\"WEAVER-EDIT-002\""));
+        assert!(s.contains("0:0"));
+        assert_eq!(err.exit_code(), exit_code::GENERAL);
     }
 }

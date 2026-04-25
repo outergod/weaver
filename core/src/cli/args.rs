@@ -57,6 +57,24 @@ pub enum Command {
         /// (e.g., `1:buffer/dirty`).
         fact_key: String,
     },
+
+    /// Dispatch a batch of text edits to an opened buffer.
+    ///
+    /// Fire-and-forget: exits 0 on successful dispatch and does NOT
+    /// wait for the service to apply. See
+    /// `specs/004-buffer-edit/contracts/cli-surfaces.md`.
+    Edit {
+        /// File path identifying the buffer.
+        path: PathBuf,
+        /// Variadic positional pairs: each pair is `<RANGE> <TEXT>`.
+        /// `<RANGE>` is `<sl>:<sc>-<el>:<ec>` (decimal `u32`
+        /// components; UTF-8 byte offsets within the line). `<TEXT>`
+        /// is the replacement string (`""` to delete-only). The list
+        /// MUST have an even number of elements; an odd count is
+        /// rejected at the handler with WEAVER-EDIT-002.
+        #[arg(num_args = 0..)]
+        pairs: Vec<String>,
+    },
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
@@ -103,5 +121,52 @@ mod tests {
     fn version_flag_recognized() {
         let cli = Cli::try_parse_from(["weaver", "--version"]).unwrap();
         assert!(cli.version);
+    }
+
+    #[test]
+    fn parses_edit_subcommand_with_no_pairs() {
+        let cli = Cli::try_parse_from(["weaver", "edit", "/tmp/foo.txt"]).unwrap();
+        match cli.command {
+            Some(Command::Edit { path, pairs }) => {
+                assert_eq!(path, PathBuf::from("/tmp/foo.txt"));
+                assert!(pairs.is_empty());
+            }
+            other => panic!("expected Command::Edit, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_edit_subcommand_with_one_pair() {
+        let cli =
+            Cli::try_parse_from(["weaver", "edit", "/tmp/foo.txt", "0:0-0:0", "hello "]).unwrap();
+        match cli.command {
+            Some(Command::Edit { path, pairs }) => {
+                assert_eq!(path, PathBuf::from("/tmp/foo.txt"));
+                assert_eq!(pairs, vec!["0:0-0:0".to_string(), "hello ".to_string()]);
+            }
+            other => panic!("expected Command::Edit, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_edit_subcommand_with_three_pairs() {
+        let cli = Cli::try_parse_from([
+            "weaver",
+            "edit",
+            "/tmp/foo.txt",
+            "0:0-0:0",
+            "A",
+            "1:0-1:0",
+            "B",
+            "2:0-2:0",
+            "C",
+        ])
+        .unwrap();
+        match cli.command {
+            Some(Command::Edit { pairs, .. }) => {
+                assert_eq!(pairs.len(), 6);
+            }
+            other => panic!("expected Command::Edit, got {other:?}"),
+        }
     }
 }
