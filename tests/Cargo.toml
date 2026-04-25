@@ -85,3 +85,7 @@ path = "e2e/buffer_authority_conflict.rs"
 [[test]]
 name = "buffer_degraded_observable"
 path = "e2e/buffer_degraded_observable.rs"
+
+[[test]]
+name = "buffer_edit_single"
+path = "e2e/buffer_edit_single.rs"
