@@ -25,7 +25,7 @@ This slice is the first non-service event-payload producer wired to the wire. Sl
 **Project Type**: Rust workspace; **no new member crate**. Modifies `core/` (event-payload variant, struct types, listener still routes through existing path, CLI subcommands, `--version` output, bus protocol version), `buffers/` (publisher reader-loop arm + apply path on `BufferState`). `tui/`, `git-watcher/`, `ui/` untouched.
 **Performance Goals**: SC-401 — single-edit emit-to-fact-re-emit observable on subscriber ≤ 500 ms (interactive latency class per `docs/02-architecture.md §7.1`, parity with slice-003 SC-302). SC-402 (16-edit atomic batch) and SC-403 (100 sequential edits) are intentionally **structural-only** with no wall-clock budget — batch latency floor is governed by work content (validation + apply + SHA-256 recompute) and imposing a wall-clock would force atomicity-damaging fragmentation.
 **Constraints**: Events lossy-class per `docs/02-architecture.md §3.1`; fire-and-forget CLI semantics (no exit-code signal for stale-drop or validation rejection); UTF-8 byte offsets on the wire (not UTF-16); no save-to-disk (slice 005); no concurrent-edit resolution beyond version-handshake last-write-wins; **unauthenticated edit channel** explicitly inherited as a Known Hazard (FR-019) and NOT closed this slice.
-**Scale/Scope**: ~700–1100 new LOC across `core` and `buffers`, plus e2e tests. 1 new `EventPayload` variant (`BufferEdit`); 3 new struct types (`TextEdit`, `Range`, `Position`); 2 new CLI subcommands (`edit`, `edit-json`); 1 new pub(crate) handler on the buffers publisher (`dispatch_buffer_edit` + `BufferEditOutcome` + `apply_edits` on `BufferState`); 6 new e2e test files — `buffer_edit_single` (folds the buffer-not-opened path), `buffer_edit_inspect_why`, `buffer_edit_atomic_batch`, `buffer_edit_sequential`, `buffer_edit_stale_drop`, plus the `buffer_edit_emitter_parity` property test (SC-406). No new fact families. Bus protocol 0.3.0 → 0.4.0 (MAJOR).
+**Scale/Scope**: ~900–1300 new LOC across `core` and `buffers`, plus e2e tests. 1 new `EventPayload` variant (`BufferEdit`); 3 new struct types (`TextEdit`, `Range`, `Position`); 1 new `EventSubscribePattern` enum + `BusMessage::SubscribeEvents` variant + `EventSubscriptions` registry (T009A/T009B, added mid-flight per `research.md §13` to close the previously-missing event-broadcast infrastructure); 2 new CLI subcommands (`edit`, `edit-json`); 1 new pub(crate) handler on the buffers publisher (`dispatch_buffer_edit` + `BufferEditOutcome` + `apply_edits` on `BufferState`); 6 new e2e test files — `buffer_edit_single` (folds the buffer-not-opened path), `buffer_edit_inspect_why`, `buffer_edit_atomic_batch`, `buffer_edit_sequential`, `buffer_edit_stale_drop`, plus the `buffer_edit_emitter_parity` property test (SC-406). No new fact families. Bus protocol 0.3.0 → 0.4.0 (MAJOR; covers BufferEdit + SubscribeEvents).
 
 ## Constitution Check
 
@@ -128,12 +128,13 @@ core/
     ├── main.rs                   # unchanged (CLI dispatch lives in cli/)
     ├── bus/
     │   ├── codec.rs              # unchanged (frame size constant exposed for CLI pre-check)
-    │   └── listener.rs           # unchanged — `BusMessage::Event` dispatch path already handles `EventPayload::BufferEdit` via process_event
+    │   ├── event_subscriptions.rs # NEW (T009B, mid-flight) — EventSubscriptions registry; per-connection mpsc fan-out for events matching an EventSubscribePattern; lossy-class delivery via unbounded mpsc (drop-oldest deferred)
+    │   └── listener.rs           # MODIFIED (T009B) — handle BusMessage::SubscribeEvents → register EventSubscriptionHandle on the connection; run_message_loop's select! gains an event-rx arm that forwards BusMessage::Event to the client. Existing BusMessage::Event dispatch path (process_event) is unchanged.
     ├── types/
-    │   ├── event.rs              # MODIFIED — `EventPayload::BufferEdit { entity, version, edits }` ADDED
+    │   ├── event.rs              # MODIFIED — `EventPayload::BufferEdit { entity, version, edits }` ADDED; `EventPayload::type_tag(&self) -> &'static str` ADDED (T009A) for event-pattern matching
     │   ├── edit.rs               # NEW — `TextEdit`, `Range`, `Position` struct types + their serde derives + tests
-    │   └── message.rs            # MODIFIED — `BUS_PROTOCOL_VERSION` 0x03 → 0x04; rendered `BUS_PROTOCOL_VERSION_STR` 0.3.0 → 0.4.0
-    ├── behavior/                 # UNCHANGED
+    │   └── message.rs            # MODIFIED — `BUS_PROTOCOL_VERSION` 0x03 → 0x04; rendered `BUS_PROTOCOL_VERSION_STR` 0.3.0 → 0.4.0; `EventSubscribePattern` enum + `BusMessage::SubscribeEvents(EventSubscribePattern)` variant ADDED (T009A)
+    ├── behavior/                 # MODIFIED (T009B) — Dispatcher gains `event_subscriptions: Arc<EventSubscriptions>`; process_event broadcasts after trace-append
     ├── fact_space/               # UNCHANGED
     ├── trace/                    # UNCHANGED
     ├── inspect/                  # UNCHANGED (existing structured-identity path covers `ActorIdentity::User`)
@@ -148,7 +149,7 @@ buffers/
     ├── main.rs                   # unchanged
     ├── lib.rs                    # MODIFIED — re-export `apply_edits` + `ApplyError` from model.rs
     ├── observer.rs               # unchanged
-    ├── publisher.rs              # MODIFIED — extend reader_loop with `BusMessage::Event(EventPayload::BufferEdit { .. })` arm; new `dispatch_buffer_edit` pub(crate) handler mirroring slice-003 `dispatch_buffer_open`; per-tick edit application + version bump + fact re-emit; `BufferRegistry` extended to expose entity-keyed `BufferState` lookup
+    ├── publisher.rs              # MODIFIED — subscribe to `payload-type=buffer-edit` events on bootstrap (T009C); reader_loop forwards BusMessage::Event to a new event_tx mpsc; main loop's select! adds an event arm that dispatches via dispatch_buffer_edit (T010). New `dispatch_buffer_edit` pub(crate) handler (T009) mirrors slice-003 `dispatch_buffer_open`; per-edit application + version bump + fact re-emit. `BufferRegistry` extended to entity-keyed `BufferState` map (T008)
     └── model.rs                  # MODIFIED — `BufferState::apply_edits(&mut self, &[TextEdit]) -> Result<(), ApplyError>`; `validate_batch`; `ApplyError` enum with all validation-failure kinds
 tui/                              # UNCHANGED — existing `buffer/*` subscription already covers re-emitted facts
 git-watcher/                      # UNCHANGED

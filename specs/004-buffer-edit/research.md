@@ -201,3 +201,21 @@ Returns `Err(ApplyError)` with the first detected validation failure (caller tre
 **Alternatives considered**:
 
 - **Enable `clippy::pedantic` for new modules** — Amendment 6 calls this SUGGESTED but not required; slice 004 is not the slice to introduce stricter local lints.
+
+## 13. Event broadcast — bus-protocol prerequisite (added mid-flight)
+
+**Decision**: Slice 004 adds a new `EventSubscribePattern` enum and a `BusMessage::SubscribeEvents(pattern)` variant; the core's listener gains an event-broadcast registry (`EventSubscriptions`) owned by the `Dispatcher`, parallel to the existing fact-broadcast on the `FactStore`. Subscribers — `weaver-buffers` first — receive `BusMessage::Event(event)` frames whose `EventPayload` matches their declared pattern.
+
+**Why this lands in slice 004 (not deferred)**: discovered during T010 implementation. The slice-004 plan assumed the existing `BusMessage::Event` dispatch path would deliver events to subscribers; in fact, slices 001–003's `dispatcher.process_event` only appends events to the trace and runs in-process behaviors. There is **no bus-level event delivery to external subscribers** before slice 004. The architecture (`docs/02-architecture.md §3.1`) classes `event` as lossy-deliverable and line 212 explicitly lists "subscribe to facts and events", so the *intent* is established; only the mechanism was missing. Slice 004 is the first slice that requires it (the `weaver edit` → `weaver-buffers` round-trip).
+
+**Pattern shape**: `EventSubscribePattern::PayloadType(String)` matches events whose adjacent-tagged `EventPayload` discriminant equals the string (e.g., `"buffer-edit"`, `"buffer-open"`). Target-entity filtering happens at dispatch time via the existing `dispatch_buffer_edit` ownership gate; filtering at subscription time is unmotivated this slice (a service has no reason to subscribe to a partial set of events targeting its own entities).
+
+**Delivery class**: lossy per `docs/02-architecture.md §3.1`. Slice-004 implementation uses `tokio::sync::mpsc::unbounded_channel` for parity with the existing fact-broadcast (slice-001/003 also use unbounded; bounding lands in the same future infrastructure slice that bounds fact subscriptions). True drop-oldest under back-pressure is deferred to that slice.
+
+**Alternatives considered**:
+
+- **Promote `BufferEdit` to `FactAssert(buffer/pending-edit)`** — rejected: contradicts the L1 fact-vs-event ontology. Events are one-shot causal triggers, facts are state. Coercing a pending edit into a fact would set a precedent the agent slice would have to unwind.
+- **Direct CLI-to-service Unix socket** — rejected: contradicts the single-bus architecture (`docs/02-architecture.md §3`). Forfeits the trace and `--why` paths through the core.
+- **Defer slice 004 until a slice 003.5 lands event delivery** — rejected: spec/PR fragmentation. The infrastructure is small enough (≤200 LOC core, ≤30 LOC publisher) to fit within slice 004's existing scope envelope.
+- **Reuse existing `Subscribe(SubscribePattern)` for both facts and events via a sum-typed pattern** — rejected: facts and events have structurally different delivery classes (authoritative vs lossy), reconnect semantics (snapshot vs no-replay), and idempotence semantics. A separate `EventSubscribePattern` keeps the surfaces honest.
+- **A distinct `BusMessage::SubscribeEventsAck` variant** — rejected: `SubscribeAck { sequence: u64 }` already returns `sequence: 0` for fact subscriptions in slice 001 (gap detection deferred). Reusing it for event subscriptions (also `sequence: 0`) keeps the message surface minimal.

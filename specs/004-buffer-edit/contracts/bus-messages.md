@@ -6,6 +6,7 @@ CBOR-encoded messages on the local Unix-domain-socket bus between `weaver` (core
 
 - `EventPayload::BufferEdit { entity: EntityRef, version: u64, edits: Vec<TextEdit> }` is ADDED.
 - Supporting struct types `TextEdit { range: Range, new_text: String }`, `Range { start: Position, end: Position }`, `Position { line: u32, character: u32 }` are ADDED. No new CBOR tags are introduced — the new types ride plain ciborium struct serialisation through the existing adjacent-tag enum machinery.
+- `EventSubscribePattern { PayloadType(String) }` enum and `BusMessage::SubscribeEvents(EventSubscribePattern)` variant are ADDED — the bus gains lossy-class **event broadcast** to external subscribers, parallel to the existing fact subscription. See `research.md §13` for the gap-and-resolution context.
 
 Old (0x03) clients cannot connect; the handshake rejects mismatched versions with a structured error. No provenance-shape change; `ActorIdentity` (CBOR tag 1002) is unchanged from slice 002. The `ActorIdentity::User` variant — reserved at slice 002 — has its first production use this slice as the emitter identity stamped by `weaver edit` / `weaver edit-json`.
 
@@ -21,9 +22,10 @@ Unchanged from slice 003. Adjacent-tagged sum types (`"type"` discriminator + co
 
 | Enum             | Content field | Example (JSON)                                                              |
 |------------------|---------------|-----------------------------------------------------------------------------|
-| `BusMessage`     | `payload`     | `{"type":"event","payload":{...}}`                                          |
+| `BusMessage`     | `payload`     | `{"type":"event","payload":{...}}` / `{"type":"subscribe-events","payload":{...}}` (NEW) |
 | `ActorIdentity`  | `id` or variant-specific fields | `{"type":"user"}` (slice 004 — first production use of `User` variant) |
-| `SubscribePattern`| `pattern`    | `{"type":"family-prefix","pattern":"buffer/"}`                              |
+| `SubscribePattern`| `pattern`    | `{"type":"family-prefix","pattern":"buffer/"}` (facts; unchanged)           |
+| `EventSubscribePattern` | `payload-type` | `{"type":"payload-type","payload-type":"buffer-edit"}` (NEW) |
 | `FactValue`      | `value`       | `{"type":"u64","value":12345}` (slice 003) / `{"type":"bool","value":true}` |
 | `EventPayload`   | `payload` (struct variants only) | `{"type":"buffer-edit","payload":{"entity":42,"version":7,"edits":[...]}}` (NEW) |
 | `LifecycleSignal`| —             | Unit-only; serializes as bare string: `"ready"`, `"degraded"`, etc.         |
@@ -54,7 +56,7 @@ Unchanged shape; the handshake carries the new protocol version.
 2. **Handshake**: client sends `Hello { protocol_version: 0x04, client_kind: "..." }`.
    - **0x04**: core responds with `Lifecycle(Started)` then `Lifecycle(Ready)`.
    - **0x03** or lower (any mismatch): core responds `Error { category: "version-mismatch", detail: "bus protocol 0x04 required; received 0x03" }` and closes.
-3. **Subscribe / interact**: as slices 001/002/003. `family-prefix` patterns work identically; `buffer/` prefix already covers the re-emitted `buffer/byte-size`/`buffer/version`/`buffer/dirty` facts on accepted edits.
+3. **Subscribe / interact**: fact subscription via `BusMessage::Subscribe(SubscribePattern)` as in slices 001/002/003 (`family-prefix` patterns; `buffer/` covers the re-emitted `buffer/byte-size`/`buffer/version`/`buffer/dirty` facts on accepted edits). **NEW** event subscription via `BusMessage::SubscribeEvents(EventSubscribePattern)`: clients receive `BusMessage::Event(event)` frames whose `EventPayload` discriminant matches the pattern's payload-type string. Lossy-class delivery (no replay, no per-publisher sequence). `weaver-buffers` subscribes to `payload-type=buffer-edit` post-handshake to receive edit dispatches from `weaver edit` / `weaver edit-json`.
 4. **Disconnect**: either side may close the stream; traces record the disconnection. No slice-004 changes to the disconnect path.
 
 ## Provenance shape (unchanged from slice 002)
@@ -207,6 +209,49 @@ Delivery class remains authoritative. `causal_parent` usage convention added for
 ### Other messages — unchanged shape
 
 `Event` (envelope), `Subscribe`, `SubscribeAck`, `InspectRequest`, `InspectResponse`, `StatusRequest`, `StatusResponse`, `Error` — no shape changes. The inspection render surface accommodates `EventPayload::BufferEdit` events transparently via existing causal-parent machinery; no new fields introduced.
+
+### `SubscribeEvents` — NEW (slice 004)
+
+```text
+BusMessage::SubscribeEvents(EventSubscribePattern)
+```
+
+Lossy-class event subscription. The core registers the connection's pattern and forwards every `BusMessage::Event(event)` whose `EventPayload` adjacent-tag matches the pattern. Replied with the existing `BusMessage::SubscribeAck { sequence: 0 }` (events have no per-publisher sequence; the ack confirms the subscription is established).
+
+A connection MAY hold both a fact subscription and an event subscription concurrently; the listener's `select!` arms drain whichever channel produces work. A second `SubscribeEvents` on the same connection replaces the prior pattern (last-wins; consistent with the fact-subscription convention).
+
+**Wire shape (JSON, adjacent-tagged kebab-case)**:
+
+```json
+{
+  "type": "subscribe-events",
+  "payload": {"type": "payload-type", "payload-type": "buffer-edit"}
+}
+```
+
+#### `EventSubscribePattern`
+
+```text
+EventSubscribePattern = enum {
+    PayloadType(String),                                                // NEW — slice 004
+}
+```
+
+Matches `Event` whose `payload.type_tag()` equals the pattern's `String` (e.g., `"buffer-edit"`, `"buffer-open"`). Target-entity filtering is the subscriber's responsibility (e.g., `weaver-buffers`'s `dispatch_buffer_edit` returns `NotOwned` for entities outside its registry).
+
+**Future variants** (out of slice-004 scope; documented for the design ceiling): `TargetEntity(EntityRef)` for per-entity filtering; `EventNamePrefix(String)` for `event.name`-based filtering. Both are deferred until a concrete user case appears.
+
+### Event delivery semantics (slice 004)
+
+When the core's `dispatcher.process_event(event)` accepts an event:
+
+1. The event is appended to the trace (existing slice-001 behavior).
+2. Registered in-process behaviors fire (existing slice-001 behavior).
+3. **NEW**: every active event subscription whose `EventSubscribePattern` matches the event's payload type receives a clone via its mpsc channel; the per-connection listener task forwards it as `BusMessage::Event(event)`.
+
+The subscription registry is held on `Dispatcher` (`event_subscriptions`); subscriber lifecycle is implicit via `mpsc` send-failure (when the subscriber's connection closes, the next broadcast attempt fails and the subscription is dropped on the next pass).
+
+Lossy-class delivery in slice 004 is implemented with `tokio::sync::mpsc::unbounded_channel` for parity with the existing fact-broadcast (which is also unbounded in slices 001–003 despite being authoritative-class). Bounded queues with drop-oldest semantics are deferred to the same future infrastructure slice that bounds fact subscriptions.
 
 ## Failure modes (P16 alignment)
 
