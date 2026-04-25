@@ -23,37 +23,16 @@ use weaver_core::types::edit::{Position, TextEdit};
 use weaver_core::types::entity_ref::EntityRef;
 use weaver_core::types::fact::FactValue;
 
-/// Buffer-namespace bit in the derived `EntityRef`. Set on every
-/// buffer entity; distinct from the slice-002 reserved bits 62
-/// (watcher-instance) and 63 (repo). Trace inspection can classify an
-/// entity at a glance by this bit.
-const BUFFER_NAMESPACE_BIT: u64 = 1 << 61;
-
-/// Watcher-instance-namespace bit. Reused unchanged from slice 002: a
-/// `weaver-buffers` invocation's instance entity shares the namespace
-/// with git-watcher instances — the TUI/inspect machinery distinguishes
-/// them by asserted facts, not by entity-id bit layout.
-const INSTANCE_NAMESPACE_BIT: u64 = 1 << 62;
-
-/// Repo-namespace bit, owned by slice-002's `git-watcher`. Buffer
-/// derivations clear this bit so a low-order hash never accidentally
-/// claims the repo namespace.
-const REPO_NAMESPACE_BIT: u64 = 1 << 63;
-
-/// Derive a stable `EntityRef` for a buffer entity from its
-/// canonicalized absolute path.
-///
-/// The caller MUST pass an already-canonicalized path (e.g., the output
-/// of [`std::fs::canonicalize`]). This function is a pure function of
-/// its input — no I/O, no implicit canonicalization — so the entity id
-/// is deterministic for any canonical path.
-pub fn buffer_entity_ref(path: &Path) -> EntityRef {
-    let mut hasher = DefaultHasher::new();
-    path.hash(&mut hasher);
-    let h =
-        (hasher.finish() | BUFFER_NAMESPACE_BIT) & !(INSTANCE_NAMESPACE_BIT | REPO_NAMESPACE_BIT);
-    EntityRef::new(h)
-}
+// Slice-004 lifted `buffer_entity_ref` (and the buffer-namespace bit)
+// to `weaver_core` so the `weaver edit` CLI can derive the same
+// entity-id without a cross-crate runtime dependency. The canonical
+// implementation lives there; this module re-exports for slice-003
+// callers (publisher + tests) and the watcher-instance derivation
+// below, which still wants `INSTANCE_NAMESPACE_BIT` /
+// `REPO_NAMESPACE_BIT` accessible by short name.
+pub use weaver_core::types::buffer_entity::{
+    BUFFER_NAMESPACE_BIT, INSTANCE_NAMESPACE_BIT, REPO_NAMESPACE_BIT, buffer_entity_ref,
+};
 
 /// Derive a stable `EntityRef` for the buffer-service-instance entity
 /// (host of `watcher/status` for this invocation). Mirrors slice-002's
