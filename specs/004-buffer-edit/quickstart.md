@@ -27,7 +27,14 @@ weaver-buffers /tmp/weaver-slice-004/file.txt
 weaver-tui
 ```
 
-Wait for the TUI's Buffers section to show `file.txt` with `version=0` and `dirty=false`.
+Wait for the TUI's Buffers section to show one row per opened file. Bootstrap-time per-row format:
+
+```
+  /tmp/weaver-slice-004/file.txt  [v=0] [16 bytes] clean
+    by service weaver-buffers (inst <short-uuid>), event EventId(<n>), <t>s ago
+```
+
+Where `[v=N]` is `buffer/version`, `[N bytes]` is `buffer/byte-size`, and `clean`/`dirty`/`[observability lost]` is the dirty-or-observability badge per `cli-surfaces.md §Display rules`.
 
 **Action — single insert at start**:
 
@@ -37,21 +44,19 @@ weaver edit /tmp/weaver-slice-004/file.txt 0:0-0:0 "PREFIX "
 echo "exit code: $?"   # expect 0
 ```
 
-**Verify**:
+**Verify** (the TUI Buffers row flips within ≤500 ms — SC-401 interactive latency budget):
 
-- The TUI's Buffers section flips within ≤500 ms (SC-401 — interactive latency budget):
-  - `version` advances `0 → 1`.
-  - `byte-size` advances `+7` bytes (length of `"PREFIX "`).
-  - `dirty=true` (memory now differs from disk).
+- `[v=0] → [v=1]` — operator-visible version flip (load-bearing SC-401 signal).
+- `[16 bytes] → [23 bytes]` — absolute byte count advances by 7 (the inserted `"PREFIX "` length). Operator computes the delta from the absolute count.
+- `clean → dirty` — memory now differs from disk.
+- The annotation line refreshes: `event EventId(<n>)` carries the BufferEdit event's id; the elapsed-time field resets toward 0.
 - The on-disk file is unchanged: `cat /tmp/weaver-slice-004/file.txt` still prints `initial content`.
 - `weaver inspect --why <entity>:buffer/version --output=json` walks back to the accepted `BufferEdit` event (SC-405). The event's provenance renders `{"source":{"type":"user"},...}`.
 
 **Verify the dirty flip semantics** (FR-009):
 
-```sh
-# Confirm the TUI's "by service weaver-buffers (inst <UUID>)" attribution
-# Confirm the dirty=true badge replaces the previous clean state
-```
+- The TUI annotation shows `by service weaver-buffers (inst <short-uuid>), event EventId(<n>), <t>s ago` — confirming the service authored both the bootstrap state and the post-edit re-emission.
+- The `dirty` badge replaces the previous `clean` state on the same row (no intermediate unobservable badge).
 
 **E2e coverage**: `tests/e2e/buffer_edit_single.rs` (SC-401 + SC-405 in one fixture).
 
@@ -73,8 +78,8 @@ echo "exit code: $?"   # expect 0
 
 **Verify**:
 
-- `version` advances `1 → 2` exactly once. (Subscribers MUST NOT observe an intermediate `version=1` followed by `version=2`; the bump is a single fact-re-emission.)
-- One re-emission burst observable on the subscriber: `byte-size` updated, `version=2` asserted, `dirty=true` re-asserted, all sharing one `causal_parent` (the `BufferEdit` event ID).
+- TUI: `[v=1] → [v=2]` exactly once. The version badge does NOT pass through any intermediate counter (the bump is a single fact-re-emission); `[<n> bytes]` advances absolutely; the annotation line's `event EventId(<n>)` and elapsed-time fields refresh.
+- One re-emission burst observable on a subscriber: `buffer/byte-size` updated, `buffer/version=2` asserted, `buffer/dirty=true` re-asserted, all three sharing one `causal_parent` (the `BufferEdit` event ID).
 
 **Action — three-edit atomic batch (validation-failure path)**:
 
@@ -89,8 +94,7 @@ echo "exit code: $?"   # expect 0 (CLI dispatched successfully; service rejected
 
 **Verify**:
 
-- `version` stays at `2` (no bump despite CLI exit 0).
-- No `buffer/*` fact is re-emitted.
+- TUI: `[v=2]` stays put — no badge flicker. No `buffer/*` fact is re-emitted on the subscriber.
 - The on-disk file is unchanged.
 - The service's stderr (run with `RUST_LOG=weaver_buffers=debug`) shows a `tracing::debug` line with `reason="validation-failure-out-of-bounds"`, `event_id=<X>`, `entity=<E>`, `edit_index=1` (zero-based).
 
