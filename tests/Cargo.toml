@@ -106,3 +106,7 @@ path = "e2e/buffer_edit_emitter_parity.rs"
 [[test]]
 name = "buffer_edit_sequential"
 path = "e2e/buffer_edit_sequential.rs"
+
+[[test]]
+name = "buffer_edit_stale_drop"
+path = "e2e/buffer_edit_stale_drop.rs"
