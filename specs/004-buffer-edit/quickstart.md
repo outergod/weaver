@@ -222,8 +222,9 @@ echo '[{"range":{"start":{"line":0,"character":0},"end":{"line":0,"character":0}
 **Verify**:
 
 - Both invocations exit `0`.
-- Final file in-memory content (rendered by the TUI) is `"P2 P1 data"`.
-- Final `buffer/version=2`, `buffer/dirty=true`.
+- TUI Buffers row: `[v=2] [11 bytes] dirty` (baseline `"data\n"` = 5 bytes; +3 from `"P1 "`; +3 from `"P2 "` = 11 bytes net). The TUI renders metadata badges, not content; expected in-memory content is `"P2 P1 data\n"` but is not directly inspectable from the CLI surface (same constraint as SC2/SC4).
+- Final `weaver inspect <entity>:buffer/version --output=json` reports `value.value=2`; `weaver inspect <entity>:buffer/dirty --output=json` reports `value.value=true`.
+- Byte-identity of the two emitter paths is asserted by the property test (see SC-406 invariant below), not by this interactive walkthrough.
 
 **SC-406 invariant** (asserted by property test, not interactively):
 
