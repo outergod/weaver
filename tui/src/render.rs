@@ -452,13 +452,14 @@ fn draw<W: Write>(w: &mut W, state: &AppState) -> std::io::Result<()> {
     } else {
         for view in &buffer_views {
             let path = view.path.unwrap_or("(path unknown)");
+            let version = format_version(view.version);
             let size = format_byte_size(view.byte_size);
             let dirty_or_obs = format_dirty_or_obs_lost(view.observable, view.dirty);
             let stale_tail = if state.stale { " [stale]" } else { "" };
             emit(
                 w,
                 &mut row,
-                format!("│   {path}  {size} {dirty_or_obs}{stale_tail}"),
+                format!("│   {path}  {version} {size} {dirty_or_obs}{stale_tail}"),
             )?;
             if let Some((fact, asserted_at)) = view.representative {
                 emit(
@@ -699,6 +700,10 @@ fn collect_repo_views(facts: &HashMap<FactKey, FactDisplay>) -> Vec<RepoView<'_>
 struct BufferView<'a> {
     path: Option<&'a str>,
     byte_size: Option<u64>,
+    /// Slice-004 — applied-edit counter; bumped by the buffer service
+    /// on each accepted `EventPayload::BufferEdit`. Operator-visible
+    /// signal that an edit has landed (renders as `[v=N]`).
+    version: Option<u64>,
     dirty: Option<bool>,
     /// `Some(true)` when `buffer/observable` is asserted as `true`;
     /// `Some(false)` when asserted as `false`; `None` if the fact is
@@ -726,6 +731,7 @@ fn collect_buffer_views(facts: &HashMap<FactKey, FactDisplay>) -> Vec<BufferView
         let entry = grouped.entry(fd.fact.key.entity).or_insert(BufferView {
             path: None,
             byte_size: None,
+            version: None,
             dirty: None,
             observable: None,
             representative: None,
@@ -739,6 +745,11 @@ fn collect_buffer_views(facts: &HashMap<FactKey, FactDisplay>) -> Vec<BufferView
             "buffer/byte-size" => {
                 if let FactValue::U64(n) = fd.fact.value {
                     entry.byte_size = Some(n);
+                }
+            }
+            "buffer/version" => {
+                if let FactValue::U64(n) = fd.fact.value {
+                    entry.version = Some(n);
                 }
             }
             "buffer/dirty" => {
@@ -780,6 +791,17 @@ fn format_byte_size(size: Option<u64>) -> String {
     match size {
         Some(n) => format!("[{n} bytes]"),
         None => "[size unknown]".into(),
+    }
+}
+
+/// Render the `[v=<n>]` badge for a buffer row's applied-edit version.
+/// Slice 004 — bumped by `weaver-buffers` on each accepted
+/// `EventPayload::BufferEdit`. Falls back to `[v=?]` only during the
+/// brief partial-bootstrap window before `buffer/version` lands.
+fn format_version(version: Option<u64>) -> String {
+    match version {
+        Some(n) => format!("[v={n}]"),
+        None => "[v=?]".into(),
     }
 }
 
@@ -1023,6 +1045,38 @@ mod tests {
         assert_eq!(views[1].path, Some("/tmp/b"));
         assert_eq!(views[1].observable, Some(false));
         assert_eq!(views[1].dirty, None);
+    }
+
+    #[test]
+    fn collect_buffer_views_picks_up_buffer_version() {
+        // Slice 004 — `buffer/version` lands on the bootstrap set
+        // and bumps on each accepted edit. The TUI must render the
+        // current value as `[v=N]` so operators can verify the flip
+        // visually post-`weaver edit`.
+        let mut facts: HashMap<FactKey, FactDisplay> = HashMap::new();
+        let e = EntityRef::new(7);
+        insert(
+            &mut facts,
+            mk_fact_at(e, "buffer/path", FactValue::String("/tmp/v".into()), 100),
+        );
+        insert(
+            &mut facts,
+            mk_fact_at(e, "buffer/byte-size", FactValue::U64(16), 100),
+        );
+        insert(
+            &mut facts,
+            mk_fact_at(e, "buffer/version", FactValue::U64(3), 200),
+        );
+        let views = collect_buffer_views(&facts);
+        assert_eq!(views.len(), 1);
+        assert_eq!(views[0].version, Some(3));
+    }
+
+    #[test]
+    fn format_version_renders_v_n_or_unknown() {
+        assert_eq!(format_version(Some(0)), "[v=0]");
+        assert_eq!(format_version(Some(42)), "[v=42]");
+        assert_eq!(format_version(None), "[v=?]");
     }
 
     #[test]
