@@ -167,13 +167,16 @@ In a real race window only ONE will land; the other will arrive at the service w
 
 ## Scenario 5 — Buffer not opened (US1 #4)
 
-**Setup**: core running, but NO `weaver-buffers` instance covering the path.
+**Setup**: core running, the target file **exists on disk**, but NO `weaver-buffers` instance has opened it. The on-disk-exists prerequisite isolates the "no authority" condition from the "missing-file" condition (which would fire `WEAVER-101 — cannot canonicalise path` instead of `WEAVER-EDIT-001`).
 
 ```sh
 # Only core is running this scenario
 weaver run &
 CORE=$!
 sleep 0.5
+
+# Create the file on disk but DO NOT run `weaver-buffers` against it
+touch /tmp/weaver-slice-004/never-opened.txt
 ```
 
 **Action**:
