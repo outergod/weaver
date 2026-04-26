@@ -66,20 +66,25 @@ echo "exit code: $?"   # expect 0
 
 **Action — three-edit atomic batch (happy path)**:
 
+After Scenario 1 the buffer holds `"PREFIX initial content\n"` (23 bytes; line 0 length = 22, line_count = 1). Pre-edit byte positions of interest: byte 0 (start of line), byte 7 (start of `"initial"` after `"PREFIX "`), byte 14 (space before `"content"`), byte 22 (end of line 0, just before the `\n`).
+
 ```sh
 weaver edit /tmp/weaver-slice-004/file.txt \
   0:0-0:7 "" \
-  1:0-1:0 "MIDDLE\n" \
-  0:0-0:0 "NEW PREFIX "
+  0:14-0:14 "MIDDLE " \
+  0:22-0:22 "!"
 echo "exit code: $?"   # expect 0
 ```
 
-(The first edit deletes `"PREFIX "` from line 0; the second inserts a new line; the third inserts a new prefix at the very start. Descending-offset application means edits land later-positions-first, so position-shifting from earlier insertions doesn't invalidate later positions.)
+(The first edit deletes `"PREFIX "`; the second inserts `"MIDDLE "` between `"initial"` and `"content"`; the third appends `"!"` at the end of line 0. All three positions reference the **pre-edit** content. Descending-offset application means edits land later-positions-first — `0:22` first, then `0:14`, then `0:0-0:7` — so each later position is unshifted by the earlier ones.)
+
+**Why these specific positions** — the data-model's overlap rule rejects tied-start batches that mix a non-insert with a pure-insert. A more "intuitive" batch like `0:0-0:7 ""` plus `0:0-0:0 "NEW PREFIX "` would tie at `start=0:0` with edit 0 being a non-insert and edit 1 being a pure insert → `IntraBatchOverlap { first_index: 0, second_index: 1 }`. The CLI exits 0 (fire-and-forget) but the publisher silently rejects; `RUST_LOG=weaver_buffers=debug` stderr shows `reason="validation-failure-intra-batch-overlap"`. To compose mixed delete + prefix-insert in one batch, place the insert at the byte boundary AFTER the delete (e.g., `0:7-0:7 "..."`), not at the same start.
 
 **Verify**:
 
-- TUI: `[v=1] → [v=2]` exactly once. The version badge does NOT pass through any intermediate counter (the bump is a single fact-re-emission); `[<n> bytes]` advances absolutely; the annotation line's `event EventId(<n>)` and elapsed-time fields refresh.
-- One re-emission burst observable on a subscriber: `buffer/byte-size` updated, `buffer/version=2` asserted, `buffer/dirty=true` re-asserted, all three sharing one `causal_parent` (the `BufferEdit` event ID).
+- TUI: `[v=1] → [v=2]` exactly once. The version badge does NOT pass through any intermediate counter (the bump is a single fact-re-emission); `[<n> bytes]` advances absolutely (`23 → 24`: −7 from the delete, +7 from `"MIDDLE "`, +1 from `"!"` = net +1); the annotation line's `event EventId(<n>)` and elapsed-time fields refresh.
+- One re-emission burst observable on a subscriber: `buffer/byte-size`, `buffer/version=2`, `buffer/dirty=true` re-asserted, all three sharing one `causal_parent` (the `BufferEdit` event ID).
+- File content in memory: `"initial MIDDLE content!\n"`. Read it back via `weaver inspect` of any `buffer/*` fact's source-event walkback if you want to confirm; the on-disk file is still `"initial content\n"` (FR-013 — slice 005 lands disk save).
 
 **Action — three-edit atomic batch (validation-failure path)**:
 
