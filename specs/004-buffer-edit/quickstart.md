@@ -84,16 +84,13 @@ echo "exit code: $?"   # expect 0
 
 - TUI: `[v=1] → [v=2]` exactly once. The version badge does NOT pass through any intermediate counter (the bump is a single fact-re-emission); `[<n> bytes]` advances absolutely (`23 → 24`: −7 from the delete, +7 from `"MIDDLE "`, +1 from `"!"` = net +1); the annotation line's `event EventId(<n>)` and elapsed-time fields refresh.
 - One re-emission burst observable on a subscriber: `buffer/byte-size`, `buffer/version=2`, `buffer/dirty=true` re-asserted, all three sharing one `causal_parent` (the `BufferEdit` event ID).
-- File content in memory: `"initial MIDDLE content!\n"`. Read it back via `weaver inspect` of any `buffer/*` fact's source-event walkback if you want to confirm; the on-disk file is still `"initial content\n"` (FR-013 — slice 005 lands disk save).
+- Final `weaver inspect <entity>:buffer/byte-size --output=json` reports `value.value=24` (`23 → 24`: net +1 from −7 + 7 + 1). The expected in-memory content is `"initial MIDDLE content!\n"`, but slice 004 exposes no buffer-content fact, so byte-size is the structural witness — not raw content. The on-disk file is still `"initial content\n"` (FR-013 — slice 005 lands disk save).
 
 **Action — three-edit atomic batch (validation-failure path)**:
 
 ```sh
 # Build a batch where the middle edit is out-of-bounds (line 9999 doesn't exist)
-weaver edit /tmp/weaver-slice-004/file.txt \
-  0:0-0:0 "OK1 " \
-  9999:0-9999:0 "OUT-OF-BOUNDS" \
-  0:0-0:0 "OK2 "
+weaver edit /tmp/weaver-slice-004/file.txt 0:0-0:0 "OK1 " 9999:0-9999:0 "OUT-OF-BOUNDS" 0:0-0:0 "OK2 "
 echo "exit code: $?"   # expect 0 (CLI dispatched successfully; service rejected silently)
 ```
 
@@ -158,8 +155,9 @@ In a real race window only ONE will land; the other will arrive at the service w
 **Verify**:
 
 - Both CLI invocations exit `0` (fire-and-forget; CLI cannot detect stale-drop).
-- `version=1` exactly (not `2`) — confirming one-of-two won the race; one was silently dropped.
-- File content reflects only ONE prefix (either `"FAST abc"` or `"SLOW abc"`, depending on which won the race).
+- `weaver inspect <entity>:buffer/version --output=json` reports `value.value=1` exactly (not `2`) — confirming one-of-two won the race; one was silently dropped.
+- `weaver inspect <entity>:buffer/byte-size --output=json` advanced by exactly `5` (one prefix's length — `"FAST "` and `"SLOW "` are both 5 bytes), not `10`. A `+10` delta would mean both prefixes landed (no race) and falsifies the scenario.
+- Slice 004 does NOT write to disk and exposes no buffer-content fact, so post-race in-memory content is not directly inspectable — the version + byte-size pair is the structural witness.
 - Service stderr (`RUST_LOG=weaver_buffers=debug`) shows one `tracing::debug` line with `reason="stale-version"`, `emitted_version=0`, `current_version=1`.
 - **Cleanup**: `kill $WB`.
 
