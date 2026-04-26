@@ -16,7 +16,7 @@ use crate::cli::args::OutputFormat;
 use crate::cli::config::Config;
 use crate::types::entity_ref::EntityRef;
 use crate::types::event::Event;
-use crate::types::fact::FactKey;
+use crate::types::fact::{FactKey, FactValue};
 use crate::types::message::{BusMessage, EventInspectionError, InspectionDetail, InspectionError};
 
 /// Exit code for `weaver inspect` when the core is unreachable.
@@ -64,6 +64,11 @@ struct FoundJson {
     asserting_instance: Option<String>,
     asserted_at_ns: u64,
     trace_sequence: u64,
+    /// Slice-004 mid-flight extension: `InspectionDetail` carries the
+    /// fact value (required on the wire per bus protocol 0x04), so the
+    /// CLI surface renders it. Adjacent-tagged form, e.g.
+    /// `{"type":"u64","value":1}`.
+    value: FactValue,
 }
 
 #[derive(Debug, Serialize)]
@@ -336,6 +341,7 @@ fn print_walkback_json(
         asserting_instance: detail.asserting_instance.map(|u| u.to_string()),
         asserted_at_ns: detail.asserted_at_ns,
         trace_sequence: detail.trace_sequence,
+        value: detail.value.clone(),
     };
     let event_value = match event_resp {
         Ok(event) => {
@@ -388,6 +394,7 @@ fn print_found_human(key: &FactKey, d: &InspectionDetail) {
     }
     println!("  asserted_at_ns:     {}", d.asserted_at_ns);
     println!("  trace_sequence:     {}", d.trace_sequence);
+    println!("  value:              {:?}", d.value);
 }
 
 fn print_found_json(key: &FactKey, d: &InspectionDetail) -> miette::Result<()> {
@@ -403,6 +410,7 @@ fn print_found_json(key: &FactKey, d: &InspectionDetail) -> miette::Result<()> {
         asserting_instance: d.asserting_instance.map(|u| u.to_string()),
         asserted_at_ns: d.asserted_at_ns,
         trace_sequence: d.trace_sequence,
+        value: d.value.clone(),
     };
     let s = serde_json::to_string_pretty(&payload).into_diagnostic()?;
     println!("{s}");
