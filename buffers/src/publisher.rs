@@ -704,14 +704,41 @@ async fn handle_event(
                     );
                 }
                 BufferEditOutcome::ValidationFailure(err) => {
-                    debug!(
-                        entity = entity.as_u64(),
-                        event_id = event_id.as_u64(),
-                        reason = err.reason(),
-                        edit_index = ?err.edit_index(),
-                        error = %err,
-                        "buffer edit dropped",
-                    );
+                    // Per-variant index shape: single-edit variants
+                    // emit `edit_index=<i>`; the pair-shaped
+                    // `IntraBatchOverlap` emits both indices instead.
+                    // Avoids leaking `Some(<i>)` Debug wrapping into
+                    // operator-facing logs (per data-model.md
+                    // §State-transition mapping FR-018 contract).
+                    match err {
+                        ApplyError::IntraBatchOverlap {
+                            first_index,
+                            second_index,
+                        } => {
+                            debug!(
+                                entity = entity.as_u64(),
+                                event_id = event_id.as_u64(),
+                                reason = err.reason(),
+                                first_index,
+                                second_index,
+                                error = %err,
+                                "buffer edit dropped",
+                            );
+                        }
+                        _ => {
+                            let edit_index = err.edit_index().expect(
+                                "non-IntraBatchOverlap ApplyError variants always carry edit_index",
+                            );
+                            debug!(
+                                entity = entity.as_u64(),
+                                event_id = event_id.as_u64(),
+                                reason = err.reason(),
+                                edit_index,
+                                error = %err,
+                                "buffer edit dropped",
+                            );
+                        }
+                    }
                 }
             }
         }
