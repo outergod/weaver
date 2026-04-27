@@ -40,15 +40,15 @@ pub enum InspectCliError {
     },
 }
 
-/// JSON shape of a successful `weaver inspect` response. Fields mirror
-/// `specs/002-git-watcher-actor/contracts/cli-surfaces.md`:
-/// `asserting_behavior` for behavior-authored facts (slice 001);
-/// `asserting_service` + `asserting_instance` for service-authored
-/// facts (slice 002). At most one of those field groups is populated
-/// per response.
+/// Provenance + value fields for a fact inspection. Shared between the
+/// no-`--why` `FoundJson` shape (where they're flattened alongside a
+/// top-level `fact` key) and the `--why` walkback `fact_inspection`
+/// block (where the top-level `fact` already lives outside this block,
+/// so embedding it here would emit `fact_inspection.fact` spuriously).
+/// Keeps the inner field set in lockstep across both shapes per the
+/// original `print_walkback_json` design intent.
 #[derive(Debug, Serialize)]
-struct FoundJson {
-    fact: FactKeyJson,
+struct FactInspectionJson {
     source_event: u64,
     /// Wire-level discriminator — one of `"behavior" | "service" |
     /// "core" | "tui" | "user" | "host" | "agent"`. Always present
@@ -69,6 +69,19 @@ struct FoundJson {
     /// CLI surface renders it. Adjacent-tagged form, e.g.
     /// `{"type":"u64","value":1}`.
     value: FactValue,
+}
+
+/// JSON shape of a successful `weaver inspect` response. Fields mirror
+/// `specs/002-git-watcher-actor/contracts/cli-surfaces.md`:
+/// `asserting_behavior` for behavior-authored facts (slice 001);
+/// `asserting_service` + `asserting_instance` for service-authored
+/// facts (slice 002). At most one of those field groups is populated
+/// per response.
+#[derive(Debug, Serialize)]
+struct FoundJson {
+    fact: FactKeyJson,
+    #[serde(flatten)]
+    inner: FactInspectionJson,
 }
 
 #[derive(Debug, Serialize)]
@@ -325,15 +338,12 @@ fn print_walkback_json(
     detail: &InspectionDetail,
     event_resp: &Result<Event, EventInspectionError>,
 ) -> miette::Result<()> {
-    // Build the fact_inspection block by serialising the existing
-    // FoundJson shape, so the inner field set stays in lockstep with
-    // the no-`--why` rendering. A custom WalkbackJson with all field
-    // names duplicated would silently drift over time.
-    let fact_inspection = FoundJson {
-        fact: FactKeyJson {
-            entity: key.entity.as_u64(),
-            attribute: key.attribute.clone(),
-        },
+    // Build the fact_inspection block from `FactInspectionJson` (the
+    // shared provenance/value shape). The top-level `fact` key already
+    // lives outside this block, so embedding `FoundJson` directly would
+    // emit `fact_inspection.fact` spuriously and drift from the
+    // documented walkback shape in cli-surfaces.md.
+    let fact_inspection = FactInspectionJson {
         source_event: detail.source_event.as_u64(),
         asserting_kind: detail.asserting_kind.clone(),
         asserting_behavior: detail.asserting_behavior.as_ref().map(|b| b.to_string()),
@@ -364,7 +374,10 @@ fn print_walkback_json(
         }),
     };
     let payload = serde_json::json!({
-        "fact": serde_json::to_value(&fact_inspection.fact).into_diagnostic()?,
+        "fact": FactKeyJson {
+            entity: key.entity.as_u64(),
+            attribute: key.attribute.clone(),
+        },
         "fact_inspection": serde_json::to_value(&fact_inspection).into_diagnostic()?,
         "event": event_value,
     });
@@ -403,14 +416,16 @@ fn print_found_json(key: &FactKey, d: &InspectionDetail) -> miette::Result<()> {
             entity: key.entity.as_u64(),
             attribute: key.attribute.clone(),
         },
-        source_event: d.source_event.as_u64(),
-        asserting_kind: d.asserting_kind.clone(),
-        asserting_behavior: d.asserting_behavior.as_ref().map(|b| b.to_string()),
-        asserting_service: d.asserting_service.clone(),
-        asserting_instance: d.asserting_instance.map(|u| u.to_string()),
-        asserted_at_ns: d.asserted_at_ns,
-        trace_sequence: d.trace_sequence,
-        value: d.value.clone(),
+        inner: FactInspectionJson {
+            source_event: d.source_event.as_u64(),
+            asserting_kind: d.asserting_kind.clone(),
+            asserting_behavior: d.asserting_behavior.as_ref().map(|b| b.to_string()),
+            asserting_service: d.asserting_service.clone(),
+            asserting_instance: d.asserting_instance.map(|u| u.to_string()),
+            asserted_at_ns: d.asserted_at_ns,
+            trace_sequence: d.trace_sequence,
+            value: d.value.clone(),
+        },
     };
     let s = serde_json::to_string_pretty(&payload).into_diagnostic()?;
     println!("{s}");
