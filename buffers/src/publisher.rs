@@ -1010,8 +1010,10 @@ async fn reader_loop(
                 // can't keep up, the producer (weaver edit) sees
                 // fire-and-forget exit 0 and the dropped edit is
                 // indistinguishable from a stale-version drop at the
-                // service. Future bounded-with-drop-oldest semantics
-                // land alongside the fact-store bounding work.
+                // service. Drop-oldest semantics + a class-wide bound
+                // policy are tracked at `docs/07-open-questions.md §27`
+                // alongside the symmetric fact-store + event-subs
+                // registry deferrals.
                 if event_tx.try_send(event).is_err() {
                     debug!("event channel full or closed; dropping event");
                 }

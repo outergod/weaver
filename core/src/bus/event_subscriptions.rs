@@ -87,6 +87,11 @@ impl EventSubscriptions {
     /// detected via send-failure and removed in the same pass —
     /// mirrors [`crate::fact_space::InMemoryFactStore`]'s broadcast
     /// pattern.
+    ///
+    /// Subscribers whose pattern does NOT match retain their entry
+    /// regardless of channel state — closed-but-non-matching senders
+    /// leak until something matches. Bounded-channel + active-pruning
+    /// design tracked at `docs/07-open-questions.md §27`.
     pub fn broadcast(&self, event: &Event) {
         let mut subs = self.subscribers.lock().expect("event-sub lock poisoned");
         subs.retain(|sub| {

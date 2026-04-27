@@ -45,7 +45,11 @@ impl InMemoryFactStore {
             FactEvent::Asserted(fact) => &fact.key,
             FactEvent::Retracted { key, .. } => key,
         };
-        // Prune subscribers whose channels have been dropped (receiver gone).
+        // Prune subscribers whose channels have been dropped (receiver
+        // gone) — but only on a *matching* event. Closed subscribers
+        // whose pattern never matches again leak until something does;
+        // bounded-channel + active-pruning design tracked at
+        // `docs/07-open-questions.md §27`.
         self.subscribers.retain(|sub| {
             if sub.pattern.matches(key) {
                 sub.tx.send(event.clone()).is_ok()

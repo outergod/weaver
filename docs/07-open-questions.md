@@ -342,6 +342,7 @@ First concrete instance: `specs/002-git-watcher-actor/` Clarification Q4 (`repo/
 
 - `core/src/fact_space/in_memory.rs::InMemoryFactStore` — authoritative class, uses `tokio::sync::mpsc::unbounded_channel` per subscriber (since slice 001).
 - `core/src/bus/event_subscriptions.rs::EventSubscriptions` — lossy class, mirrors the same pattern (since slice 004; module doc explicitly deferred).
+- `buffers/src/publisher.rs::reader_loop` — 32-slot bounded reader→main bridge for `BusMessage::Event` frames, drains via `try_send` (silent drop on full). Different shape from the registry-style subscribers above (no pattern, single consumer), but same deferral category: bounded-with-drop-oldest semantics not yet implemented; current channel-full drop is indistinguishable from a service-level stale-version drop at the producer's `weaver edit` exit-code surface.
 
 A second implementation gap rides along: both registries prune closed channels lazily — only when a *matching* event fires does `retain` notice a dropped receiver. A subscriber whose pattern never matches again (replaced by a `last-wins` re-subscribe, or a connection that disconnected) leaks until its channel is sent to. The leak is bounded by subscribe/disconnect *rate*, not by event volume — practically far from OOM-class even under churn — but it violates the documented lifecycle: "drop the handle ⇒ next broadcast prunes it" assumes any broadcast prunes every closed subscriber.
 
@@ -365,4 +366,4 @@ A second implementation gap rides along: both registries prune closed channels l
 
 **Current lean**: open a dedicated infrastructure slice when any trigger fires. Until then, both paths share the deferral note via this section reference (`event_subscriptions.rs` module doc + `in_memory.rs::broadcast` pointer).
 
-First concrete pointers: `core/src/bus/event_subscriptions.rs:22` (module doc), `core/src/fact_space/in_memory.rs::InMemoryFactStore::broadcast`. Originally surfaced by Codex review on PR #11 (slice 004).
+First concrete pointers: `core/src/bus/event_subscriptions.rs:22` (module doc + `broadcast` fn), `core/src/fact_space/in_memory.rs::InMemoryFactStore::broadcast`, `buffers/src/publisher.rs::reader_loop` (BufferEdit `try_send` block). Originally surfaced by Codex review on PR #11 (slice 004).
