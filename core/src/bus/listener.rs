@@ -351,6 +351,12 @@ async fn handle_client_message(
             // Look up the event by id and return the full Event
             // envelope (cheaper than designing a sub-shape; the trace
             // already holds it).
+            //
+            // EventId is unique per producer, not globally — concurrent
+            // producers minting the same id leave only the latest event
+            // in the trace's by_event index, so this walkback may
+            // attribute a fact to the wrong emitter on collision. Class-
+            // wide fix tracked at `docs/07-open-questions.md §28`.
             let result = {
                 let trace = dispatcher.trace();
                 let trace = trace.lock().await;

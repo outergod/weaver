@@ -95,6 +95,15 @@ impl TraceStore {
         self.entries.get(seq.as_u64() as usize)
     }
 
+    /// Returns the trace sequence of the event with the given `EventId`,
+    /// or `None` if no such event has been recorded.
+    ///
+    /// **Caveat**: `EventId` is unique per producer, not globally
+    /// (`core/src/types/ids.rs`). The `by_event` index is last-writer-
+    /// wins on collision, so this lookup may return a different
+    /// producer's later event when IDs collide. `weaver inspect --why`
+    /// is the user-visible consumer; mitigation tracked at
+    /// `docs/07-open-questions.md §28`.
     pub fn find_event(&self, id: EventId) -> Option<TraceSequence> {
         self.by_event.get(&id).copied()
     }

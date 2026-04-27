@@ -367,3 +367,44 @@ A second implementation gap rides along: both registries prune closed channels l
 **Current lean**: open a dedicated infrastructure slice when any trigger fires. Until then, both paths share the deferral note via this section reference (`event_subscriptions.rs` module doc + `in_memory.rs::broadcast` pointer).
 
 First concrete pointers: `core/src/bus/event_subscriptions.rs:22` (module doc + `broadcast` fn), `core/src/fact_space/in_memory.rs::InMemoryFactStore::broadcast`, `buffers/src/publisher.rs::reader_loop` (BufferEdit `try_send` block). Originally surfaced by Codex review on PR #11 (slice 004).
+
+---
+
+## 28. EventId Allocation + Trace Indexing Semantics — LATENT CORRECTNESS GAP
+
+`EventId` (`core/src/types/ids.rs:6-14`) is a `u64` documented as "Monotonic per producer; unique for the lifetime of a bus connection" — explicitly NOT globally unique. Production minting in slices 001–004 is from wall-clock nanoseconds at multiple independent producers:
+
+- `core/src/cli/edit.rs:380` (`weaver edit`): `EventId::new(now_ns())`
+- `buffers/src/publisher.rs:504,898` (`weaver-buffers` poll ticks + bootstrap): `EventId::new(now_ns())`, `EventId::new(idx)`
+- `git-watcher/src/publisher.rs:322` (`weaver-git-watcher` poll ticks): `EventId::new(now_ns())`
+
+`TraceStore::by_event` (`core/src/trace/store.rs:21,63`) is a single `HashMap<EventId, TraceSequence>` with `insert` overwriting on collision. `find_event` returns the last sequence inserted at that ID. The dispatcher (`process_event` at `core/src/behavior/dispatcher.rs:227`) does NOT re-stamp the EventId — the producer-supplied ID is what gets indexed.
+
+**Concern** (newly user-visible in slice 004 via `weaver inspect --why`):
+
+If two producers mint the same `EventId(N)` (sub-nanosecond clock collision; tickless kernel; VM clock skew), the trace's by-event index points only at the *latest* event. A fact whose `source_event = EventId(N)` walks back via `weaver inspect --why` to the WRONG event — wrong producer, wrong provenance, wrong attribution. The walkback succeeds with bogus data rather than failing visibly.
+
+The defect is latent since slice 001 (the index has been last-writer-wins from the start) but slice 004's `weaver inspect --why` is the first wire-level consumer of `find_event` from the bus surface — collision is now operator-observable instead of a code-internal concern.
+
+**Why no slim fix in slice 004**:
+
+- Changing `source_event: EventId` to `TraceSequence` (which IS globally unique) is a wire-format change to `InspectionDetail` — bus protocol bump.
+- Changing producers to use a per-process atomic counter still leaves cross-process collision (the bus protocol allows any producer to mint any `EventId`).
+- Core-side re-stamping breaks `causal_parent` linkage if any caller already references the producer's `EventId` (e.g., `weaver-buffers` re-emission triple shares the BufferEdit's EventId as `causal_parent`).
+- A `MultiMap<EventId, TraceSequence>` doesn't help: the call site has no extra discriminator to disambiguate.
+
+**Candidate resolutions** (one slice, not piecemeal):
+
+- (a) **Core-assigned globally unique EventIds.** Producers send events with a placeholder ID; core stamps a monotonic per-trace EventId on `process_event`. Wire-incompatible — all producers must adopt the placeholder convention. `causal_parent` chains rely on the core-assigned ID being available on the response side (or via subscribe-events fan-out).
+- (b) **`source_event` carries `TraceSequence` instead of `EventId` on the wire.** Wire-incompat for `InspectionDetail`; `find_event(seq)` becomes a direct array lookup, no index needed. Cleanest semantically.
+- (c) **Composite ID (`producer_instance, EventId`).** Producers stamp their `(ActorIdentity, EventId)` tuple as the trace key. Wire-incompat; relies on `ActorIdentity::Service` carrying instance UUID, but `ActorIdentity::User` is a unit variant in slice 004 — would need expansion. Adds one CBOR field per index entry.
+
+**Revisit triggers**:
+
+1. An operator reports a confused `weaver inspect --why` walkback (a fact's source-event resolves to a different producer's event in the field).
+2. A future slice exercises `causal_parent` chaining across more than one producer simultaneously (e.g., agent + user concurrent edits) — the collision rate scales with concurrent producer count.
+3. The bus protocol bumps for any other reason (slice 005 disk-save? slice 006 agent?) — fold the EventId/TraceSequence change in to amortise the wire-impact cost.
+
+**Current lean**: defer to a dedicated soundness slice that fixes EventId allocation + trace indexing in one wire bump. Until then, the call sites carry a pointer here so reviewers landing at the lookup code can skip over the finding.
+
+First concrete pointers: `core/src/types/ids.rs::EventId` (type-level docstring), `core/src/trace/store.rs::TraceStore::find_event` + `update_indexes` (insert site), `core/src/bus/listener.rs::handle_message` `EventInspectRequest` arm. Originally surfaced by Codex review on PR #11 (slice 004).
