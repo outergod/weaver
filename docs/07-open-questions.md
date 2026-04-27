@@ -389,7 +389,10 @@ The defect is latent since slice 001 (the index has been last-writer-wins from t
 **Closed in slice 004 (deterministic-collision instances)**:
 
 - *Bootstrap-index reuse*: `weaver-buffers` formerly minted `bootstrap_tick = EventId::new(idx as u64)` for each opened path, so every instance reused 0, 1, 2, … and later instances overwrote earlier mappings in `by_event`. Fixed: `EventId::new(now_ns().wrapping_add(idx as u64))` — wall-clock base + per-iteration offset for within-loop uniqueness.
-- *`EventId::ZERO`-sentinel collision*: the inspect-handler uses `EventId::ZERO` as a sentinel for "fact has no causal_parent" (`core/src/inspect/handler.rs:140`). When a real event was minted at id 0 (bootstrap-index 0 hit this), `weaver inspect --why` for a fact with no source event walked back to that real event instead of producing a clean miss. Fixed: `core/src/bus/listener.rs::lookup_event_for_inspect` short-circuits ZERO to `EventNotFound` regardless of trace contents (regression test in `event_inspect_lookup_tests`).
+- *`EventId::ZERO`-sentinel collision*: the inspect-handler uses `EventId::ZERO` as a sentinel for "fact has no causal_parent" (`core/src/inspect/handler.rs:140`). When a real event was minted at id 0 (bootstrap-index 0 hit this), `weaver inspect --why` for a fact with no source event walked back to that real event instead of producing a clean miss. Fixed at two layers (defence-in-depth):
+  - **Producer-side ingest rejection**: `core/src/bus/listener.rs::validate_event_envelope` rejects any incoming `BusMessage::Event` carrying `EventId::ZERO` with an `invalid-event-envelope` error frame. Closes the producer side — non-CLI clients can't silently lose provenance.
+  - **Consumer-side lookup short-circuit**: `core/src/bus/listener.rs::lookup_event_for_inspect` short-circuits ZERO walkback requests to `EventNotFound` regardless of trace contents. Belt-and-braces — covers any pre-fix events that may already sit at id 0 in a long-running deployment's trace.
+  Regression tests in `event_inspect_lookup_tests` and `event_envelope_validation_tests`.
 
 **Why no slim fix in slice 004 for the cross-producer wall-clock-ns case**:
 
