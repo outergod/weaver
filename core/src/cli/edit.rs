@@ -115,7 +115,9 @@ pub fn parse_pairs(pairs: &[String]) -> Result<Vec<TextEdit>, WeaverCliError> {
 ///    - Other shapes → exit 10 (constitutional violation).
 /// 7. Construct `Event { payload: BufferEdit { entity, version, edits } }`
 ///    with `Provenance { source: ActorIdentity::User, .. }`.
-/// 8. Dispatch via `BusMessage::Event`; close + exit 0
+/// 8. Pre-serialise envelope with `ciborium::into_writer`; on
+///    `len > MAX_EVENT_INGEST_FRAME` render WEAVER-EDIT-004 (exit 1).
+/// 9. Dispatch via `BusMessage::Event`; close + exit 0
 ///    (fire-and-forget per FR-012).
 pub fn handle_edit(
     path: PathBuf,
@@ -156,9 +158,11 @@ pub fn handle_edit(
     let entity = buffer_entity_ref(&canonical);
 
     // Steps 5-8: bus interaction. Connect + inspect-lookup +
-    // envelope construction live in `prepare_dispatch` so
-    // `handle_edit_json` shares the same path. Final `BusMessage::Event`
-    // send is the caller's responsibility (edit-json size-checks first).
+    // envelope construction live in `prepare_dispatch`; size-check +
+    // dispatch live in `send_event_with_ingest_check`. Both paths
+    // (positional + JSON) share identical pre-dispatch enforcement of
+    // `MAX_EVENT_INGEST_FRAME` so an `Event` accepted at ingest will
+    // round-trip cleanly through `weaver inspect --why`.
     let cfg = Config::from_cli(socket_override);
     let runtime = Builder::new_current_thread()
         .enable_all()
@@ -167,11 +171,7 @@ pub fn handle_edit(
     runtime.block_on(async move {
         let (mut client, event) =
             prepare_dispatch(&canonical, entity, edits, "weaver edit", output, &cfg).await?;
-        client
-            .send(&BusMessage::Event(event))
-            .await
-            .map_err(|e| miette!("{e}"))?;
-        Ok(())
+        send_event_with_ingest_check(&mut client, event, "weaver edit", output).await
     })
 }
 
@@ -251,34 +251,42 @@ pub fn handle_edit_json(
     runtime.block_on(async move {
         let (mut client, event) =
             prepare_dispatch(&canonical, entity, edits, "weaver edit-json", output, &cfg).await?;
-
-        // Step 6: pre-serialise + size-check. Catches oversized batches
-        // before the codec rejects them at the framing layer (where the
-        // operator would see a generic codec error post-dispatch
-        // instead of a precise WEAVER-EDIT-004). The limit is
-        // `MAX_EVENT_INGEST_FRAME` (smaller than the wire `MAX_FRAME_SIZE`
-        // by `RESPONSE_WRAPPER_HEADROOM`) so the same `Event`, when
-        // wrapped as `BusMessage::EventInspectResponse` during a
-        // `weaver inspect --why` walkback, still fits within the codec's
-        // frame limit. See `bus/codec.rs` for the headroom rationale.
-        let envelope = BusMessage::Event(event);
-        let mut buf = Vec::new();
-        ciborium::into_writer(&envelope, &mut buf)
-            .map_err(|e| miette!("ciborium serialisation failed: {e}"))?;
-        if buf.len() > MAX_EVENT_INGEST_FRAME {
-            let err = WeaverCliError::EditWireFrameTooLarge {
-                actual_bytes: buf.len(),
-                max_bytes: MAX_EVENT_INGEST_FRAME,
-                context: Some("weaver edit-json".into()),
-            };
-            render_error(&err, output)?;
-            std::process::exit(err.exit_code());
-        }
-
-        // Step 7: dispatch + exit 0.
-        client.send(&envelope).await.map_err(|e| miette!("{e}"))?;
-        Ok(())
+        send_event_with_ingest_check(&mut client, event, "weaver edit-json", output).await
     })
+}
+
+/// Pre-serialise + size-check + dispatch a `BusMessage::Event` envelope.
+/// Shared between `handle_edit` (positional) and `handle_edit_json`
+/// (JSON) so both paths enforce the same `MAX_EVENT_INGEST_FRAME`
+/// guarantee — an `Event` that ingests cleanly will also fit within
+/// `MAX_FRAME_SIZE` once wrapped as `BusMessage::EventInspectResponse`
+/// during a `weaver inspect --why` walkback. See `bus/codec.rs` for
+/// the headroom rationale.
+///
+/// On overflow, renders WEAVER-EDIT-004 (precise pre-dispatch
+/// diagnostic) and `process::exit`s with the error's exit code rather
+/// than letting the codec produce a generic post-dispatch frame error.
+async fn send_event_with_ingest_check(
+    client: &mut Client,
+    event: Event,
+    context: &str,
+    output: OutputFormat,
+) -> miette::Result<()> {
+    let envelope = BusMessage::Event(event);
+    let mut buf = Vec::new();
+    ciborium::into_writer(&envelope, &mut buf)
+        .map_err(|e| miette!("ciborium serialisation failed: {e}"))?;
+    if buf.len() > MAX_EVENT_INGEST_FRAME {
+        let err = WeaverCliError::EditWireFrameTooLarge {
+            actual_bytes: buf.len(),
+            max_bytes: MAX_EVENT_INGEST_FRAME,
+            context: Some(context.to_string()),
+        };
+        render_error(&err, output)?;
+        std::process::exit(err.exit_code());
+    }
+    client.send(&envelope).await.map_err(|e| miette!("{e}"))?;
+    Ok(())
 }
 
 /// Connect to the bus, run a `buffer/version` inspect-lookup, and
@@ -681,5 +689,63 @@ mod tests {
             }
             other => panic!("expected InvalidRange, got {other:?}"),
         }
+    }
+
+    /// Regression for the `weaver edit` (positional) ingest-frame
+    /// asymmetry surfaced by Codex on PR #11: pre-fix, only
+    /// `handle_edit_json` size-checked; `handle_edit` could accept a
+    /// large positional `<TEXT>` whose `BusMessage::Event` envelope sat
+    /// in `(MAX_EVENT_INGEST_FRAME, MAX_FRAME_SIZE]` and broke later
+    /// `weaver inspect --why` walkbacks. Both handlers now share
+    /// `send_event_with_ingest_check`; this test verifies the predicate
+    /// the helper applies — an event with an oversized `<TEXT>` argument
+    /// serialises past the ingest limit, so the helper's `>
+    /// MAX_EVENT_INGEST_FRAME` branch fires and produces WEAVER-EDIT-004.
+    #[test]
+    fn oversized_positional_text_trips_ingest_frame_check() {
+        use crate::provenance::{ActorIdentity, Provenance};
+        use crate::types::entity_ref::EntityRef;
+        use crate::types::event::{Event, EventPayload};
+        use crate::types::ids::EventId;
+
+        // Build a single-edit batch whose `new_text` is large enough to
+        // exceed MAX_EVENT_INGEST_FRAME. The CBOR encoding of a String is
+        // a small header + the bytes themselves, so a `new_text` of
+        // (MAX_EVENT_INGEST_FRAME + 1024) bytes will reliably overshoot
+        // even after subtracting wrapper overhead.
+        let new_text = "x".repeat(MAX_EVENT_INGEST_FRAME + 1024);
+        let event = Event {
+            id: EventId::new(0),
+            name: "buffer/edit".into(),
+            target: Some(EntityRef::new(1)),
+            payload: EventPayload::BufferEdit {
+                entity: EntityRef::new(1),
+                version: 0,
+                edits: vec![TextEdit {
+                    range: Range {
+                        start: Position {
+                            line: 0,
+                            character: 0,
+                        },
+                        end: Position {
+                            line: 0,
+                            character: 0,
+                        },
+                    },
+                    new_text,
+                }],
+            },
+            provenance: Provenance::new(ActorIdentity::User, 0, None).unwrap(),
+        };
+
+        let envelope = BusMessage::Event(event);
+        let mut buf = Vec::new();
+        ciborium::into_writer(&envelope, &mut buf).expect("ciborium serialises");
+        assert!(
+            buf.len() > MAX_EVENT_INGEST_FRAME,
+            "fixture must overshoot the ingest limit: {} <= {}",
+            buf.len(),
+            MAX_EVENT_INGEST_FRAME,
+        );
     }
 }

@@ -54,8 +54,9 @@ The replacement text. Standard shell-quoted UTF-8 string. Empty string (`""`) me
    - **`Found(InspectionDetail { value: FactValue::U64(version), .. })`** → use `version` as the dispatch value. (Slice-004 mid-flight wire extension: `InspectionDetail` carries the fact value alongside its provenance fields — see `research.md §2`.)
    - **`Found(other-shape)`** → exit `10` with internal-error diagnostic (constitutional invariant violation — `buffer/version` MUST be `FactValue::U64` per slice-003).
 4. Construct `EventPayload::BufferEdit { entity, version, edits: <parsed> }`. Construct envelope `Event { id: <fresh EventId>, name: "buffer/edit", target: Some(entity), payload, provenance: Provenance { source: ActorIdentity::User, timestamp_ns: now_ns(), causal_parent: None } }`.
-5. Dispatch via `BusMessage::Event(envelope)`. Connection close on send error.
-6. Exit `0`.
+5. **Pre-check serialised wire size** (same as `weaver edit-json`): `ciborium::into_writer(&envelope, &mut buf)`; if `buf.len() > MAX_EVENT_INGEST_FRAME` → exit `1` with `WEAVER-EDIT-004`. The same enforcement applies to both subcommands so a large positional `<TEXT>` that would otherwise fit at the wire-frame layer but break a later `weaver inspect --why` walkback is rejected at dispatch.
+6. Dispatch via `BusMessage::Event(envelope)`. Connection close on send error.
+7. Exit `0`.
 
 **Operator-facing exit codes**:
 
@@ -207,7 +208,7 @@ Per L2 P6 (Humane shell), errors reference fact-space state. The `WEAVER-EDIT-NN
 - **`WEAVER-EDIT-001`** — buffer not opened. Triggered when pre-dispatch inspect-lookup returns `FactNotFound`. Diagnostic body: `"buffer not opened: <path> — no fact (entity:<u64-derived>, attribute:buffer/version) is asserted by any authority. Run \`weaver-buffers <path>\` to open the buffer."`
 - **`WEAVER-EDIT-002`** — invalid `<RANGE>` grammar. Triggered by `weaver edit` range-string parser. Body: `"invalid range \"<arg>\": expected <start-line>:<start-char>-<end-line>:<end-char> with decimal u32 components."`
 - **`WEAVER-EDIT-003`** — malformed JSON input. Triggered by `weaver edit-json` JSON parser. Body: serde-json error chain rendered through miette's source-span machinery.
-- **`WEAVER-EDIT-004`** — ingest-frame too large. Triggered by `weaver edit-json` pre-dispatch size check. Body: `"serialised BufferEdit (<actual-bytes> bytes) exceeds ingest-frame limit (65 280 bytes). Reduce the batch size or shorten new-text fields."` The 65 280 byte limit is `MAX_FRAME_SIZE` (65 536) − `RESPONSE_WRAPPER_HEADROOM` (256), reserving headroom for the `BusMessage::EventInspectResponse` wrapper used by `weaver inspect --why`.
+- **`WEAVER-EDIT-004`** — ingest-frame too large. Triggered by both `weaver edit` and `weaver edit-json` pre-dispatch size checks (shared `send_event_with_ingest_check` helper in `core/src/cli/edit.rs`). Body: `"serialised BufferEdit (<actual-bytes> bytes) exceeds ingest-frame limit (65 280 bytes). Reduce the batch size or shorten new-text fields."` The 65 280 byte limit is `MAX_FRAME_SIZE` (65 536) − `RESPONSE_WRAPPER_HEADROOM` (256), reserving headroom for the `BusMessage::EventInspectResponse` wrapper used by `weaver inspect --why`.
 
 ## `weaver-buffers` — `--version` constant bump only
 
