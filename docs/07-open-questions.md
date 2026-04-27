@@ -375,7 +375,7 @@ First concrete pointers: `core/src/bus/event_subscriptions.rs:22` (module doc + 
 `EventId` (`core/src/types/ids.rs:6-14`) is a `u64` documented as "Monotonic per producer; unique for the lifetime of a bus connection" — explicitly NOT globally unique. Production minting in slices 001–004 is from wall-clock nanoseconds at multiple independent producers:
 
 - `core/src/cli/edit.rs:380` (`weaver edit`): `EventId::new(now_ns())`
-- `buffers/src/publisher.rs:504,898` (`weaver-buffers` poll ticks + bootstrap): `EventId::new(now_ns())`, `EventId::new(idx)`
+- `buffers/src/publisher.rs:504,898` (`weaver-buffers` poll ticks + bootstrap): `EventId::new(now_ns())`, `EventId::new(now_ns().wrapping_add(idx))`
 - `git-watcher/src/publisher.rs:322` (`weaver-git-watcher` poll ticks): `EventId::new(now_ns())`
 
 `TraceStore::by_event` (`core/src/trace/store.rs:21,63`) is a single `HashMap<EventId, TraceSequence>` with `insert` overwriting on collision. `find_event` returns the last sequence inserted at that ID. The dispatcher (`process_event` at `core/src/behavior/dispatcher.rs:227`) does NOT re-stamp the EventId — the producer-supplied ID is what gets indexed.
@@ -386,7 +386,12 @@ If two producers mint the same `EventId(N)` (sub-nanosecond clock collision; tic
 
 The defect is latent since slice 001 (the index has been last-writer-wins from the start) but slice 004's `weaver inspect --why` is the first wire-level consumer of `find_event` from the bus surface — collision is now operator-observable instead of a code-internal concern.
 
-**Why no slim fix in slice 004**:
+**Closed in slice 004 (deterministic-collision instances)**:
+
+- *Bootstrap-index reuse*: `weaver-buffers` formerly minted `bootstrap_tick = EventId::new(idx as u64)` for each opened path, so every instance reused 0, 1, 2, … and later instances overwrote earlier mappings in `by_event`. Fixed: `EventId::new(now_ns().wrapping_add(idx as u64))` — wall-clock base + per-iteration offset for within-loop uniqueness.
+- *`EventId::ZERO`-sentinel collision*: the inspect-handler uses `EventId::ZERO` as a sentinel for "fact has no causal_parent" (`core/src/inspect/handler.rs:140`). When a real event was minted at id 0 (bootstrap-index 0 hit this), `weaver inspect --why` for a fact with no source event walked back to that real event instead of producing a clean miss. Fixed: `core/src/bus/listener.rs::lookup_event_for_inspect` short-circuits ZERO to `EventNotFound` regardless of trace contents (regression test in `event_inspect_lookup_tests`).
+
+**Why no slim fix in slice 004 for the cross-producer wall-clock-ns case**:
 
 - Changing `source_event: EventId` to `TraceSequence` (which IS globally unique) is a wire-format change to `InspectionDetail` — bus protocol bump.
 - Changing producers to use a per-process atomic counter still leaves cross-process collision (the bus protocol allows any producer to mint any `EventId`).

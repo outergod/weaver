@@ -860,6 +860,16 @@ async fn open_and_bootstrap_all(
     registry: &mut BufferRegistry,
 ) -> Result<Vec<(EntityRef, EventId)>, PublisherError> {
     let mut anchors = Vec::with_capacity(paths.len());
+    // Wall-clock base for `bootstrap_tick` ids. Fold the loop index in as
+    // an offset so each per-buffer id is unique within this bootstrap
+    // pass even on platforms where two `now_ns()` calls in tight
+    // succession can return the same value. Cross-instance uniqueness
+    // is best-effort via wall-clock (sub-ns collision is the deferred
+    // residue tracked at `docs/07-open-questions.md §28`); slice 004
+    // closes the deterministic-collision case (every instance reusing
+    // 0..n) and the `EventId::ZERO`-sentinel collision (the listener
+    // short-circuits ZERO to EventNotFound).
+    let bootstrap_base = now_ns();
     for (idx, path) in paths.iter().enumerate() {
         let outcome = match dispatch_buffer_open(registry, path) {
             Ok(o) => o,
@@ -882,9 +892,11 @@ async fn open_and_bootstrap_all(
                 continue;
             }
         };
-        // Per-buffer synthesised bootstrap-tick EventId. Deterministic:
-        // the buffer's index in the (already de-duplicated) CLI order.
-        // Research §8 + data-model §Bootstrap sequence step 3b.
+        // Per-buffer synthesised bootstrap-tick EventId. The loop index
+        // is folded into a wall-clock base (`bootstrap_base`) so the id
+        // is unique within this bootstrap pass and probabilistically
+        // unique across instances. Research §8 + data-model §Bootstrap
+        // sequence step 3b.
         //
         // Bootstrap facts carry this id as `causal_parent`; the
         // matching `BusMessage::Event(EventPayload::BufferOpen { .. })`
@@ -895,7 +907,7 @@ async fn open_and_bootstrap_all(
         // (events are lossy-class, no retract), so the caller owns
         // the "event emission only once ownership is confirmed"
         // ordering.
-        let bootstrap_tick = EventId::new(idx as u64);
+        let bootstrap_tick = EventId::new(bootstrap_base.wrapping_add(idx as u64));
         let entity = state.entity();
         publish_buffer_bootstrap(writer, identity, &state, tracked, bootstrap_tick).await?;
         registry.insert(state);

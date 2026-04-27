@@ -102,8 +102,10 @@ impl TraceStore {
     /// (`core/src/types/ids.rs`). The `by_event` index is last-writer-
     /// wins on collision, so this lookup may return a different
     /// producer's later event when IDs collide. `weaver inspect --why`
-    /// is the user-visible consumer; mitigation tracked at
-    /// `docs/07-open-questions.md §28`.
+    /// is the user-visible consumer; the listener layer
+    /// (`core/src/bus/listener.rs::lookup_event_for_inspect`) carries
+    /// the `EventId::ZERO`-sentinel guard. Cross-producer wall-clock-ns
+    /// collision residue is tracked at `docs/07-open-questions.md §28`.
     pub fn find_event(&self, id: EventId) -> Option<TraceSequence> {
         self.by_event.get(&id).copied()
     }

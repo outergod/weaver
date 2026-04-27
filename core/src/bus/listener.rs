@@ -348,33 +348,7 @@ async fn handle_client_message(
             event_id,
         } => {
             // Slice 004 — see specs/004-buffer-edit/research.md §14.
-            // Look up the event by id and return the full Event
-            // envelope (cheaper than designing a sub-shape; the trace
-            // already holds it).
-            //
-            // EventId is unique per producer, not globally — concurrent
-            // producers minting the same id leave only the latest event
-            // in the trace's by_event index, so this walkback may
-            // attribute a fact to the wrong emitter on collision. Class-
-            // wide fix tracked at `docs/07-open-questions.md §28`.
-            let result = {
-                let trace = dispatcher.trace();
-                let trace = trace.lock().await;
-                trace
-                    .find_event(event_id)
-                    .and_then(|seq| trace.get(seq))
-                    .and_then(|entry| match &entry.payload {
-                        crate::trace::entry::TracePayload::Event { event } => Some(event.clone()),
-                        // Defensive: find_event's index should only point at
-                        // Event payloads; any other payload is a structural
-                        // bug in TraceStore::update_indexes. Treat as
-                        // EventNotFound rather than panic — the chain walk
-                        // surfaces the symptom cleanly without crashing the
-                        // listener.
-                        _ => None,
-                    })
-                    .ok_or(crate::types::message::EventInspectionError::EventNotFound)
-            };
+            let result = lookup_event_for_inspect(dispatcher, event_id).await;
             let resp = BusMessage::EventInspectResponse { request_id, result };
             write_message(writer, &resp).await?;
             Ok(HandlerOutcome::None)
@@ -551,6 +525,49 @@ async fn handle_client_message(
     }
 }
 
+/// Slice-004 `EventInspectRequest` lookup. Returns the `Event` envelope
+/// at `event_id` or `EventNotFound`.
+///
+/// `EventId` is unique per producer, not globally — concurrent producers
+/// minting the same id leave only the latest event in the trace's
+/// `by_event` index, so this walkback may attribute a fact to the wrong
+/// emitter on collision. Class-wide fix tracked at
+/// `docs/07-open-questions.md §28`.
+///
+/// Short-circuits [`EventId::ZERO`] to `EventNotFound`: the
+/// inspect-handler uses ZERO as a sentinel for "fact has no
+/// causal_parent" (`core/src/inspect/handler.rs:140`), so a walkback
+/// request carrying ZERO must produce a clean miss rather than
+/// resolving to whichever real event happens to sit at id 0 in the
+/// `by_event` index. Slice 004 closed the deterministic-collision case
+/// (`weaver-buffers` bootstrap formerly minted `EventId::new(idx)`
+/// starting at 0; now wall-clock-based via `now_ns().wrapping_add(idx)`).
+async fn lookup_event_for_inspect(
+    dispatcher: &Dispatcher,
+    event_id: crate::types::ids::EventId,
+) -> Result<crate::types::event::Event, crate::types::message::EventInspectionError> {
+    use crate::types::ids::EventId;
+    use crate::types::message::EventInspectionError;
+    if event_id == EventId::ZERO {
+        return Err(EventInspectionError::EventNotFound);
+    }
+    let trace = dispatcher.trace();
+    let trace = trace.lock().await;
+    trace
+        .find_event(event_id)
+        .and_then(|seq| trace.get(seq))
+        .and_then(|entry| match &entry.payload {
+            crate::trace::entry::TracePayload::Event { event } => Some(event.clone()),
+            // Defensive: find_event's index should only point at Event
+            // payloads; any other payload is a structural bug in
+            // TraceStore::update_indexes. Treat as EventNotFound rather
+            // than panic — the chain walk surfaces the symptom cleanly
+            // without crashing the listener.
+            _ => None,
+        })
+        .ok_or(EventInspectionError::EventNotFound)
+}
+
 async fn forward_fact_event(evt: FactEvent, writer: &mut UnixStream) -> Result<(), ListenerError> {
     let msg = match evt {
         FactEvent::Asserted(fact) => BusMessage::FactAssert(fact),
@@ -714,5 +731,84 @@ mod handshake_tests {
             outcome,
             Err(ListenerError::VersionMismatch { .. })
         ));
+    }
+}
+
+#[cfg(test)]
+mod event_inspect_lookup_tests {
+    use super::*;
+    use crate::provenance::{ActorIdentity, Provenance};
+    use crate::trace::entry::TracePayload;
+    use crate::types::entity_ref::EntityRef;
+    use crate::types::event::{Event, EventPayload};
+    use crate::types::ids::EventId;
+    use crate::types::message::EventInspectionError;
+
+    fn fixture_event(id: EventId) -> Event {
+        Event {
+            id,
+            name: "buffer/open".into(),
+            target: Some(EntityRef::new(1)),
+            payload: EventPayload::BufferOpen {
+                path: "/tmp/weaver-fixture".into(),
+            },
+            provenance: Provenance::new(ActorIdentity::Core, 0, None).unwrap(),
+        }
+    }
+
+    /// Regression for the slice-004 finding: even when a real event
+    /// with `EventId(0)` is in the trace, an `EventInspectRequest`
+    /// carrying `EventId::ZERO` must short-circuit to `EventNotFound`.
+    /// The inspect-handler treats ZERO as the "no causal_parent"
+    /// sentinel; resolving it to a real event would mis-attribute facts
+    /// that have no source event.
+    #[tokio::test]
+    async fn lookup_event_for_inspect_short_circuits_zero_even_when_event_zero_exists() {
+        let dispatcher = Dispatcher::new();
+        // Inject an event at id 0 directly into the trace (simulates a
+        // pre-fix bootstrap_tick collision with the ZERO sentinel).
+        {
+            let trace_arc = dispatcher.trace();
+            let mut trace = trace_arc.lock().await;
+            trace.append(
+                0,
+                TracePayload::Event {
+                    event: fixture_event(EventId::ZERO),
+                },
+            );
+        }
+        let result = lookup_event_for_inspect(&dispatcher, EventId::ZERO).await;
+        assert_eq!(
+            result,
+            Err(EventInspectionError::EventNotFound),
+            "ZERO must short-circuit to EventNotFound regardless of trace contents",
+        );
+    }
+
+    #[tokio::test]
+    async fn lookup_event_for_inspect_returns_event_for_real_id() {
+        let dispatcher = Dispatcher::new();
+        let id = EventId::new(42);
+        {
+            let trace_arc = dispatcher.trace();
+            let mut trace = trace_arc.lock().await;
+            trace.append(
+                0,
+                TracePayload::Event {
+                    event: fixture_event(id),
+                },
+            );
+        }
+        let got = lookup_event_for_inspect(&dispatcher, id)
+            .await
+            .expect("lookup hits the trace");
+        assert_eq!(got.id, id);
+    }
+
+    #[tokio::test]
+    async fn lookup_event_for_inspect_missing_id_returns_event_not_found() {
+        let dispatcher = Dispatcher::new();
+        let result = lookup_event_for_inspect(&dispatcher, EventId::new(123)).await;
+        assert_eq!(result, Err(EventInspectionError::EventNotFound));
     }
 }
