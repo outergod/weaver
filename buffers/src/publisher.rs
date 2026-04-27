@@ -485,15 +485,34 @@ pub async fn run(
                 };
             }
             maybe_event = event_rx.recv() => {
-                if let Some(event) = maybe_event {
-                    if let Err(e) = handle_event(
-                        &mut writer, &identity, &mut registry, &mut tracked, event,
-                    ).await {
-                        break 'poll Err(e);
+                // Event arm: handle the BufferEdit (or whatever bus
+                // event arrived) and `continue 'poll` so the poll
+                // section below runs ONLY on `ticker.tick()` arms.
+                // Pre-fix, falling through here triggered a full
+                // `poll_tick_per_buffer` pass plus the degraded/ready
+                // aggregation per inbound event — `O(events × buffers)`
+                // observation cost under edit bursts, with degraded/
+                // ready transitions firing earlier than the configured
+                // `poll_interval` cadence promises. Event-driven state
+                // changes are already published by `handle_event`; the
+                // poll section's job is detecting *external* mutations
+                // via metadata observation, which the contract pins to
+                // the ticker cadence.
+                match maybe_event {
+                    Some(event) => {
+                        if let Err(e) = handle_event(
+                            &mut writer, &identity, &mut registry, &mut tracked, event,
+                        ).await {
+                            break 'poll Err(e);
+                        }
+                    }
+                    None => {
+                        // Event channel closed; let err_rx surface the
+                        // bus EOF on the next iteration — no polling
+                        // work needed for a teardown wake-up.
                     }
                 }
-                // None: event channel closed; the bus EOF will surface
-                // via err_rx on the next iteration.
+                continue 'poll;
             }
         }
 
