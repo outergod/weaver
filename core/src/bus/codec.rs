@@ -19,6 +19,29 @@ use crate::types::message::BusMessage;
 /// Maximum frame payload in bytes (64 KiB).
 pub const MAX_FRAME_SIZE: usize = 64 * 1024;
 
+/// Headroom reserved between [`MAX_FRAME_SIZE`] and the largest
+/// `BusMessage::Event` payload that ingests cleanly. The same `Event`
+/// envelope is later wrapped in `BusMessage::EventInspectResponse`
+/// (slice-004 `weaver inspect --why`) — that wrapper carries an extra
+/// `request_id: u64` plus a `Result<Event, EventInspectionError>`
+/// discriminator, costing ~10–20 CBOR bytes today. Without this
+/// margin, an `Event` ingested at exactly [`MAX_FRAME_SIZE`] would
+/// fail [`write_message`] on the response side, killing the inspect
+/// connection.
+///
+/// 256 bytes leaves ≥12× headroom over the current overhead and
+/// absorbs future field additions to `EventInspectResponse` without
+/// re-tightening the ingest limit.
+pub const RESPONSE_WRAPPER_HEADROOM: usize = 256;
+
+/// Maximum size of a `BusMessage::Event` envelope at ingest. Smaller
+/// than [`MAX_FRAME_SIZE`] by [`RESPONSE_WRAPPER_HEADROOM`] so that
+/// the same `Event`, when re-wrapped as `BusMessage::EventInspectResponse`
+/// during a `weaver inspect --why` walkback, still fits within the
+/// codec's frame limit. Used by `weaver edit` / `weaver edit-json`
+/// pre-dispatch size checks.
+pub const MAX_EVENT_INGEST_FRAME: usize = MAX_FRAME_SIZE - RESPONSE_WRAPPER_HEADROOM;
+
 #[derive(Debug, Error)]
 pub enum CodecError {
     #[error("I/O error: {0}")]

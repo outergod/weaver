@@ -9,7 +9,7 @@ Per-public-surface versioning is per L2 constitution Principle 8 (`.specify/memo
 
 Per L2 Principle 7, each public surface carries its own version.
 
-- **Bus protocol** v0.3.0 (was v0.2.0) — message categories, delivery classes (lossy / authoritative), CBOR tag scheme entries 1000 (entity-ref), 1001 (keyword), 1002 (structured actor identity, slice 002). Slice 003 wire changes: `EventPayload::BufferEdited` / `BufferCleaned` removed; `EventPayload::BufferOpen { path }` added; `FactValue::U64(u64)` added. `Hello.protocol_version` advances `0x02 → 0x03`. See `specs/003-buffer-service/contracts/bus-messages.md`.
+- **Bus protocol** v0.4.0 (was v0.3.0) — message categories, delivery classes (lossy / authoritative), CBOR tag scheme entries 1000 (entity-ref), 1001 (keyword), 1002 (structured actor identity). Slice 004 wire changes: `EventPayload::BufferEdit { entity, version, edits }` added; `TextEdit` / `Range` / `Position` struct types added (no new CBOR tag); `EventSubscribePattern` + `BusMessage::SubscribeEvents` added; `BusMessage::EventInspectRequest` / `EventInspectResponse` + `EventInspectionError` added; `InspectionDetail.value: FactValue` added as REQUIRED. `Hello.protocol_version` advances `0x03 → 0x04`. See `specs/004-buffer-edit/contracts/bus-messages.md`.
 - **Fact-family schema `buffer/dirty`** v0.1.0 — wire shape unchanged from slice 001. **Authority transferred** from the `core/dirty-tracking` behavior to the `weaver-buffers` service in slice 003; the shipped core no longer registers an embedded producer.
 - **Fact-family schema `buffer/path`** v0.1.0 (slice 003, new) — `FactValue::String` (canonical absolute path). Bootstrap fact asserted once per opened buffer; never updated (path change ≡ entity change). Authored by `weaver-buffers`.
 - **Fact-family schema `buffer/byte-size`** v0.1.0 (slice 003, new) — `FactValue::U64` (the new variant lands under the bus-protocol MAJOR bump). Byte count of the service's in-memory content. Authored by `weaver-buffers`.
@@ -23,20 +23,70 @@ Per L2 Principle 7, each public surface carries its own version.
 - **Fact-family schema `repo/observable`** v0.1.0 (slice 002, new) — `FactValue::Bool`. `false` during watcher-`Degraded`; flips `true` on recovery. Suppresses dirty rendering in the TUI when `false` per `contracts/cli-surfaces.md`.
 - **Fact-family schema `repo/path`** v0.1.0 (slice 002, new) — `FactValue::String` (canonical working-tree root). The three `repo/state/*` attributes obey a mutex invariant: at most one asserted per repository entity at any trace prefix (`docs/07-open-questions.md §26`).
 - **Fact-family schema `watcher/status`** v0.1.0 (slice 002, new) — `FactValue::String` mirroring `LifecycleSignal` (`started` / `ready` / `degraded` / …). Keyed by the watcher's per-invocation instance-UUID entity, not the repository.
-- **CLI surface `weaver`** v0.2.0 — MAJOR bump. Slice 003 removes the `simulate-edit` and `simulate-clean` subcommands (the events they produced are no longer on the wire). `weaver inspect --output=json` gains an always-present `asserting_kind` discriminator (slice 002 MINOR additive, carried into v0.2.0); behavior-authored inspection was removed from the shipped surface as a consequence of retiring `core/dirty-tracking`.
-- **CLI surface `weaver-buffers`** v0.1.0 (slice 003, new) — `weaver-buffers <PATH>... [--poll-interval=<duration>] [--socket=<path>] [--output=human|json] [-v/-vv/-vvv] [--version]`. Exit codes 0/1/2/3/10 per `specs/003-buffer-service/contracts/cli-surfaces.md`.
-- **CLI surface `weaver-git-watcher`** v0.1.0 — shape unchanged; `--version` JSON field `bus_protocol` advances `"0.2.0" → "0.3.0"` as a by-product of the protocol bump (constant-driven, not a CLI-surface change).
-- **CLI surface `weaver-tui`** v0.1.0 — MINOR additive. Slice 003 adds a Buffers render section below the existing Repositories section; no new keybindings. The `e`/`c` simulate-edit/simulate-clean keystrokes are removed (their target events are gone from the protocol); the command bar now shows `Commands: [i]nspect  [q]uit`. (NB: this is keybinding removal, which under `cli-surfaces.md §Versioning policy` is reserved for a future MAJOR — handled here as a slice-coordinated simultaneous removal with the wire variants rather than as a standalone TUI break.)
+- **CLI surface `weaver`** v0.3.0 (was v0.2.0) — MINOR additive bump. Slice 004 adds `weaver edit <PATH> [<RANGE> <TEXT>]*` and `weaver edit-json <PATH> --from <PATH-or-dash>` subcommands plus a `--why` flag on `weaver inspect`. No removals; existing subcommand surfaces unchanged. The `bus_protocol` JSON field advances `"0.3.0" → "0.4.0"` mechanically as a by-product of the protocol bump (constant-driven). New diagnostic codes `WEAVER-EDIT-001` through `WEAVER-EDIT-004`.
+- **CLI surface `weaver-buffers`** v0.1.0 — shape unchanged; `--version` JSON field `bus_protocol` advances `"0.3.0" → "0.4.0"` as a by-product of the protocol bump (constant-driven, not a CLI-surface change).
+- **CLI surface `weaver-git-watcher`** v0.1.0 — shape unchanged; `--version` JSON field `bus_protocol` advances `"0.3.0" → "0.4.0"` as a by-product of the protocol bump (constant-driven, not a CLI-surface change).
+- **CLI surface `weaver-tui`** v0.1.0 — shape unchanged; `--version` JSON field `bus_protocol` advances `"0.3.0" → "0.4.0"`. The Buffers render section already subscribes to `buffer/*` (slice-003 implementation); accepted-edit re-emissions flow through transparently — no new keybindings, no new render regions.
 - **Configuration schema** v0.1.0 — unchanged.
 
-## [Unreleased]
+## [Unreleased] — slice 004 "Buffer Edit"
 
-### Added — buffer/version fact family (slice-004 forward-compat)
+**Breaking bus-protocol change** — version advances `0.3.0 → 0.4.0`. Slice-003 clients cannot connect to a v0.4.0 core. CLI `weaver` surface bumps MINOR additive for the new `edit` / `edit-json` subcommands and the `--why` flag on `inspect`. No removals from any surface. The slice introduces in-memory text editing on top of slice 003's `weaver-buffers` content authority — `weaver edit` is the first non-service event-payload producer wired to the wire, and `ActorIdentity::User` (reserved at slice 002) gets its first production use.
+
+### Changed — bus protocol (MAJOR)
+
+- **`Hello.protocol_version`** advances `0x03 → 0x04`. Mismatched clients receive `Error { category: "version-mismatch", detail: "bus protocol 0x04 required; received 0x03" }` and connection close. Detail-string format is pinned by `specs/004-buffer-edit/contracts/bus-messages.md §Connection lifecycle`.
+- **`EventPayload::BufferEdit { entity, version, edits }`** added. Wire variant tag `"buffer-edit"` per Amendment 5. Carries an atomic batch of `TextEdit`s for an opened buffer; the publisher applies the batch in descending-offset order, bumps `buffer/version` by 1, and re-emits `buffer/byte-size` / `buffer/version` / `buffer/dirty` with the BufferEdit event's id as `causal_parent`. Empty batch (`edits: []`) is a silent no-op (no version bump).
+- **`TextEdit { range, new_text }`**, **`Range { start, end }`**, **`Position { line, character }`** struct types added under `core/src/types/edit.rs`. Plain CBOR/JSON struct serialisation (no CBOR tag); `new_text` ↔ JSON `new-text` via `#[serde(rename_all = "kebab-case")]`. `Position.character` is a UTF-8 BYTE offset within the line's content (LSP-default departure justified in spec §Assumptions; forward-compatible with LSP 3.17 `positionEncodings` negotiation).
+- **`InspectionDetail.value: FactValue`** added as REQUIRED. The 0x04 handshake rejects mixed-version clients, so no compat shim is needed. Slice-004's `weaver edit` emitter consumes `value` to extract the current `buffer/version` for the `BufferEdit` envelope.
+- **`EventSubscribePattern { PayloadType(String) }`** + **`BusMessage::SubscribeEvents(EventSubscribePattern)`** added. Wire shape `{"type":"subscribe-events","payload":{"type":"payload-type","pattern":"buffer-edit"}}`. Subscribers receive `BusMessage::Event` frames whose payload's `type_tag()` matches the pattern. Lossy delivery via unbounded mpsc fan-out from a `Dispatcher`-owned `EventSubscriptions` registry. See `specs/004-buffer-edit/research.md §13`.
+- **`BusMessage::EventInspectRequest { request_id, event_id }`** + **`BusMessage::EventInspectResponse { request_id, result: Result<Event, EventInspectionError> }`** + **`EventInspectionError::EventNotFound`** added. Powers `weaver inspect --why`'s chain walk: a fact's `InspectionDetail.source_event` resolves via `TraceStore::find_event` to the originating `Event` envelope. See `specs/004-buffer-edit/research.md §14`.
+- **`EventPayload::type_tag(&self) -> &'static str`** added — returns the kebab-case wire discriminant for event-pattern matching (`"buffer-edit"`, `"buffer-open"`).
+
+### Added — Weaver CLI (MINOR additive)
+
+- **`weaver edit <PATH> [<RANGE> <TEXT>]* [--socket <PATH>]`** — dispatches a single `EventPayload::BufferEdit` event with the variadic positional pairs translated into a `Vec<TextEdit>`. `<RANGE>` parses as `<sl>:<sc>-<el>:<ec>` (decimal `u32`, UTF-8 byte offsets). Pre-dispatch flow: canonicalise path → derive entity → connect → `InspectRequest(buffer/version)` → construct envelope with `Provenance { source: ActorIdentity::User, .. }` → dispatch + exit 0. Fire-and-forget per FR-012 — silent drops at the service (stale-version, validation-failure, unowned-entity) are NOT detectable from the CLI. Zero-pair invocation emits a warn-stderr "no edits provided; nothing dispatched" and exits 0 without dispatching (FR-014).
+- **`weaver edit-json <PATH> --from <PATH-or-dash> [--socket <PATH>]`** — JSON-driven equivalent of `weaver edit`. `--from -` reads stdin; `--from <PATH>` reads a named file. Pre-dispatch ingest-frame size check (`MAX_EVENT_INGEST_FRAME` = `MAX_FRAME_SIZE` − `RESPONSE_WRAPPER_HEADROOM` = 65 280 bytes) rejects oversized batches before they reach the codec. The 256-byte headroom reserves space for the `BusMessage::EventInspectResponse` wrapper used by `weaver inspect --why`, so any event accepted at ingest can be returned via walkback without exceeding the 64 KiB wire frame.
+- **`weaver inspect <fact-key> --why`** — chains a second bus round-trip after the existing fact-inspect: takes `InspectionDetail.source_event`, issues `EventInspectRequest`, renders a walkback JSON shape with `fact`, `fact_inspection`, and `event` blocks. The `event.provenance.source.type` field carries the kebab-case `ActorIdentity` discriminator (e.g., `"user"` for `ActorIdentity::User`). Exit code 2 on either `FactNotFound` or `EventNotFound` (mirrors slice-001's "expected miss" convention).
+- **Diagnostic codes** added in `core/src/cli/errors.rs`: `WEAVER-EDIT-001` (buffer not opened — pre-dispatch inspect-lookup returned `FactNotFound`), `WEAVER-EDIT-002` (invalid `<RANGE>` grammar OR odd-count variadic pairs), `WEAVER-EDIT-003` (malformed edit-json input), `WEAVER-EDIT-004` (serialised BufferEdit exceeds the 65 280-byte ingest-frame limit). All exit 1.
+- `bus_protocol` JSON field advances `"0.3.0" → "0.4.0"` in all four binaries' `--version` output via the `BUS_PROTOCOL_VERSION_STR` constant. Constant-driven; not a CLI-surface schema event.
+
+### Added — buffers consumer
+
+- **`BufferState::apply_edits(&mut self, edits: &[TextEdit]) -> Result<(), ApplyError>`** — atomic two-phase apply pipeline (validate then mutate) per `specs/004-buffer-edit/data-model.md §Validation rules`. Empty batch is a structural identity (FR-008); on `Err` the buffer is byte-identical pre/post; on `Ok` `memory_digest == sha256(content)` is preserved structurally. Apply order is descending-offset (LSP 3.17 convention).
+- **`ApplyError` taxonomy**: 6 variants (`OutOfBounds`, `MidCodepointBoundary`, `IntraBatchOverlap`, `NothingEdit`, `SwappedEndpoints`, `InvalidUtf8`) plus a `BoundarySide` enum carried in `MidCodepointBoundary`. Each variant has a `reason()` returning the kebab-case string the publisher emits in its `tracing::debug!` `reason` field per FR-018.
+- **`BufferRegistry`** refactored from `(Vec<BufferState>, HashSet<EntityRef>)` to `HashMap<EntityRef, BufferState> + HashMap<EntityRef, u64> versions`. Map keyset is the ownership marker; per-buffer version counter initialised to 0 at bootstrap, bumped by accepted edits.
+- **`dispatch_buffer_edit`** + **`BufferEditOutcome`** (`Applied { entity, new_version, new_byte_size }`, `NotOwned`, `StaleVersion { current, emitted }`, `FutureVersion { current, emitted }`, `EmptyBatch`, `ValidationFailure(ApplyError)`) — pure-ish dispatch handler mirroring slice-003's `dispatch_buffer_open` shape. Reader-loop arm forwards each accepted batch's three re-emitted facts with `causal_parent = Some(event.id)`.
+- **Event-broadcast subscription** at bootstrap: publisher subscribes to `EventSubscribePattern::PayloadType("buffer-edit")` immediately after handshake; reader-loop forwards `BusMessage::Event` frames into the dispatch arm.
+- **`buffer_entity_ref`** (and `BUFFER_NAMESPACE_BIT` / `INSTANCE_NAMESPACE_BIT` / `REPO_NAMESPACE_BIT`) lifted from `weaver-buffers::model` to `weaver_core::types::buffer_entity` so the `weaver edit` CLI can derive the same entity-id without a circular cargo dep. `weaver-buffers::model` re-exports for slice-003 callers; hash output byte-identical pre/post.
+
+### Added — `ActorIdentity::User`
+
+- First production use of the `User` unit variant (reserved at slice 002 for human-initiated CLI actions). `weaver edit` and `weaver edit-json` stamp `Provenance { source: ActorIdentity::User, .. }` on dispatched `BufferEdit` events. The `User` variant became a unit (no fields) in this slice — the original placeholder `User { id }` shape was speculative; for a single-process local editor with one human operator there's no need to attribute edits across multiple users. `UserId` newtype removed entirely.
+
+### Fixed — buffers (mid-flight)
+
+- Reader-loop's `Applied` arm now syncs `state.last_dirty` to the published value, suppressing a poll-loop double-fire of `buffer/dirty=true` after each accepted edit. Detected by the T018 atomic-batch e2e proptest. The data-model's atomic-batch contract commits to ONE re-emission per accepted edit; the prior code's reader-loop arm published once, then the next 100 ms poll tick's edge-trigger fired a second time.
+
+### Test summary for slice 004
+
+- `apply_edits` property test (T017) — 256 cases pinning the R1..R6 + intra-batch-overlap iff oracle and the digest-invariant + atomicity postconditions.
+- `buffer_edit_atomic_batch` e2e (T018) — 16-edit happy batch + 3-edit batch with invalid middle, asserting "exactly one re-emission burst" structurally.
+- `buffer_edit_emitter_parity` proptest (T022) — 256 cases over a fake-core test harness asserting `weaver edit` and `weaver edit-json` dispatch byte-identical CBOR payloads.
+- `buffer_edit_sequential` e2e (T023) — 100 sequential edits land cleanly with no gaps and no duplicates (SC-403 structural).
+- `buffer_edit_stale_drop` e2e (T024) — barrier-coordinated two-emitter race, asserting the loser's dispatch drops at the publisher with `reason="stale-version"` in the captured stderr (SC-404).
+- `buffer_edit_single` e2e (T015) — single-edit dispatch + buffer-not-opened CLI path (SC-401 + WEAVER-EDIT-001).
+- `buffer_edit_inspect_why` e2e (T016) — `weaver inspect --why` walks back to the BufferEdit event with `event.provenance.source.type == "user"` (SC-405).
+
+## [0.3.0a] — 2026-04-25 — slice-003 forward-compat tail (PR #10)
+
+Pre-slice-004 forward-compat: ships the `buffer/version` fact family on the slice-003 bootstrap set so slice 004 can begin bumping the counter without expanding the fact family count in the same PR. Additive across every public surface; no bus-protocol bump (stays `0.3.0`).
+
+### Added — buffer/version fact family
 
 - **Fact-family schema `buffer/version`** v0.1.0 — `FactValue::U64`. `weaver-buffers` publishes `buffer/version=0` as a fifth bootstrap fact alongside `buffer/path` / `buffer/byte-size` / `buffer/dirty` / `buffer/observable`. No consumer in this change; no edit path in slice 003.
 - Forward-compat motivation: slice 004 introduces `EventPayload::BufferEdit` with an edit-versioning handshake (stale edits referencing a pre-edit version are rejected server-side). Shipping the version field on the bootstrap set now means slice 004 can start bumping the counter on each accepted edit without expanding the bootstrap fact count in the same PR. The `buffers/tests/component_discipline.rs` proptest's attribute→type-map assertion already pins the shape.
 - `buffer_bootstrap_facts` in `buffers/src/model.rs` now returns `[(&'static str, FactValue); 5]` (was `; 4`). `publish_buffer_bootstrap` still iterates via the seam, so the new fact flows to the wire automatically. Retract set in `tests/e2e/buffer_sigkill.rs` updated to the five attributes.
-- Additive across every public surface; no bus-protocol bump (stays `0.3.0`).
 
 ## [0.3.0] — 2026-04-24 — slice 003 "Buffer Service"
 

@@ -12,7 +12,7 @@
 //! bus-EOF classification). The CLI wrapper that invokes [`run`]
 //! lands in C14.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -28,14 +28,15 @@ use uuid::Uuid;
 use weaver_core::bus::client::{Client, ClientError};
 use weaver_core::bus::codec::{CodecError, read_message, write_message};
 use weaver_core::provenance::{ActorIdentity, Provenance};
+use weaver_core::types::edit::TextEdit;
 use weaver_core::types::entity_ref::EntityRef;
 use weaver_core::types::event::{Event, EventPayload};
 use weaver_core::types::fact::{Fact, FactKey, FactValue};
 use weaver_core::types::ids::EventId;
-use weaver_core::types::message::{BusMessage, LifecycleSignal};
+use weaver_core::types::message::{BusMessage, EventSubscribePattern, LifecycleSignal};
 
 use crate::model::{
-    BufferState, ObserverError, buffer_bootstrap_facts, buffer_entity_ref,
+    ApplyError, BufferState, ObserverError, buffer_bootstrap_facts, buffer_entity_ref,
     watcher_instance_entity_ref,
 };
 use crate::observer;
@@ -67,31 +68,44 @@ impl BusWriter {
     }
 }
 
-/// Set of buffer entities currently owned by this service instance.
+/// Per-instance buffer registry: holds owned [`BufferState`]s and the
+/// `buffer/version` counters for each owned entity.
 ///
-/// Drives the FR-011a idempotence invariant: when a `BufferOpen`
-/// event names a path whose derived entity is already in the
-/// registry, the dispatch handler short-circuits to a no-op — no
-/// re-read of the file, no fact re-publication, no trace emission.
+/// The `buffers` map is the single source of truth for ownership
+/// (entity ownership lookup is `buffers.contains_key(&e)`) and for the
+/// in-memory content the poll loop and the slice-004 edit-dispatch
+/// arm operate on. The `versions` map tracks per-buffer
+/// `buffer/version`: initialised to `0` at bootstrap (matches the
+/// slice-003 PR #10 forward-compat bootstrap fact); bumped by each
+/// accepted `EventPayload::BufferEdit` in slice 004; never
+/// decremented.
 ///
-/// Slice 003's CLI bootstrap calls [`dispatch_buffer_open`] per
-/// deduped path, so the registry is populated as part of the hot
-/// path; the "already-owned" branch is unreachable under slice-003
-/// argv (T055's canonicalisation+dedup at parse time collapses
-/// duplicates upstream). Slice 004+ external producers that emit
+/// Drives the FR-011a idempotence invariant for `BufferOpen`: a
+/// repeat dispatch whose derived entity is already in `buffers`
+/// short-circuits to a no-op — no re-read, no fact re-publication,
+/// no trace emission. Slice-003's CLI bootstrap deduplicates paths
+/// at parse time (T055) so the already-owned branch is unreachable
+/// under slice-003 argv; slice 004+ external producers that emit
 /// `BufferOpen` over the wire will exercise the branch for real.
 #[derive(Default)]
 pub(crate) struct BufferRegistry {
-    owned: HashSet<EntityRef>,
+    pub(crate) buffers: HashMap<EntityRef, BufferState>,
+    pub(crate) versions: HashMap<EntityRef, u64>,
 }
 
 impl BufferRegistry {
     pub(crate) fn is_owned(&self, entity: EntityRef) -> bool {
-        self.owned.contains(&entity)
+        self.buffers.contains_key(&entity)
     }
 
-    pub(crate) fn mark_owned(&mut self, entity: EntityRef) {
-        self.owned.insert(entity);
+    /// Insert a freshly-opened buffer's state and initialise its
+    /// `buffer/version` counter to `0`. Caller MUST have confirmed
+    /// `is_owned(state.entity()) == false` (the FR-011a check happens
+    /// at [`dispatch_buffer_open`]'s decision point, not here).
+    pub(crate) fn insert(&mut self, state: BufferState) {
+        let entity = state.entity();
+        self.versions.insert(entity, 0);
+        self.buffers.insert(entity, state);
     }
 }
 
@@ -101,8 +115,8 @@ impl BufferRegistry {
 #[derive(Debug)]
 pub(crate) enum BufferOpenOutcome {
     /// First sighting — caller MUST publish the 4-fact bootstrap
-    /// and [`BufferRegistry::mark_owned`] the returned state's
-    /// entity so subsequent dispatches short-circuit.
+    /// and [`BufferRegistry::insert`] the returned state so
+    /// subsequent dispatches short-circuit.
     Fresh(BufferState),
     /// Entity already owned. Caller MUST NOT publish or retract
     /// anything — FR-011a.
@@ -129,6 +143,122 @@ pub(crate) fn dispatch_buffer_open(
     }
     let state = BufferState::open(path.to_path_buf())?;
     Ok(BufferOpenOutcome::Fresh(state))
+}
+
+/// Outcome of dispatching a single `BufferEdit` event for a given
+/// `(entity, emitted_version)` tuple. Mirrors slice-003's
+/// [`BufferOpenOutcome`] shape: pure-ish dispatch returns one variant
+/// per receipt; the caller (the reader-loop arm in [`reader_loop`]
+/// once T010 wires it) decides what to publish.
+///
+/// All non-`Applied` variants are silent drops on the wire per
+/// FR-018; the publisher emits a categorised `tracing::debug!` line
+/// keyed off the variant so post-mortem trace inspection can
+/// reconstruct *why* an edit was dropped without any subscriber
+/// observing the rejection.
+#[derive(Debug)]
+pub(crate) enum BufferEditOutcome {
+    /// Validated non-empty batch was applied. The post-apply state
+    /// lives in `registry.buffers[entity]`; the variant carries the
+    /// metadata the reader-loop arm needs to publish
+    /// `buffer/byte-size` and `buffer/version` directly. The dirty
+    /// flag is computed by re-observing the file on disk against
+    /// the registry's post-apply `memory_digest`, so the digest
+    /// itself doesn't need to ride on the outcome.
+    Applied {
+        entity: EntityRef,
+        new_version: u64,
+        new_byte_size: u64,
+    },
+    /// This service does not own the target entity (no `BufferOpen`
+    /// has been processed for it on this instance). No publish.
+    NotOwned,
+    /// Emitted version is older than current — almost certainly a
+    /// concurrent-edit conflict where two emitters saw the same
+    /// version and one landed first. Drop per FR-005 step 2.
+    StaleVersion { current: u64, emitted: u64 },
+    /// Emitted version is newer than current — defensive drop for an
+    /// emitter that saw a version this service did not issue.
+    FutureVersion { current: u64, emitted: u64 },
+    /// Well-formed batch with `edits: []` and matching version.
+    /// Silent no-op per `contracts/bus-messages.md §Failure modes`:
+    /// no fact re-emission, no version bump. The reader-loop arm
+    /// emits a `tracing::debug` line with `reason="empty-batch"`.
+    EmptyBatch,
+    /// Per-edit or batch-overlap validation rejected the batch. No
+    /// state mutation per [`BufferState::apply_edits`]'s atomicity
+    /// guarantee; no publish.
+    ValidationFailure(ApplyError),
+}
+
+/// Handler for a single `BufferEdit` event: gates ownership + version,
+/// applies the batch atomically (via [`BufferState::apply_edits`]),
+/// and bumps the per-buffer version on accept. Pure-ish (no bus
+/// writes, no tracing) so unit tests exercise the full outcome matrix
+/// without a mock writer; FR-018 categorisation lives in the
+/// reader-loop arm that consumes the outcome.
+///
+/// Ordering is significant:
+///
+/// 1. Ownership gate — non-owned entities short-circuit first; we
+///    must not even peek at the version map for entities other
+///    services own.
+/// 2. Version gate — stale and future drops happen before validation
+///    so a malformed batch under a concurrent-edit conflict surfaces
+///    as a version drop, not a validation failure (the operator's
+///    diagnostic priority is the conflict, not the malformed edit).
+/// 3. Validation + apply — `BufferState::apply_edits` validates the
+///    full batch before mutating anything; on failure the buffer is
+///    untouched.
+/// 4. Empty-batch gate — well-formed batches with no edits are a
+///    silent no-op per `contracts/bus-messages.md §Failure modes`;
+///    no version bump.
+/// 5. Version bump — only on accepted non-empty apply.
+pub(crate) fn dispatch_buffer_edit(
+    registry: &mut BufferRegistry,
+    entity: EntityRef,
+    version: u64,
+    edits: &[TextEdit],
+) -> BufferEditOutcome {
+    if !registry.is_owned(entity) {
+        return BufferEditOutcome::NotOwned;
+    }
+    let current = registry.versions.get(&entity).copied().unwrap_or(0);
+    if version < current {
+        return BufferEditOutcome::StaleVersion {
+            current,
+            emitted: version,
+        };
+    }
+    if version > current {
+        return BufferEditOutcome::FutureVersion {
+            current,
+            emitted: version,
+        };
+    }
+    if edits.is_empty() {
+        // Well-formed but semantically null — silent no-op per the
+        // bus-messages failure-modes table. Distinguished from a
+        // never-arriving event by the dispatcher's debug log; no
+        // observable effect on the fact space.
+        return BufferEditOutcome::EmptyBatch;
+    }
+    // version == current AND non-empty batch — eligible for application.
+    let state = registry
+        .buffers
+        .get_mut(&entity)
+        .expect("is_owned(entity) implies buffers contains the key");
+    if let Err(err) = state.apply_edits(edits) {
+        return BufferEditOutcome::ValidationFailure(err);
+    }
+    let new_byte_size = state.byte_size();
+    let new_version = current + 1;
+    registry.versions.insert(entity, new_version);
+    BufferEditOutcome::Applied {
+        entity,
+        new_version,
+        new_byte_size,
+    }
 }
 
 #[derive(Debug, Error)]
@@ -211,17 +341,32 @@ pub async fn run(
         "weaver-buffers starting",
     );
 
-    let client = Client::connect(&socket, SERVICE_ID)
+    let mut client = Client::connect(&socket, SERVICE_ID)
         .await
         .map_err(|source| PublisherError::BusUnavailable { source })?;
     info!("connected to core; bus protocol handshake complete");
+
+    // Slice 004: subscribe to BufferEdit events BEFORE splitting the
+    // connection — the SubscribeAck is consumed inline. After this
+    // returns Ok, the listener has registered the subscription and any
+    // BufferEdit dispatched by `weaver edit` will arrive on the read
+    // half. Filtering by target entity happens at dispatch time via
+    // `dispatch_buffer_edit`'s NotOwned outcome (the registry is the
+    // ownership source of truth; subscribing per-entity here would
+    // duplicate that gate without payoff).
+    client
+        .subscribe_events(EventSubscribePattern::PayloadType("buffer-edit".into()))
+        .await
+        .map_err(|source| PublisherError::BusUnavailable { source })?;
+    debug!("subscribed to buffer-edit events");
 
     let (reader, writer_half) = client.stream.into_split();
     let mut writer = BusWriter {
         writer: writer_half,
     };
     let (err_tx, mut err_rx) = mpsc::channel::<ServerSentError>(4);
-    let reader_task = tokio::spawn(reader_loop(reader, err_tx));
+    let (event_tx, mut event_rx) = mpsc::channel::<Event>(32);
+    let reader_task = tokio::spawn(reader_loop(reader, err_tx, event_tx));
 
     // Track every buffer/* fact we publish so the shutdown path (C13)
     // — and the fail-fast open-error branch below — can retract them
@@ -241,9 +386,12 @@ pub async fn run(
 
     // T030 + T032: per-buffer open + bootstrap in CLI order, fail-fast
     // with partial-retract on any open error.
-    let mut states: Vec<BufferState> =
-        match open_and_bootstrap_all(&mut writer, &identity, &paths, &mut tracked).await {
-            Ok(states) => states,
+    let mut registry = BufferRegistry::default();
+    let bootstrap_anchors: Vec<(EntityRef, EventId)> =
+        match open_and_bootstrap_all(&mut writer, &identity, &paths, &mut tracked, &mut registry)
+            .await
+        {
+            Ok(anchors) => anchors,
             Err(e) => {
                 // Retract any facts the partial-bootstrap published so
                 // subscribers see retract-before-disconnect. Core's
@@ -277,10 +425,16 @@ pub async fn run(
 
     // Drain cleared: the core accepted every bootstrap `FactAssert`.
     // Now emit the `buffer/open` events that anchor each buffer's
-    // causal_parent chain, in the same CLI order as the bootstrap
-    // facts used when they referenced `EventId::new(idx as u64)`.
-    for (idx, state) in states.iter().enumerate() {
-        publish_buffer_open_event(&mut writer, &identity, state, EventId::new(idx as u64)).await?;
+    // causal_parent chain, in the same CLI order the bootstrap facts
+    // used. Each anchor pairs the entity with the bootstrap-tick
+    // `EventId` that was already used as the bootstrap `causal_parent`,
+    // so `weaver inspect --why` walkbacks land on the matching event.
+    for (entity, bootstrap_id) in &bootstrap_anchors {
+        let state = registry
+            .buffers
+            .get(entity)
+            .expect("bootstrap_anchors mirrors registry.buffers keys");
+        publish_buffer_open_event(&mut writer, &identity, state, *bootstrap_id).await?;
     }
 
     // T031: lifecycle ready.
@@ -330,6 +484,36 @@ pub async fn run(
                     None => Err(bus_closed_error()),
                 };
             }
+            maybe_event = event_rx.recv() => {
+                // Event arm: handle the BufferEdit (or whatever bus
+                // event arrived) and `continue 'poll` so the poll
+                // section below runs ONLY on `ticker.tick()` arms.
+                // Pre-fix, falling through here triggered a full
+                // `poll_tick_per_buffer` pass plus the degraded/ready
+                // aggregation per inbound event — `O(events × buffers)`
+                // observation cost under edit bursts, with degraded/
+                // ready transitions firing earlier than the configured
+                // `poll_interval` cadence promises. Event-driven state
+                // changes are already published by `handle_event`; the
+                // poll section's job is detecting *external* mutations
+                // via metadata observation, which the contract pins to
+                // the ticker cadence.
+                match maybe_event {
+                    Some(event) => {
+                        if let Err(e) = handle_event(
+                            &mut writer, &identity, &mut registry, &mut tracked, event,
+                        ).await {
+                            break 'poll Err(e);
+                        }
+                    }
+                    None => {
+                        // Event channel closed; let err_rx surface the
+                        // bus EOF on the next iteration — no polling
+                        // work needed for a teardown wake-up.
+                    }
+                }
+                continue 'poll;
+            }
         }
 
         // Per-tick event id: one synthesised EventId shared across
@@ -338,7 +522,7 @@ pub async fn run(
         // `buffer/dirty` correlate to the same poll tick.
         let poll_tick_id = EventId::new(now_ns());
 
-        for state in &mut states {
+        for state in registry.buffers.values_mut() {
             if let Err(e) =
                 poll_tick_per_buffer(&mut writer, &identity, state, &mut tracked, poll_tick_id)
                     .await
@@ -351,7 +535,8 @@ pub async fn run(
         // `degraded` fires only when every currently-open buffer is
         // simultaneously unobservable; recovery (any buffer regains
         // observability) republishes `ready`. Edge-triggered.
-        let all_unobservable = !states.is_empty() && states.iter().all(|s| !s.last_observable());
+        let all_unobservable =
+            !registry.buffers.is_empty() && registry.buffers.values().all(|s| !s.last_observable());
         match (all_unobservable, was_degraded) {
             (true, false) => {
                 if let Err(e) = publish_watcher_status(
@@ -385,6 +570,208 @@ pub async fn run(
 
     reader_task.abort();
     outcome
+}
+
+/// Handle one bus event delivered to the publisher (slice 004 T010).
+///
+/// `BufferEdit` events route through [`dispatch_buffer_edit`]; on
+/// `Applied` the publisher emits the three-fact re-emission burst
+/// (`buffer/byte-size`, `buffer/version`, `buffer/dirty`) with
+/// `causal_parent = Some(event.id)` so `weaver inspect --why` walks
+/// from any of those facts back to the originating `BufferEdit`
+/// event. All other outcomes (`NotOwned`, `StaleVersion`,
+/// `FutureVersion`, `EmptyBatch`, `ValidationFailure`) are silent
+/// drops with categorised `tracing::debug` lines per FR-018.
+///
+/// `BufferOpen` events arriving over the bus are ignored — the
+/// publisher does not subscribe to them; the bootstrap-side
+/// `BufferOpen` it emits itself never reaches its own subscription
+/// (the listener does not echo a publisher's own events back).
+#[allow(clippy::too_many_arguments)]
+async fn handle_event(
+    writer: &mut BusWriter,
+    identity: &ActorIdentity,
+    registry: &mut BufferRegistry,
+    tracked: &mut HashSet<FactKey>,
+    event: Event,
+) -> Result<(), PublisherError> {
+    let event_id = event.id;
+    match event.payload {
+        EventPayload::BufferEdit {
+            entity,
+            version,
+            edits,
+        } => {
+            let outcome = dispatch_buffer_edit(registry, entity, version, &edits);
+            match outcome {
+                BufferEditOutcome::Applied {
+                    entity,
+                    new_version,
+                    new_byte_size,
+                } => {
+                    info!(
+                        entity = entity.as_u64(),
+                        event_id = event_id.as_u64(),
+                        new_version,
+                        new_byte_size,
+                        edits = edits.len(),
+                        "buffer edit applied",
+                    );
+                    let causal = Some(event_id);
+                    publish_fact(
+                        writer,
+                        FactKey::new(entity, "buffer/byte-size"),
+                        FactValue::U64(new_byte_size),
+                        identity,
+                        causal,
+                        tracked,
+                    )
+                    .await?;
+                    publish_fact(
+                        writer,
+                        FactKey::new(entity, "buffer/version"),
+                        FactValue::U64(new_version),
+                        identity,
+                        causal,
+                        tracked,
+                    )
+                    .await?;
+                    // Re-observe disk to compute the dirty flag.
+                    // observe_buffer streams the file through SHA-256
+                    // and compares against the BufferState's stored
+                    // memory_digest (now post-apply). In slice 004
+                    // this is always `true` after a non-empty edit
+                    // since there's no save-to-disk path; slice 005
+                    // will let `dirty=false` flip back after a
+                    // successful save.
+                    let state = registry
+                        .buffers
+                        .get(&entity)
+                        .expect("Applied implies the entity is in the registry");
+                    let dirty = match observer::observe_buffer(state) {
+                        Ok(obs) => obs.dirty,
+                        Err(e) => {
+                            // Disk read failed mid-flight (file
+                            // vanished, permission flicker). Default
+                            // to dirty=true — in-memory state has
+                            // diverged from any observable disk
+                            // state. The poll loop's next tick will
+                            // surface the unobservable transition
+                            // separately via buffer/observable.
+                            warn!(
+                                entity = entity.as_u64(),
+                                error = %e,
+                                "post-edit observe failed; defaulting buffer/dirty=true",
+                            );
+                            true
+                        }
+                    };
+                    publish_fact(
+                        writer,
+                        FactKey::new(entity, "buffer/dirty"),
+                        FactValue::Bool(dirty),
+                        identity,
+                        causal,
+                        tracked,
+                    )
+                    .await?;
+                    // Sync the edge-tracker so the next poll tick does
+                    // NOT re-publish buffer/dirty=<same value> with a
+                    // poll-tick `causal_parent`. The reader-loop arm is
+                    // authoritative for this transition; the poll loop
+                    // observes external mutations only.
+                    let state = registry
+                        .buffers
+                        .get_mut(&entity)
+                        .expect("Applied implies the entity is in the registry");
+                    state.set_last_dirty(dirty);
+                }
+                BufferEditOutcome::NotOwned => {
+                    debug!(
+                        entity = entity.as_u64(),
+                        event_id = event_id.as_u64(),
+                        reason = "unowned-entity",
+                        "buffer edit dropped",
+                    );
+                }
+                BufferEditOutcome::StaleVersion { current, emitted } => {
+                    debug!(
+                        entity = entity.as_u64(),
+                        event_id = event_id.as_u64(),
+                        reason = "stale-version",
+                        emitted_version = emitted,
+                        current_version = current,
+                        "buffer edit dropped",
+                    );
+                }
+                BufferEditOutcome::FutureVersion { current, emitted } => {
+                    debug!(
+                        entity = entity.as_u64(),
+                        event_id = event_id.as_u64(),
+                        reason = "future-version",
+                        emitted_version = emitted,
+                        current_version = current,
+                        "buffer edit dropped",
+                    );
+                }
+                BufferEditOutcome::EmptyBatch => {
+                    debug!(
+                        entity = entity.as_u64(),
+                        event_id = event_id.as_u64(),
+                        reason = "empty-batch",
+                        "buffer edit dropped",
+                    );
+                }
+                BufferEditOutcome::ValidationFailure(err) => {
+                    // Per-variant index shape: single-edit variants
+                    // emit `edit_index=<i>`; the pair-shaped
+                    // `IntraBatchOverlap` emits both indices instead.
+                    // Avoids leaking `Some(<i>)` Debug wrapping into
+                    // operator-facing logs (per data-model.md
+                    // §State-transition mapping FR-018 contract).
+                    match err {
+                        ApplyError::IntraBatchOverlap {
+                            first_index,
+                            second_index,
+                        } => {
+                            debug!(
+                                entity = entity.as_u64(),
+                                event_id = event_id.as_u64(),
+                                reason = err.reason(),
+                                first_index,
+                                second_index,
+                                error = %err,
+                                "buffer edit dropped",
+                            );
+                        }
+                        _ => {
+                            let edit_index = err.edit_index().expect(
+                                "non-IntraBatchOverlap ApplyError variants always carry edit_index",
+                            );
+                            debug!(
+                                entity = entity.as_u64(),
+                                event_id = event_id.as_u64(),
+                                reason = err.reason(),
+                                edit_index,
+                                error = %err,
+                                "buffer edit dropped",
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        EventPayload::BufferOpen { .. } => {
+            // Out of slice-004 scope — publisher does not subscribe
+            // to "buffer-open" events. If one arrives anyway (a
+            // future producer subscribes us to it), ignore.
+            debug!(
+                event_id = event_id.as_u64(),
+                "ignoring BufferOpen event on the publisher subscription path",
+            );
+        }
+    }
+    Ok(())
 }
 
 /// Drive one poll tick for a single buffer: observe, then emit
@@ -489,11 +876,21 @@ async fn open_and_bootstrap_all(
     identity: &ActorIdentity,
     paths: &[PathBuf],
     tracked: &mut HashSet<FactKey>,
-) -> Result<Vec<BufferState>, PublisherError> {
-    let mut states = Vec::with_capacity(paths.len());
-    let mut registry = BufferRegistry::default();
+    registry: &mut BufferRegistry,
+) -> Result<Vec<(EntityRef, EventId)>, PublisherError> {
+    let mut anchors = Vec::with_capacity(paths.len());
+    // Wall-clock base for `bootstrap_tick` ids. Fold the loop index in as
+    // an offset so each per-buffer id is unique within this bootstrap
+    // pass even on platforms where two `now_ns()` calls in tight
+    // succession can return the same value. Cross-instance uniqueness
+    // is best-effort via wall-clock (sub-ns collision is the deferred
+    // residue tracked at `docs/07-open-questions.md §28`); slice 004
+    // closes the deterministic-collision case (every instance reusing
+    // 0..n) and the `EventId::ZERO`-sentinel collision (the listener
+    // short-circuits ZERO to EventNotFound).
+    let bootstrap_base = now_ns();
     for (idx, path) in paths.iter().enumerate() {
-        let outcome = match dispatch_buffer_open(&registry, path) {
+        let outcome = match dispatch_buffer_open(registry, path) {
             Ok(o) => o,
             Err(source) => {
                 warn!(
@@ -514,9 +911,11 @@ async fn open_and_bootstrap_all(
                 continue;
             }
         };
-        // Per-buffer synthesised bootstrap-tick EventId. Deterministic:
-        // the buffer's index in the (already de-duplicated) CLI order.
-        // Research §8 + data-model §Bootstrap sequence step 3b.
+        // Per-buffer synthesised bootstrap-tick EventId. The loop index
+        // is folded into a wall-clock base (`bootstrap_base`) so the id
+        // is unique within this bootstrap pass and probabilistically
+        // unique across instances. Research §8 + data-model §Bootstrap
+        // sequence step 3b.
         //
         // Bootstrap facts carry this id as `causal_parent`; the
         // matching `BusMessage::Event(EventPayload::BufferOpen { .. })`
@@ -527,12 +926,13 @@ async fn open_and_bootstrap_all(
         // (events are lossy-class, no retract), so the caller owns
         // the "event emission only once ownership is confirmed"
         // ordering.
-        let bootstrap_tick = EventId::new(idx as u64);
+        let bootstrap_tick = EventId::new(bootstrap_base.wrapping_add(idx as u64));
+        let entity = state.entity();
         publish_buffer_bootstrap(writer, identity, &state, tracked, bootstrap_tick).await?;
-        registry.mark_owned(state.entity());
-        states.push(state);
+        registry.insert(state);
+        anchors.push((entity, bootstrap_tick));
     }
-    Ok(states)
+    Ok(anchors)
 }
 
 /// Publish the `BufferOpen` event that anchors a buffer's bootstrap
@@ -605,11 +1005,21 @@ async fn publish_buffer_bootstrap(
     Ok(())
 }
 
-/// Reader task: drains server-sent `BusMessage`s from the read half,
-/// filters `Error` frames into [`ServerSentError`] for the main loop,
-/// and exits cleanly on EOF (dropping `err_tx`, which wakes the main
-/// loop's `recv` arm with `None`).
-async fn reader_loop(mut reader: OwnedReadHalf, err_tx: mpsc::Sender<ServerSentError>) {
+/// Reader task: drains server-sent `BusMessage`s from the read half.
+/// Forwards `Error` frames into [`ServerSentError`] for the main loop's
+/// control flow, and `Event` frames into the slice-004 event channel
+/// (T009C — events are dispatched by [`handle_event`] via
+/// [`dispatch_buffer_edit`]). Other server frames (SubscribeAck,
+/// lifecycle, peer facts) are not actionable in the buffer service's
+/// control flow and are dropped.
+///
+/// Exits cleanly on EOF: dropping `err_tx` and `event_tx` wakes the
+/// main loop's `recv` arms with `None`, signalling bus tear-down.
+async fn reader_loop(
+    mut reader: OwnedReadHalf,
+    err_tx: mpsc::Sender<ServerSentError>,
+    event_tx: mpsc::Sender<Event>,
+) {
     loop {
         match read_message(&mut reader).await {
             Ok(BusMessage::Error(msg)) => {
@@ -622,14 +1032,31 @@ async fn reader_loop(mut reader: OwnedReadHalf, err_tx: mpsc::Sender<ServerSentE
                     return;
                 }
             }
+            Ok(BusMessage::Event(event)) => {
+                // Best-effort forward; a closed channel means the main
+                // loop has torn down. The event-channel is bounded
+                // (lossy class per docs/02-architecture.md §3.1) — a
+                // full channel drops the event silently. Slice-004's
+                // weaver-buffers is the only event consumer; if it
+                // can't keep up, the producer (weaver edit) sees
+                // fire-and-forget exit 0 and the dropped edit is
+                // indistinguishable from a stale-version drop at the
+                // service. Drop-oldest semantics + a class-wide bound
+                // policy are tracked at `docs/07-open-questions.md §27`
+                // alongside the symmetric fact-store + event-subs
+                // registry deferrals.
+                if event_tx.try_send(event).is_err() {
+                    debug!("event channel full or closed; dropping event");
+                }
+            }
             Ok(_) => {
-                // Non-error server frames (SubscribeAck, lifecycle, facts
-                // from peers) aren't actionable in the buffer service's
-                // control flow yet; ignore.
+                // Non-error / non-event server frames (SubscribeAck,
+                // lifecycle, facts from peers) aren't actionable in
+                // the buffer service's control flow yet; ignore.
             }
             Err(_) => {
-                // EOF or codec error; drop err_tx by returning so the
-                // main loop's recv arm surfaces None.
+                // EOF or codec error; drop err_tx + event_tx by
+                // returning so the main loop's recv arms surface None.
                 return;
             }
         }
@@ -1007,7 +1434,10 @@ mod tests {
         let mut registry = BufferRegistry::default();
 
         // First dispatch: fresh. Caller (the bootstrap loop) would
-        // publish the 4-fact bootstrap and mark_owned the entity.
+        // publish the 4-fact bootstrap and insert the state into the
+        // registry — which simultaneously sets the version counter to
+        // 0 and marks the entity as owned (HashMap keyset is the
+        // ownership marker post-T008).
         let first =
             dispatch_buffer_open(&registry, &canonical).expect("first dispatch must succeed");
         let state = match first {
@@ -1015,7 +1445,10 @@ mod tests {
             BufferOpenOutcome::AlreadyOwned => panic!("first dispatch must be Fresh"),
         };
         assert_eq!(state.path(), canonical.as_path());
-        registry.mark_owned(state.entity());
+        let entity = state.entity();
+        registry.insert(state);
+        assert!(registry.is_owned(entity));
+        assert_eq!(registry.versions.get(&entity).copied(), Some(0));
 
         // Second dispatch on the same canonical path: registry hit,
         // so the handler returns AlreadyOwned and performs no file
@@ -1058,5 +1491,168 @@ mod tests {
             }
             other => panic!("expected Observer(StartupFailure), got {other:?}"),
         }
+    }
+
+    // ───────────────────────────────────────────────────────────────────
+    // Slice-004: dispatch_buffer_edit + BufferEditOutcome (T009).
+    // ───────────────────────────────────────────────────────────────────
+
+    use weaver_core::types::edit::{Position, Range, TextEdit};
+
+    /// Build a single-buffer registry and return it together with the
+    /// derived entity and the backing tempfile (caller binds the
+    /// tempfile to keep the disk path alive for the test scope, even
+    /// though dispatch_buffer_edit operates on in-memory content only).
+    fn registry_with_buffer(
+        content: &[u8],
+    ) -> (BufferRegistry, EntityRef, tempfile::NamedTempFile) {
+        use std::io::Write;
+        let mut tf = tempfile::NamedTempFile::new().expect("tempfile");
+        tf.write_all(content).expect("write");
+        let canonical = std::fs::canonicalize(tf.path()).expect("canonicalize");
+        let state = BufferState::open(canonical).expect("open");
+        let entity = state.entity();
+        let mut reg = BufferRegistry::default();
+        reg.insert(state);
+        (reg, entity, tf)
+    }
+
+    fn pure_insert(line: u32, character: u32, text: &str) -> TextEdit {
+        TextEdit {
+            range: Range {
+                start: Position { line, character },
+                end: Position { line, character },
+            },
+            new_text: text.into(),
+        }
+    }
+
+    #[test]
+    fn dispatch_buffer_edit_returns_not_owned_for_unknown_entity() {
+        let mut reg = BufferRegistry::default();
+        let entity = EntityRef::new(0xDEAD_BEEF);
+        let outcome = dispatch_buffer_edit(&mut reg, entity, 0, &[]);
+        assert!(matches!(outcome, BufferEditOutcome::NotOwned));
+    }
+
+    #[test]
+    fn dispatch_buffer_edit_returns_stale_version_when_emitted_below_current() {
+        let (mut reg, entity, _tf) = registry_with_buffer(b"hello");
+        // Bump current to 5 to set up the stale scenario.
+        reg.versions.insert(entity, 5);
+        let outcome = dispatch_buffer_edit(&mut reg, entity, 3, &[]);
+        match outcome {
+            BufferEditOutcome::StaleVersion { current, emitted } => {
+                assert_eq!(current, 5);
+                assert_eq!(emitted, 3);
+            }
+            other => panic!("expected StaleVersion, got {other:?}"),
+        }
+        // No mutation: version stays at 5.
+        assert_eq!(reg.versions.get(&entity).copied(), Some(5));
+    }
+
+    #[test]
+    fn dispatch_buffer_edit_returns_future_version_when_emitted_above_current() {
+        let (mut reg, entity, _tf) = registry_with_buffer(b"hello");
+        reg.versions.insert(entity, 5);
+        let outcome = dispatch_buffer_edit(&mut reg, entity, 7, &[]);
+        match outcome {
+            BufferEditOutcome::FutureVersion { current, emitted } => {
+                assert_eq!(current, 5);
+                assert_eq!(emitted, 7);
+            }
+            other => panic!("expected FutureVersion, got {other:?}"),
+        }
+        assert_eq!(reg.versions.get(&entity).copied(), Some(5));
+    }
+
+    #[test]
+    fn dispatch_buffer_edit_returns_validation_failure_for_malformed_batch() {
+        // Buffer "hi" — line 0 length is 2; character 99 is OOB.
+        let (mut reg, entity, _tf) = registry_with_buffer(b"hi");
+        let bad = pure_insert(0, 99, "boom");
+        let outcome = dispatch_buffer_edit(&mut reg, entity, 0, std::slice::from_ref(&bad));
+        match outcome {
+            BufferEditOutcome::ValidationFailure(err) => {
+                assert_eq!(err.reason(), "validation-failure-out-of-bounds");
+                assert_eq!(err.edit_index(), Some(0));
+            }
+            other => panic!("expected ValidationFailure, got {other:?}"),
+        }
+        // Atomicity: version + content unchanged.
+        assert_eq!(reg.versions.get(&entity).copied(), Some(0));
+        assert_eq!(reg.buffers.get(&entity).unwrap().content(), b"hi");
+    }
+
+    #[test]
+    fn dispatch_buffer_edit_returns_applied_for_valid_batch() {
+        use sha2::{Digest, Sha256};
+        let (mut reg, entity, _tf) = registry_with_buffer(b"world");
+        let edit = pure_insert(0, 0, "hello ");
+        let outcome = dispatch_buffer_edit(&mut reg, entity, 0, std::slice::from_ref(&edit));
+        match outcome {
+            BufferEditOutcome::Applied {
+                entity: e,
+                new_version,
+                new_byte_size,
+            } => {
+                assert_eq!(e, entity);
+                assert_eq!(new_version, 1);
+                assert_eq!(new_byte_size, b"hello world".len() as u64);
+            }
+            other => panic!("expected Applied, got {other:?}"),
+        }
+        // Registry post-state matches the outcome's snapshot AND the
+        // memory_digest invariant (the reader-loop arm reads the
+        // post-apply digest from the registry to compute dirty).
+        assert_eq!(reg.versions.get(&entity).copied(), Some(1));
+        let state = reg.buffers.get(&entity).unwrap();
+        assert_eq!(state.content(), b"hello world");
+        assert_eq!(state.byte_size(), b"hello world".len() as u64);
+        let expected_digest: [u8; 32] = Sha256::digest(b"hello world").into();
+        assert_eq!(state.memory_digest(), &expected_digest);
+    }
+
+    #[test]
+    fn dispatch_buffer_edit_increments_version_only_on_accept() {
+        let (mut reg, entity, _tf) = registry_with_buffer(b"x");
+        let valid = pure_insert(0, 0, "a");
+
+        // Accept: bumps to 1.
+        let _ = dispatch_buffer_edit(&mut reg, entity, 0, std::slice::from_ref(&valid));
+        assert_eq!(reg.versions.get(&entity).copied(), Some(1));
+
+        // Stale (emit=0, current=1): no bump.
+        let _ = dispatch_buffer_edit(&mut reg, entity, 0, std::slice::from_ref(&valid));
+        assert_eq!(reg.versions.get(&entity).copied(), Some(1));
+
+        // Future (emit=99, current=1): no bump.
+        let _ = dispatch_buffer_edit(&mut reg, entity, 99, std::slice::from_ref(&valid));
+        assert_eq!(reg.versions.get(&entity).copied(), Some(1));
+
+        // Validation failure at the correct version: no bump.
+        let bad = pure_insert(0, 99, "boom");
+        let _ = dispatch_buffer_edit(&mut reg, entity, 1, std::slice::from_ref(&bad));
+        assert_eq!(reg.versions.get(&entity).copied(), Some(1));
+    }
+
+    #[test]
+    fn dispatch_buffer_edit_empty_batch_at_correct_version_is_silent_noop() {
+        // Per `contracts/bus-messages.md §Failure modes`, a well-formed
+        // batch with `edits: []` and matching version is a silent
+        // no-op: no fact re-emission, NO version bump. This pins the
+        // dispatch contract — the reader-loop arm consumes EmptyBatch
+        // by emitting `tracing::debug` with `reason="empty-batch"` and
+        // does not publish.
+        let (mut reg, entity, _tf) = registry_with_buffer(b"hello");
+        let outcome = dispatch_buffer_edit(&mut reg, entity, 0, &[]);
+        assert!(
+            matches!(outcome, BufferEditOutcome::EmptyBatch),
+            "expected EmptyBatch, got {outcome:?}",
+        );
+        // Version stays at 0; content untouched.
+        assert_eq!(reg.versions.get(&entity).copied(), Some(0));
+        assert_eq!(reg.buffers.get(&entity).unwrap().content(), b"hello");
     }
 }

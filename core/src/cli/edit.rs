@@ -1,0 +1,751 @@
+//! `weaver edit` and `weaver edit-json` subcommand implementation.
+//!
+//! Both subcommands share a private `prepare_dispatch` helper that
+//! handles bus connect + `buffer/version` inspect-lookup + envelope
+//! construction. The two surfaces differ only in input parsing and
+//! whether they perform a pre-dispatch wire-frame size check.
+//!
+//! See `specs/004-buffer-edit/contracts/cli-surfaces.md`.
+
+use std::io::Read as _;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use miette::{IntoDiagnostic, miette};
+use thiserror::Error;
+use tokio::runtime::Builder;
+use tracing::warn;
+
+use crate::bus::client::{Client, ClientError};
+use crate::bus::codec::MAX_EVENT_INGEST_FRAME;
+use crate::cli::args::OutputFormat;
+use crate::cli::config::Config;
+use crate::cli::errors::{WeaverCliError, render_error};
+use crate::provenance::{ActorIdentity, Provenance};
+use crate::types::buffer_entity::buffer_entity_ref;
+use crate::types::edit::{Position, Range, TextEdit};
+use crate::types::entity_ref::EntityRef;
+use crate::types::event::{Event, EventPayload};
+use crate::types::fact::{FactKey, FactValue};
+use crate::types::ids::EventId;
+use crate::types::message::{BusMessage, InspectionError};
+
+/// Failure modes for [`parse_range`]. Each variant carries the offending
+/// input so the caller can render WEAVER-EDIT-002 with a precise
+/// diagnostic body.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum RangeParseError {
+    /// The string did not match `<sl>:<sc>-<el>:<ec>` shape.
+    #[error("invalid range \"{input}\": expected <start-line>:<start-char>-<end-line>:<end-char>")]
+    Format { input: String },
+    /// One of the four `u32` components failed to parse (overflow,
+    /// non-decimal, or non-numeric).
+    #[error("invalid range \"{input}\": {component} is not a decimal u32 in range [0, 2^32)")]
+    Component { input: String, component: String },
+}
+
+/// Parse a `<sl>:<sc>-<el>:<ec>` range string into a [`Range`].
+///
+/// `sl`/`sc`/`el`/`ec` are decimal `u32` values. The character offsets
+/// are UTF-8 byte offsets within the line's content, per
+/// `contracts/bus-messages.md §Position`.
+///
+/// Examples:
+/// - `"0:0-0:0"` → point cursor at start of buffer.
+/// - `"0:0-0:5"` → first 5 bytes of line 0.
+/// - `"2:10-3:0"` → line 2 byte 10 through end of line 2 (exclusive).
+pub fn parse_range(input: &str) -> Result<Range, RangeParseError> {
+    let (start_str, end_str) = input
+        .split_once('-')
+        .ok_or_else(|| RangeParseError::Format {
+            input: input.to_string(),
+        })?;
+    let start = parse_position(start_str, input, "start")?;
+    let end = parse_position(end_str, input, "end")?;
+    Ok(Range { start, end })
+}
+
+/// Convert a flat `Vec<String>` of `[<RANGE>, <TEXT>, <RANGE>, <TEXT>, ...]`
+/// into a `Vec<TextEdit>`. Validates pair-count parity AND range
+/// shape. Surfaces failures as [`WeaverCliError::InvalidRange`] with
+/// the offending input + detail string for WEAVER-EDIT-002 rendering.
+///
+/// Empty input → empty Vec (the zero-pair "no edits provided" case is
+/// handled higher up in [`handle_edit`] before parsing).
+pub fn parse_pairs(pairs: &[String]) -> Result<Vec<TextEdit>, WeaverCliError> {
+    if pairs.len() % 2 != 0 {
+        return Err(WeaverCliError::InvalidRange {
+            input: pairs.last().cloned().unwrap_or_default(),
+            detail: format!(
+                "expected an even number of <RANGE> <TEXT> arguments, got {}",
+                pairs.len()
+            ),
+            context: Some("weaver edit".into()),
+        });
+    }
+    let mut edits = Vec::with_capacity(pairs.len() / 2);
+    for chunk in pairs.chunks_exact(2) {
+        let range_str = &chunk[0];
+        let new_text = chunk[1].clone();
+        let range = parse_range(range_str).map_err(|e| WeaverCliError::InvalidRange {
+            input: range_str.clone(),
+            detail: e.to_string(),
+            context: Some("weaver edit".into()),
+        })?;
+        edits.push(TextEdit { range, new_text });
+    }
+    Ok(edits)
+}
+
+/// Run `weaver edit <PATH> [<RANGE> <TEXT>]*` end-to-end.
+///
+/// Flow per `specs/004-buffer-edit/contracts/cli-surfaces.md
+/// §weaver edit §Pre-dispatch flow`:
+///
+/// 1. Zero-pair invocation → warn-stderr + exit 0 (FR-014).
+/// 2. Parse pairs into `Vec<TextEdit>`; on failure render
+///    WEAVER-EDIT-002 (exit 1).
+/// 3. Canonicalise path; on failure render parse-error (exit 1).
+/// 4. Derive `entity = buffer_entity_ref(canonical)`.
+/// 5. Connect to bus.
+/// 6. Inspect-lookup `(entity, buffer/version)`:
+///    - `FactNotFound` → render WEAVER-EDIT-001 (exit 1).
+///    - `Found` with `value: FactValue::U64(version)` → use `version`.
+///    - Other shapes → exit 10 (constitutional violation).
+/// 7. Construct `Event { payload: BufferEdit { entity, version, edits } }`
+///    with `Provenance { source: ActorIdentity::User, .. }`.
+/// 8. Pre-serialise envelope with `ciborium::into_writer`; on
+///    `len > MAX_EVENT_INGEST_FRAME` render WEAVER-EDIT-004 (exit 1).
+/// 9. Dispatch via `BusMessage::Event`; close + exit 0
+///    (fire-and-forget per FR-012).
+pub fn handle_edit(
+    path: PathBuf,
+    pairs: Vec<String>,
+    output: OutputFormat,
+    socket_override: Option<PathBuf>,
+) -> miette::Result<()> {
+    // Step 1: zero-pair → warn + exit 0 (FR-014).
+    if pairs.is_empty() {
+        warn!("no edits provided; nothing dispatched");
+        eprintln!("weaver edit: no edits provided; nothing dispatched");
+        return Ok(());
+    }
+
+    // Step 2: parse pairs.
+    let edits = match parse_pairs(&pairs) {
+        Ok(e) => e,
+        Err(err) => {
+            render_error(&err, output)?;
+            std::process::exit(err.exit_code());
+        }
+    };
+
+    // Step 3: canonicalise path.
+    let canonical = match std::fs::canonicalize(&path) {
+        Ok(c) => c,
+        Err(source) => {
+            let err = WeaverCliError::ParseError {
+                message: format!("cannot canonicalise path {}: {source}", path.display()),
+                context: Some(format!("weaver edit {}", path.display())),
+            };
+            render_error(&err, output)?;
+            std::process::exit(err.exit_code());
+        }
+    };
+
+    // Step 4: derive entity.
+    let entity = buffer_entity_ref(&canonical);
+
+    // Steps 5-8: bus interaction. Connect + inspect-lookup +
+    // envelope construction live in `prepare_dispatch`; size-check +
+    // dispatch live in `send_event_with_ingest_check`. Both paths
+    // (positional + JSON) share identical pre-dispatch enforcement of
+    // `MAX_EVENT_INGEST_FRAME` so an `Event` accepted at ingest will
+    // round-trip cleanly through `weaver inspect --why`.
+    let cfg = Config::from_cli(socket_override);
+    let runtime = Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .into_diagnostic()?;
+    runtime.block_on(async move {
+        let (mut client, event) =
+            prepare_dispatch(&canonical, entity, edits, "weaver edit", output, &cfg).await?;
+        send_event_with_ingest_check(&mut client, event, "weaver edit", output).await
+    })
+}
+
+/// Run `weaver edit-json <PATH> --from <PATH-or-dash>` end-to-end.
+///
+/// Flow per `specs/004-buffer-edit/contracts/cli-surfaces.md
+/// §weaver edit-json §Pre-dispatch flow`:
+///
+///   1. Read JSON from `--from` (file path, or stdin when `--from -`).
+///   2. Parse to `Vec<TextEdit>`; on failure render WEAVER-EDIT-003
+///      (exit 1).
+///   3. Canonicalise path; on failure render parse-error (exit 1).
+///   4. Derive `entity = buffer_entity_ref(canonical)`.
+///   5. Reuse `handle_edit`'s connect + inspect + envelope path via
+///      `prepare_dispatch`.
+///   6. Pre-serialise the constructed `BusMessage::Event` envelope
+///      with `ciborium::into_writer`; on `len > MAX_EVENT_INGEST_FRAME`
+///      render WEAVER-EDIT-004 (exit 1).
+///   7. Dispatch + exit 0 (fire-and-forget per FR-012).
+pub fn handle_edit_json(
+    path: PathBuf,
+    from: PathBuf,
+    output: OutputFormat,
+    socket_override: Option<PathBuf>,
+) -> miette::Result<()> {
+    // Step 1: read JSON.
+    let json_bytes = match read_edit_json_source(&from) {
+        Ok(b) => b,
+        Err(detail) => {
+            let err = WeaverCliError::MalformedEditJson {
+                detail,
+                context: Some(format!("weaver edit-json --from {} (read)", from.display())),
+            };
+            render_error(&err, output)?;
+            std::process::exit(err.exit_code());
+        }
+    };
+
+    // Step 2: parse JSON.
+    let edits: Vec<TextEdit> = match serde_json::from_slice(&json_bytes) {
+        Ok(v) => v,
+        Err(parse_err) => {
+            let err = WeaverCliError::MalformedEditJson {
+                detail: parse_err.to_string(),
+                context: Some(format!(
+                    "weaver edit-json --from {} (parse)",
+                    from.display()
+                )),
+            };
+            render_error(&err, output)?;
+            std::process::exit(err.exit_code());
+        }
+    };
+
+    // Step 3: canonicalise path.
+    let canonical = match std::fs::canonicalize(&path) {
+        Ok(c) => c,
+        Err(source) => {
+            let err = WeaverCliError::ParseError {
+                message: format!("cannot canonicalise path {}: {source}", path.display()),
+                context: Some(format!("weaver edit-json {}", path.display())),
+            };
+            render_error(&err, output)?;
+            std::process::exit(err.exit_code());
+        }
+    };
+
+    // Step 4: derive entity.
+    let entity = buffer_entity_ref(&canonical);
+
+    // Steps 5-7: bus interaction with a wire-frame pre-check.
+    let cfg = Config::from_cli(socket_override);
+    let runtime = Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .into_diagnostic()?;
+    runtime.block_on(async move {
+        let (mut client, event) =
+            prepare_dispatch(&canonical, entity, edits, "weaver edit-json", output, &cfg).await?;
+        send_event_with_ingest_check(&mut client, event, "weaver edit-json", output).await
+    })
+}
+
+/// Pre-serialise + size-check + dispatch a `BusMessage::Event` envelope.
+/// Shared between `handle_edit` (positional) and `handle_edit_json`
+/// (JSON) so both paths enforce the same `MAX_EVENT_INGEST_FRAME`
+/// guarantee — an `Event` that ingests cleanly will also fit within
+/// `MAX_FRAME_SIZE` once wrapped as `BusMessage::EventInspectResponse`
+/// during a `weaver inspect --why` walkback. See `bus/codec.rs` for
+/// the headroom rationale.
+///
+/// On overflow, renders WEAVER-EDIT-004 (precise pre-dispatch
+/// diagnostic) and `process::exit`s with the error's exit code rather
+/// than letting the codec produce a generic post-dispatch frame error.
+async fn send_event_with_ingest_check(
+    client: &mut Client,
+    event: Event,
+    context: &str,
+    output: OutputFormat,
+) -> miette::Result<()> {
+    let envelope = BusMessage::Event(event);
+    let mut buf = Vec::new();
+    ciborium::into_writer(&envelope, &mut buf)
+        .map_err(|e| miette!("ciborium serialisation failed: {e}"))?;
+    if buf.len() > MAX_EVENT_INGEST_FRAME {
+        let err = WeaverCliError::EditWireFrameTooLarge {
+            actual_bytes: buf.len(),
+            max_bytes: MAX_EVENT_INGEST_FRAME,
+            context: Some(context.to_string()),
+        };
+        render_error(&err, output)?;
+        std::process::exit(err.exit_code());
+    }
+    client.send(&envelope).await.map_err(|e| miette!("{e}"))?;
+    Ok(())
+}
+
+/// Connect to the bus, run a `buffer/version` inspect-lookup, and
+/// construct an `Event { payload: BufferEdit { .. } }` envelope ready
+/// for dispatch. Shared by `handle_edit` and `handle_edit_json` — the
+/// only branch difference is input parsing (positional pairs vs JSON)
+/// and whether a wire-frame pre-check runs after this returns.
+///
+/// On any expected failure (`CoreUnavailable`, `BufferNotOpened`,
+/// non-`U64` `buffer/version`, missing provenance), this calls
+/// `std::process::exit` with the error's conventional exit code rather
+/// than returning — every caller's response would be identical, and
+/// surfacing them through `Result` would dilute the `miette::Result`
+/// return into a non-fatal-error channel.
+async fn prepare_dispatch(
+    canonical: &Path,
+    entity: EntityRef,
+    edits: Vec<TextEdit>,
+    invocation: &'static str,
+    output: OutputFormat,
+    cfg: &Config,
+) -> miette::Result<(Client, Event)> {
+    let mut client = match Client::connect(&cfg.socket_path, "weaver-edit").await {
+        Ok(c) => c,
+        Err(ClientError::Connect {
+            path: socket_path,
+            source,
+        }) => {
+            let err = WeaverCliError::CoreUnavailable {
+                message: format!("core not reachable at {socket_path}: {source}"),
+                context: Some(invocation.into()),
+            };
+            render_error(&err, output)?;
+            std::process::exit(err.exit_code());
+        }
+        Err(e) => return Err(miette!("{e}")),
+    };
+
+    let key = FactKey::new(entity, "buffer/version");
+    let request_id = next_request_id();
+    client
+        .send(&BusMessage::InspectRequest {
+            request_id,
+            fact: key.clone(),
+        })
+        .await
+        .map_err(|e| miette!("{e}"))?;
+    let response = loop {
+        match client.recv().await.map_err(|e| miette!("{e}"))? {
+            BusMessage::InspectResponse {
+                request_id: rid,
+                result,
+            } if rid == request_id => break result,
+            // Defensive: drop spurious frames from a non-subscribed
+            // connection. Should not happen on this code path.
+            _ => continue,
+        }
+    };
+    let version = match response {
+        Err(InspectionError::FactNotFound) => {
+            let err = WeaverCliError::BufferNotOpened {
+                path: canonical.display().to_string(),
+                entity: entity.as_u64(),
+                context: Some(format!("{invocation} {}", canonical.display())),
+            };
+            render_error(&err, output)?;
+            std::process::exit(err.exit_code());
+        }
+        Err(InspectionError::NoProvenance) => {
+            let err = WeaverCliError::ProtocolError {
+                message: format!(
+                    "buffer/version exists for entity {} but has no provenance",
+                    entity.as_u64()
+                ),
+                context: Some(format!("{invocation} inspect-lookup")),
+            };
+            render_error(&err, output)?;
+            std::process::exit(10);
+        }
+        Ok(detail) => match detail.value {
+            FactValue::U64(v) => v,
+            other => {
+                let err = WeaverCliError::ProtocolError {
+                    message: format!(
+                        "buffer/version (entity {}) expected U64 but got {other:?}",
+                        entity.as_u64()
+                    ),
+                    context: Some(format!("{invocation} inspect-lookup")),
+                };
+                render_error(&err, output)?;
+                std::process::exit(10);
+            }
+        },
+    };
+
+    // Provenance carries ActorIdentity::User per research §6 — first
+    // production use of the variant reserved at slice 002. EventId
+    // is synthesised from wall-clock ns; uniqueness within a single
+    // CLI invocation suffices (the trace dedupes via stable ordering).
+    let now = now_ns();
+    let provenance = Provenance::new(ActorIdentity::User, now, None)
+        .expect("ActorIdentity::User has no fields to validate");
+    let event = Event {
+        id: EventId::new(now),
+        name: "buffer/edit".into(),
+        target: Some(entity),
+        payload: EventPayload::BufferEdit {
+            entity,
+            version,
+            edits,
+        },
+        provenance,
+    };
+
+    Ok((client, event))
+}
+
+/// Read the JSON source for `weaver edit-json --from`. Returns the raw
+/// bytes; the caller parses them into `Vec<TextEdit>`. Returns an
+/// `Err(detail)` string on read failure that the caller wraps in
+/// `WeaverCliError::MalformedEditJson`.
+fn read_edit_json_source(from: &Path) -> Result<Vec<u8>, String> {
+    if from == Path::new("-") {
+        let mut buf = Vec::new();
+        std::io::stdin()
+            .lock()
+            .read_to_end(&mut buf)
+            .map_err(|e| format!("read stdin: {e}"))?;
+        Ok(buf)
+    } else {
+        std::fs::read(from).map_err(|e| format!("read {}: {e}", from.display()))
+    }
+}
+
+/// Monotonic per-process inspect request-id counter. One
+/// `weaver edit` invocation issues exactly one InspectRequest, but the
+/// counter is process-scoped to keep the shape consistent with
+/// `cli::inspect::next_request_id`.
+fn next_request_id() -> u64 {
+    static COUNTER: AtomicU64 = AtomicU64::new(1);
+    COUNTER.fetch_add(1, Ordering::Relaxed)
+}
+
+fn now_ns() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| u64::try_from(d.as_nanos()).unwrap_or(u64::MAX))
+        .unwrap_or(0)
+}
+
+fn parse_position(
+    pos_str: &str,
+    full_input: &str,
+    side: &'static str,
+) -> Result<Position, RangeParseError> {
+    let (line_str, char_str) = pos_str
+        .split_once(':')
+        .ok_or_else(|| RangeParseError::Format {
+            input: full_input.to_string(),
+        })?;
+    let line = line_str
+        .parse::<u32>()
+        .map_err(|_| RangeParseError::Component {
+            input: full_input.to_string(),
+            component: format!("{side}-line \"{line_str}\""),
+        })?;
+    let character = char_str
+        .parse::<u32>()
+        .map_err(|_| RangeParseError::Component {
+            input: full_input.to_string(),
+            component: format!("{side}-character \"{char_str}\""),
+        })?;
+    Ok(Position { line, character })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn pos(line: u32, character: u32) -> Position {
+        Position { line, character }
+    }
+
+    fn rng(start: Position, end: Position) -> Range {
+        Range { start, end }
+    }
+
+    #[test]
+    fn parses_zero_zero_zero_zero_point_cursor() {
+        assert_eq!(parse_range("0:0-0:0").unwrap(), rng(pos(0, 0), pos(0, 0)));
+    }
+
+    #[test]
+    fn parses_first_five_bytes_of_line_zero() {
+        assert_eq!(parse_range("0:0-0:5").unwrap(), rng(pos(0, 0), pos(0, 5)));
+    }
+
+    #[test]
+    fn parses_multi_line_range() {
+        assert_eq!(parse_range("2:10-3:0").unwrap(), rng(pos(2, 10), pos(3, 0)));
+    }
+
+    #[test]
+    fn parses_max_u32_components() {
+        let max = u32::MAX;
+        let s = format!("{max}:{max}-{max}:{max}");
+        assert_eq!(parse_range(&s).unwrap(), rng(pos(max, max), pos(max, max)));
+    }
+
+    #[test]
+    fn rejects_missing_dash() {
+        let err = parse_range("0:0").unwrap_err();
+        assert!(matches!(err, RangeParseError::Format { .. }));
+    }
+
+    #[test]
+    fn rejects_missing_colon_in_start() {
+        let err = parse_range("0-0:5").unwrap_err();
+        assert!(matches!(err, RangeParseError::Format { .. }));
+    }
+
+    #[test]
+    fn rejects_missing_colon_in_end() {
+        let err = parse_range("0:0-5").unwrap_err();
+        assert!(matches!(err, RangeParseError::Format { .. }));
+    }
+
+    #[test]
+    fn rejects_negative_components() {
+        // u32 parse rejects leading `-`. The split on `-` happens first,
+        // so `"0:0--1:5"` → start=`"0:0"`, end=`"-1:5"` → end-line `-1`
+        // fails u32 parse and surfaces as a Component error.
+        match parse_range("0:0--1:5").unwrap_err() {
+            RangeParseError::Component { component, .. } => {
+                assert!(component.contains("end-line"), "got: {component}");
+            }
+            other => panic!("expected Component, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rejects_non_decimal_components() {
+        let err = parse_range("0xff:0-0:0").unwrap_err();
+        assert!(matches!(err, RangeParseError::Component { .. }));
+    }
+
+    #[test]
+    fn rejects_overflow_beyond_u32_max() {
+        // u32::MAX + 1 = 4294967296.
+        let err = parse_range("4294967296:0-0:0").unwrap_err();
+        assert!(matches!(err, RangeParseError::Component { .. }));
+    }
+
+    #[test]
+    fn rejects_empty_string() {
+        let err = parse_range("").unwrap_err();
+        assert!(matches!(err, RangeParseError::Format { .. }));
+    }
+
+    #[test]
+    fn rejects_spurious_extra_characters_in_end_component() {
+        // split_once('-') gives start="0:0", end="0:5-extra"; the end
+        // half then split on ':' gives line="0", character="5-extra"
+        // → character parse fails on the trailing "-extra".
+        let err = parse_range("0:0-0:5-extra").unwrap_err();
+        assert!(matches!(err, RangeParseError::Component { .. }));
+    }
+
+    // ───────────────────────────────────────────────────────────────────
+    // T013: parse_pairs handler-helper tests. The full handle_edit
+    // dispatch path (canonicalise → connect → inspect → dispatch) is
+    // covered by tests/e2e/buffer_edit_single.rs since it requires a
+    // running core + buffer-service; here we cover the pure-logic
+    // parsing seam in isolation.
+    // ───────────────────────────────────────────────────────────────────
+
+    fn s(v: &str) -> String {
+        v.to_string()
+    }
+
+    #[test]
+    fn parse_pairs_empty_returns_empty() {
+        let out = parse_pairs(&[]).expect("empty input is Ok");
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn parse_pairs_single_valid_pair() {
+        let out = parse_pairs(&[s("0:0-0:0"), s("hello ")]).expect("ok");
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].new_text, "hello ");
+        assert_eq!(out[0].range.start, pos(0, 0));
+        assert_eq!(out[0].range.end, pos(0, 0));
+    }
+
+    #[test]
+    fn parse_pairs_three_valid_pairs() {
+        let out = parse_pairs(&[
+            s("0:0-0:0"),
+            s("A"),
+            s("1:0-1:0"),
+            s("B"),
+            s("2:0-2:0"),
+            s("C"),
+        ])
+        .expect("ok");
+        assert_eq!(out.len(), 3);
+        assert_eq!(out[0].new_text, "A");
+        assert_eq!(out[1].new_text, "B");
+        assert_eq!(out[2].new_text, "C");
+    }
+
+    #[test]
+    fn parse_pairs_odd_count_rejects_with_invalid_range() {
+        let err = parse_pairs(&[s("0:0-0:0"), s("A"), s("1:0-1:0")]).expect_err("odd count");
+        match err {
+            WeaverCliError::InvalidRange { detail, .. } => {
+                assert!(detail.contains("even number"), "got: {detail}");
+            }
+            other => panic!("expected InvalidRange, got {other:?}"),
+        }
+    }
+
+    // ───────────────────────────────────────────────────────────────────
+    // T020: edit-json input-handling seams. The full
+    // handle_edit_json dispatch path is exercised by tests/e2e/
+    // buffer_edit_emitter_parity.rs (T022) and the slice's other e2e
+    // tests; here we cover the pure-logic input parse/read.
+    // ───────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn vec_text_edit_round_trips_kebab_case_json() {
+        // Pin the CLI's serde shape: JSON `new-text` ↔ Rust `new_text`.
+        // A regression in `#[serde(rename_all = "kebab-case")]` would
+        // surface here as a parse error on the CLI's edit-json input.
+        let json = r#"[
+            {"range":{"start":{"line":0,"character":0},"end":{"line":0,"character":0}},"new-text":"hello "},
+            {"range":{"start":{"line":2,"character":3},"end":{"line":2,"character":7}},"new-text":""}
+        ]"#;
+        let edits: Vec<TextEdit> = serde_json::from_str(json).expect("kebab-case parse");
+        assert_eq!(edits.len(), 2);
+        assert_eq!(edits[0].new_text, "hello ");
+        assert_eq!(edits[1].new_text, "");
+        assert_eq!(edits[1].range.start.line, 2);
+    }
+
+    #[test]
+    fn vec_text_edit_rejects_snake_case_new_text_field() {
+        // The wire shape is kebab-case; `new_text` (snake_case) on the
+        // wire must NOT round-trip as a TextEdit. This guards against
+        // a future serde derive change that loosens the rename to
+        // "new_text"-also-accepted, which would silently drift the wire.
+        let json = r#"[{"range":{"start":{"line":0,"character":0},"end":{"line":0,"character":0}},"new_text":"x"}]"#;
+        assert!(serde_json::from_str::<Vec<TextEdit>>(json).is_err());
+    }
+
+    #[test]
+    fn read_edit_json_source_from_named_file_happy() {
+        // tempfile is not a core dev-dep; use a process-pid+wall-clock
+        // unique filename in std::env::temp_dir() instead. Best-effort
+        // cleanup via remove_file at the end.
+        let pid = std::process::id();
+        let tick = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let path = std::env::temp_dir().join(format!("weaver-edit-json-test-{pid}-{tick}.json"));
+        std::fs::write(&path, br#"[{"range":{"start":{"line":0,"character":0},"end":{"line":0,"character":0}},"new-text":"hi"}]"#).expect("write fixture");
+        let bytes = read_edit_json_source(&path).expect("read named file");
+        let edits: Vec<TextEdit> = serde_json::from_slice(&bytes).expect("parse");
+        assert_eq!(edits.len(), 1);
+        assert_eq!(edits[0].new_text, "hi");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn read_edit_json_source_from_missing_file_returns_err() {
+        let missing = PathBuf::from("/definitely/not/a/real/path/edit-source.json");
+        let err = read_edit_json_source(&missing).expect_err("missing path must fail");
+        assert!(
+            err.contains("/definitely/not/a/real/path/edit-source.json"),
+            "err must mention the offending path, got: {err}",
+        );
+    }
+
+    #[test]
+    fn parse_pairs_bad_range_in_middle_rejects() {
+        let err = parse_pairs(&[
+            s("0:0-0:0"),
+            s("A"),
+            s("not-a-range"),
+            s("B"),
+            s("2:0-2:0"),
+            s("C"),
+        ])
+        .expect_err("bad range");
+        match err {
+            WeaverCliError::InvalidRange { input, .. } => {
+                assert_eq!(input, "not-a-range");
+            }
+            other => panic!("expected InvalidRange, got {other:?}"),
+        }
+    }
+
+    /// Regression for the `weaver edit` (positional) ingest-frame
+    /// asymmetry surfaced by Codex on PR #11: pre-fix, only
+    /// `handle_edit_json` size-checked; `handle_edit` could accept a
+    /// large positional `<TEXT>` whose `BusMessage::Event` envelope sat
+    /// in `(MAX_EVENT_INGEST_FRAME, MAX_FRAME_SIZE]` and broke later
+    /// `weaver inspect --why` walkbacks. Both handlers now share
+    /// `send_event_with_ingest_check`; this test verifies the predicate
+    /// the helper applies — an event with an oversized `<TEXT>` argument
+    /// serialises past the ingest limit, so the helper's `>
+    /// MAX_EVENT_INGEST_FRAME` branch fires and produces WEAVER-EDIT-004.
+    #[test]
+    fn oversized_positional_text_trips_ingest_frame_check() {
+        use crate::provenance::{ActorIdentity, Provenance};
+        use crate::types::entity_ref::EntityRef;
+        use crate::types::event::{Event, EventPayload};
+        use crate::types::ids::EventId;
+
+        // Build a single-edit batch whose `new_text` is large enough to
+        // exceed MAX_EVENT_INGEST_FRAME. The CBOR encoding of a String is
+        // a small header + the bytes themselves, so a `new_text` of
+        // (MAX_EVENT_INGEST_FRAME + 1024) bytes will reliably overshoot
+        // even after subtracting wrapper overhead.
+        let new_text = "x".repeat(MAX_EVENT_INGEST_FRAME + 1024);
+        let event = Event {
+            id: EventId::new(0),
+            name: "buffer/edit".into(),
+            target: Some(EntityRef::new(1)),
+            payload: EventPayload::BufferEdit {
+                entity: EntityRef::new(1),
+                version: 0,
+                edits: vec![TextEdit {
+                    range: Range {
+                        start: Position {
+                            line: 0,
+                            character: 0,
+                        },
+                        end: Position {
+                            line: 0,
+                            character: 0,
+                        },
+                    },
+                    new_text,
+                }],
+            },
+            provenance: Provenance::new(ActorIdentity::User, 0, None).unwrap(),
+        };
+
+        let envelope = BusMessage::Event(event);
+        let mut buf = Vec::new();
+        ciborium::into_writer(&envelope, &mut buf).expect("ciborium serialises");
+        assert!(
+            buf.len() > MAX_EVENT_INGEST_FRAME,
+            "fixture must overshoot the ingest limit: {} <= {}",
+            buf.len(),
+            MAX_EVENT_INGEST_FRAME,
+        );
+    }
+}

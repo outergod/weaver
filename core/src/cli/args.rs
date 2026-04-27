@@ -56,6 +56,47 @@ pub enum Command {
         /// Fact key in `<entity-id>:<attribute>` format
         /// (e.g., `1:buffer/dirty`).
         fact_key: String,
+        /// Walk from the fact back to its source event and render the
+        /// emitter's `ActorIdentity`. See
+        /// `specs/004-buffer-edit/contracts/cli-surfaces.md
+        /// §weaver inspect --why`.
+        #[arg(long)]
+        why: bool,
+    },
+
+    /// Dispatch a batch of text edits to an opened buffer.
+    ///
+    /// Fire-and-forget: exits 0 on successful dispatch and does NOT
+    /// wait for the service to apply. See
+    /// `specs/004-buffer-edit/contracts/cli-surfaces.md`.
+    Edit {
+        /// File path identifying the buffer.
+        path: PathBuf,
+        /// Variadic positional pairs: each pair is `<RANGE> <TEXT>`.
+        /// `<RANGE>` is `<sl>:<sc>-<el>:<ec>` (decimal `u32`
+        /// components; UTF-8 byte offsets within the line). `<TEXT>`
+        /// is the replacement string (`""` to delete-only). The list
+        /// MUST have an even number of elements; an odd count is
+        /// rejected at the handler with WEAVER-EDIT-002.
+        #[arg(num_args = 0..)]
+        pairs: Vec<String>,
+    },
+
+    /// Dispatch a JSON-encoded `Vec<TextEdit>` to an opened buffer.
+    ///
+    /// Identical semantics to `weaver edit` but reads the batch from
+    /// stdin or a file. Fire-and-forget; same atomic-batch and
+    /// fire-and-forget exit conventions. See
+    /// `specs/004-buffer-edit/contracts/cli-surfaces.md
+    /// §weaver edit-json`.
+    EditJson {
+        /// File path identifying the buffer.
+        path: PathBuf,
+        /// Source for the JSON `Vec<TextEdit>`. Pass `-` for stdin or
+        /// a filesystem path. The flag is REQUIRED; there is no
+        /// implicit-stdin default per the contract.
+        #[arg(long)]
+        from: PathBuf,
     },
 }
 
@@ -103,5 +144,94 @@ mod tests {
     fn version_flag_recognized() {
         let cli = Cli::try_parse_from(["weaver", "--version"]).unwrap();
         assert!(cli.version);
+    }
+
+    #[test]
+    fn parses_edit_subcommand_with_no_pairs() {
+        let cli = Cli::try_parse_from(["weaver", "edit", "/tmp/foo.txt"]).unwrap();
+        match cli.command {
+            Some(Command::Edit { path, pairs }) => {
+                assert_eq!(path, PathBuf::from("/tmp/foo.txt"));
+                assert!(pairs.is_empty());
+            }
+            other => panic!("expected Command::Edit, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_edit_subcommand_with_one_pair() {
+        let cli =
+            Cli::try_parse_from(["weaver", "edit", "/tmp/foo.txt", "0:0-0:0", "hello "]).unwrap();
+        match cli.command {
+            Some(Command::Edit { path, pairs }) => {
+                assert_eq!(path, PathBuf::from("/tmp/foo.txt"));
+                assert_eq!(pairs, vec!["0:0-0:0".to_string(), "hello ".to_string()]);
+            }
+            other => panic!("expected Command::Edit, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_edit_json_subcommand_with_named_file() {
+        let cli = Cli::try_parse_from([
+            "weaver",
+            "edit-json",
+            "/tmp/foo.txt",
+            "--from",
+            "/tmp/edits.json",
+        ])
+        .unwrap();
+        match cli.command {
+            Some(Command::EditJson { path, from }) => {
+                assert_eq!(path, PathBuf::from("/tmp/foo.txt"));
+                assert_eq!(from, PathBuf::from("/tmp/edits.json"));
+            }
+            other => panic!("expected Command::EditJson, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_edit_json_subcommand_with_stdin_dash() {
+        let cli =
+            Cli::try_parse_from(["weaver", "edit-json", "/tmp/foo.txt", "--from", "-"]).unwrap();
+        match cli.command {
+            Some(Command::EditJson { from, .. }) => {
+                assert_eq!(from, PathBuf::from("-"));
+            }
+            other => panic!("expected Command::EditJson, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rejects_edit_json_without_from_flag() {
+        let err = Cli::try_parse_from(["weaver", "edit-json", "/tmp/foo.txt"])
+            .expect_err("missing --from");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("--from"),
+            "expected --from in error message, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn parses_edit_subcommand_with_three_pairs() {
+        let cli = Cli::try_parse_from([
+            "weaver",
+            "edit",
+            "/tmp/foo.txt",
+            "0:0-0:0",
+            "A",
+            "1:0-1:0",
+            "B",
+            "2:0-2:0",
+            "C",
+        ])
+        .unwrap();
+        match cli.command {
+            Some(Command::Edit { pairs, .. }) => {
+                assert_eq!(pairs.len(), 6);
+            }
+            other => panic!("expected Command::Edit, got {other:?}"),
+        }
     }
 }

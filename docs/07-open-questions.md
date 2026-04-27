@@ -333,3 +333,119 @@ Slice 002 (`specs/002-git-watcher-actor/`, Clarification Q4) adopts the stopgap:
 **Current lean:** **(b) — components.** §2.4 already commits to the fact/component distinction; slice 002 is an acknowledged stopgap, not a rejection. Deferred until at least one revisit trigger fires.
 
 First concrete instance: `specs/002-git-watcher-actor/` Clarification Q4 (`repo/state/*`).
+
+---
+
+## 27. Bounded Subscriber Queues + Active Pruning — IMPLEMENTATION GAP
+
+§22 resolves the back-pressure *contract* at the architectural level (lossy → drop-oldest, authoritative → block-with-timeout, never block-forever, no policy admits unbounded memory growth). But the MVP implementation does not yet bound either subscriber path:
+
+- `core/src/fact_space/in_memory.rs::InMemoryFactStore` — authoritative class, uses `tokio::sync::mpsc::unbounded_channel` per subscriber (since slice 001).
+- `core/src/bus/event_subscriptions.rs::EventSubscriptions` — lossy class, mirrors the same pattern (since slice 004; module doc explicitly deferred).
+- `buffers/src/publisher.rs::reader_loop` — 32-slot bounded reader→main bridge for `BusMessage::Event` frames, drains via `try_send` (silent drop on full). Different shape from the registry-style subscribers above (no pattern, single consumer), but same deferral category: bounded-with-drop-oldest semantics not yet implemented; current channel-full drop is indistinguishable from a service-level stale-version drop at the producer's `weaver edit` exit-code surface.
+
+A second implementation gap rides along: both registries prune closed channels lazily — only when a *matching* event fires does `retain` notice a dropped receiver. A subscriber whose pattern never matches again (replaced by a `last-wins` re-subscribe, or a connection that disconnected) leaks until its channel is sent to. The leak is bounded by subscribe/disconnect *rate*, not by event volume — practically far from OOM-class even under churn — but it violates the documented lifecycle: "drop the handle ⇒ next broadcast prunes it" assumes any broadcast prunes every closed subscriber.
+
+**Concerns**:
+
+- A high-rate publisher with a slow subscriber grows core memory (Vec inside the channel) until the subscriber catches up. No drop-oldest enforcement at the channel level.
+- A high-churn `SubscribeEvents` client (e.g., one that re-subscribes with a new pattern every event) accumulates dead `Vec` entries until something matches the abandoned pattern.
+
+**Why deferred from slice 004**: bounding the event subscriber alone leaves the authoritative fact-subscriber (where the bound matters more, per architecture §3.1 — block-with-timeout requires a bound to time out *against*) inconsistent. Both paths must move in lockstep, and the design call is non-trivial:
+
+- queue size — fixed default + per-subscription override, or class-default only?
+- lossy drop-oldest implementation — `tokio::sync::mpsc` doesn't drop oldest; either a custom channel (`broadcast::channel` has its own semantics) or a wrapper that explicitly drops on `try_send` failure.
+- authoritative block-with-timeout — what timeout, and what does the publisher do when it fires? Drop the message and emit an error fact? Disconnect the slow subscriber?
+- active pruning — sweep-on-subscribe, periodic timer, or a notification path from the listener (drop ⇒ notify registry)?
+
+**Candidate triggers to revisit**:
+
+1. A subscriber slowness incident causes observable core RSS growth in operator runs.
+2. A new lossy publisher class appears (stream-item per architecture §3.1) — adds a third subscriber path and forces the design.
+3. Distribution work begins (§22 cross-network back-pressure becomes concrete) and bounds become wire-observable.
+
+**Current lean**: open a dedicated infrastructure slice when any trigger fires. Until then, both paths share the deferral note via this section reference (`event_subscriptions.rs` module doc + `in_memory.rs::broadcast` pointer).
+
+First concrete pointers: `core/src/bus/event_subscriptions.rs:22` (module doc + `broadcast` fn), `core/src/fact_space/in_memory.rs::InMemoryFactStore::broadcast`, `buffers/src/publisher.rs::reader_loop` (BufferEdit `try_send` block). Originally surfaced by Codex review on PR #11 (slice 004).
+
+---
+
+## 28. EventId Allocation + Trace Indexing Semantics — LATENT CORRECTNESS GAP
+
+`EventId` (`core/src/types/ids.rs:6-14`) is a `u64` documented as "Monotonic per producer; unique for the lifetime of a bus connection" — explicitly NOT globally unique. Production minting in slices 001–004 is from wall-clock nanoseconds at multiple independent producers:
+
+- `core/src/cli/edit.rs:380` (`weaver edit`): `EventId::new(now_ns())`
+- `buffers/src/publisher.rs:504,898` (`weaver-buffers` poll ticks + bootstrap): `EventId::new(now_ns())`, `EventId::new(now_ns().wrapping_add(idx))`
+- `git-watcher/src/publisher.rs:322` (`weaver-git-watcher` poll ticks): `EventId::new(now_ns())`
+
+`TraceStore::by_event` (`core/src/trace/store.rs:21,63`) is a single `HashMap<EventId, TraceSequence>` with `insert` overwriting on collision. `find_event` returns the last sequence inserted at that ID. The dispatcher (`process_event` at `core/src/behavior/dispatcher.rs:227`) does NOT re-stamp the EventId — the producer-supplied ID is what gets indexed.
+
+**Concern** (newly user-visible in slice 004 via `weaver inspect --why`):
+
+If two producers mint the same `EventId(N)` (sub-nanosecond clock collision; tickless kernel; VM clock skew), the trace's by-event index points only at the *latest* event. A fact whose `source_event = EventId(N)` walks back via `weaver inspect --why` to the WRONG event — wrong producer, wrong provenance, wrong attribution. The walkback succeeds with bogus data rather than failing visibly.
+
+The defect is latent since slice 001 (the index has been last-writer-wins from the start) but slice 004's `weaver inspect --why` is the first wire-level consumer of `find_event` from the bus surface — collision is now operator-observable instead of a code-internal concern.
+
+**Closed in slice 004 (deterministic-collision instances)**:
+
+- *Bootstrap-index reuse*: `weaver-buffers` formerly minted `bootstrap_tick = EventId::new(idx as u64)` for each opened path, so every instance reused 0, 1, 2, … and later instances overwrote earlier mappings in `by_event`. Fixed: `EventId::new(now_ns().wrapping_add(idx as u64))` — wall-clock base + per-iteration offset for within-loop uniqueness.
+- *`EventId::ZERO`-sentinel collision*: the inspect-handler uses `EventId::ZERO` as a sentinel for "fact has no causal_parent" (`core/src/inspect/handler.rs:140`). When a real event was minted at id 0 (bootstrap-index 0 hit this), `weaver inspect --why` for a fact with no source event walked back to that real event instead of producing a clean miss. Fixed at two layers (defence-in-depth):
+  - **Producer-side ingest rejection**: `core/src/bus/listener.rs::validate_event_envelope` rejects any incoming `BusMessage::Event` carrying `EventId::ZERO` with an `invalid-event-envelope` error frame. Closes the producer side — non-CLI clients can't silently lose provenance.
+  - **Consumer-side lookup short-circuit**: `core/src/bus/listener.rs::lookup_event_for_inspect` short-circuits ZERO walkback requests to `EventNotFound` regardless of trace contents. Belt-and-braces — covers any pre-fix events that may already sit at id 0 in a long-running deployment's trace.
+  Regression tests in `event_inspect_lookup_tests` and `event_envelope_validation_tests`.
+
+**Why no slim fix in slice 004 for the cross-producer wall-clock-ns case**:
+
+- Changing `source_event: EventId` to `TraceSequence` (which IS globally unique) is a wire-format change to `InspectionDetail` — bus protocol bump.
+- Changing producers to use a per-process atomic counter still leaves cross-process collision (the bus protocol allows any producer to mint any `EventId`).
+- Core-side re-stamping breaks `causal_parent` linkage if any caller already references the producer's `EventId` (e.g., `weaver-buffers` re-emission triple shares the BufferEdit's EventId as `causal_parent`).
+- A `MultiMap<EventId, TraceSequence>` doesn't help: the call site has no extra discriminator to disambiguate.
+
+**Candidate resolutions** (one slice, not piecemeal):
+
+- (a) **Core-assigned globally unique EventIds.** Producers send events with a placeholder ID; core stamps a monotonic per-trace EventId on `process_event`. Wire-incompatible — all producers must adopt the placeholder convention. `causal_parent` chains rely on the core-assigned ID being available on the response side (or via subscribe-events fan-out).
+- (b) **`source_event` carries `TraceSequence` instead of `EventId` on the wire.** Wire-incompat for `InspectionDetail`; `find_event(seq)` becomes a direct array lookup, no index needed. Cleanest semantically.
+- (c) **Composite ID (`producer_instance, EventId`).** Producers stamp their `(ActorIdentity, EventId)` tuple as the trace key. Wire-incompat; relies on `ActorIdentity::Service` carrying instance UUID, but `ActorIdentity::User` is a unit variant in slice 004 — would need expansion. Adds one CBOR field per index entry.
+
+**Revisit triggers**:
+
+1. An operator reports a confused `weaver inspect --why` walkback (a fact's source-event resolves to a different producer's event in the field).
+2. A future slice exercises `causal_parent` chaining across more than one producer simultaneously (e.g., agent + user concurrent edits) — the collision rate scales with concurrent producer count.
+3. The bus protocol bumps for any other reason (slice 005 disk-save? slice 006 agent?) — fold the EventId/TraceSequence change in to amortise the wire-impact cost.
+
+**Current lean**: defer to a dedicated soundness slice that fixes EventId allocation + trace indexing in one wire bump. Until then, the call sites carry a pointer here so reviewers landing at the lookup code can skip over the finding.
+
+First concrete pointers: `core/src/types/ids.rs::EventId` (type-level docstring), `core/src/trace/store.rs::TraceStore::find_event` + `update_indexes` (insert site), `core/src/bus/listener.rs::handle_message` `EventInspectRequest` arm. Originally surfaced by Codex review on PR #11 (slice 004).
+
+---
+
+## 29. EventInspectResponse Frame Headroom Asymmetry — FORWARD-COMPAT GAP
+
+Slice 004's `weaver edit` / `weaver edit-json` enforce `MAX_EVENT_INGEST_FRAME` (= `MAX_FRAME_SIZE` − `RESPONSE_WRAPPER_HEADROOM` = 65 280 bytes) at the emitter boundary so an `Event` accepted at ingest will round-trip cleanly through `weaver inspect --why`'s `BusMessage::EventInspectResponse` wrapper. The bus protocol itself, however, does NOT enforce this limit — the codec accepts any `BusMessage::Event` frame up to `MAX_FRAME_SIZE` (65 536 bytes), so a *non-CLI* producer that sends a `BufferEdit` event sized in `(MAX_EVENT_INGEST_FRAME, MAX_FRAME_SIZE]` lands cleanly in the trace.
+
+When `weaver inspect --why` then walks back, the listener's `lookup_event_for_inspect` returns the full `Event` envelope; the wrapper push to `BusMessage::EventInspectResponse { request_id, result: Ok(event) }` makes `write_message` hit `CodecError::FrameTooLarge` and drop the inspect connection. The caller sees a transport failure rather than a structured `EventInspectionError`.
+
+**Realistic exposure today**: zero. Production producers are CLI emitters (now enforce), `weaver-buffers` (only emits `BufferOpen` — tiny path string), and `weaver-git-watcher` (small events). No current code path can mint a near-frame-size event from a non-CLI client.
+
+**Why deferred from slice 004**:
+
+- Adding `EventInspectionError::EventTooLarge` is the cleanest fix (graceful structured error) but is a wire-shape change to the response enum mid-slice. Slice 004 is shipping at protocol 0x04 with the current variant set; an additive variant is borderline scope creep when no current producer triggers it.
+- Listener-side ingest enforcement (rejecting oversized `BusMessage::Event` frames at receive) requires either an API change to `read_message` (18 callers across crates) or a per-event re-serialise on the hot path. Both feel disproportionate to the realistic exposure.
+- The CLI's emitter-side `MAX_EVENT_INGEST_FRAME` check IS the practical mitigation today.
+
+**Candidate resolutions** (when a non-CLI event producer that can hit the size range is added — slice 006 agent is the most likely first trigger):
+
+- (a) **Add `EventInspectionError::EventTooLarge` variant + listener detection.** Pre-serialise the response inside `lookup_event_for_inspect`; on overflow, return `Err(EventTooLarge)`. Wire-incompat for clients that don't tolerate unknown error variants — fold the bump into a future slice that's already touching wire shape.
+- (b) **Listener-side ingest enforcement.** Plumb the original frame size from `codec::read_message` through to the listener, reject `BusMessage::Event` frames > `MAX_EVENT_INGEST_FRAME` at receive with a `BusMessage::Error { category: "event-too-large", .. }`. Symmetric contract: anything that ingests can be re-inspected.
+- (c) **Both.** Belt-and-braces: producers can't get oversized events through the wire, AND the listener gracefully degrades on residual edge cases.
+
+**Revisit triggers**:
+
+1. A non-CLI client (agent service, custom test harness, future plugin) emits a near-frame-size event and the operator hits a transport-drop on `weaver inspect --why`.
+2. The bus protocol bumps for any other reason — fold the variant addition in to amortise the wire-impact cost.
+3. A future producer legitimately needs frames > 64 KiB — re-evaluate `MAX_FRAME_SIZE` itself + the response-wrapper headroom together.
+
+**Current lean**: defer to either the next bus-protocol bump (option a folded in) OR the first non-CLI BufferEdit producer slice (whichever lands first). The CLI emitter check covers all current paths; this section pins the asymmetry so a future producer author + reviewer don't have to re-derive it.
+
+First concrete pointers: `core/src/cli/edit.rs::send_event_with_ingest_check` (emitter-side enforcement), `core/src/bus/listener.rs::lookup_event_for_inspect` (response-side wrap, currently unguarded), `core/src/bus/codec.rs::MAX_EVENT_INGEST_FRAME` + `RESPONSE_WRAPPER_HEADROOM`. Originally surfaced by Codex review on PR #11 (slice 004).
+

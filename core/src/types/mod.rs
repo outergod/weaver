@@ -4,6 +4,8 @@
 //! the bus. Storage, transport, and rendering are built around these
 //! shapes; changing a type here is a public-surface change per L2 P7.
 
+pub mod buffer_entity;
+pub mod edit;
 pub mod entity_ref;
 pub mod event;
 pub mod fact;

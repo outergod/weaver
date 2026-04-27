@@ -74,6 +74,7 @@ pub fn inspect_fact(
                 asserting_behavior,
                 entry.timestamp_ns,
                 trace_sequence.as_u64(),
+                fact.value.clone(),
             ))
         }
         ActorIdentity::Service {
@@ -88,6 +89,7 @@ pub fn inspect_fact(
                 *instance_id,
                 asserted_at_ns,
                 trace_sequence.as_u64(),
+                fact.value.clone(),
             ))
         }
         // Core / Tui / User / Host / Agent: the actor kind is the
@@ -105,6 +107,7 @@ pub fn inspect_fact(
                 source_event,
                 asserted_at_ns,
                 trace_sequence.as_u64(),
+                fact.value.clone(),
             ))
         }
     }

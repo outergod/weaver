@@ -15,8 +15,9 @@ use crate::bus::client::{Client, ClientError};
 use crate::cli::args::OutputFormat;
 use crate::cli::config::Config;
 use crate::types::entity_ref::EntityRef;
-use crate::types::fact::FactKey;
-use crate::types::message::{BusMessage, InspectionDetail, InspectionError};
+use crate::types::event::Event;
+use crate::types::fact::{FactKey, FactValue};
+use crate::types::message::{BusMessage, EventInspectionError, InspectionDetail, InspectionError};
 
 /// Exit code for `weaver inspect` when the core is unreachable.
 /// Distinct from `cli::errors::exit_code::EXPECTED` (=2, used for
@@ -39,15 +40,15 @@ pub enum InspectCliError {
     },
 }
 
-/// JSON shape of a successful `weaver inspect` response. Fields mirror
-/// `specs/002-git-watcher-actor/contracts/cli-surfaces.md`:
-/// `asserting_behavior` for behavior-authored facts (slice 001);
-/// `asserting_service` + `asserting_instance` for service-authored
-/// facts (slice 002). At most one of those field groups is populated
-/// per response.
+/// Provenance + value fields for a fact inspection. Shared between the
+/// no-`--why` `FoundJson` shape (where they're flattened alongside a
+/// top-level `fact` key) and the `--why` walkback `fact_inspection`
+/// block (where the top-level `fact` already lives outside this block,
+/// so embedding it here would emit `fact_inspection.fact` spuriously).
+/// Keeps the inner field set in lockstep across both shapes per the
+/// original `print_walkback_json` design intent.
 #[derive(Debug, Serialize)]
-struct FoundJson {
-    fact: FactKeyJson,
+struct FactInspectionJson {
     source_event: u64,
     /// Wire-level discriminator — one of `"behavior" | "service" |
     /// "core" | "tui" | "user" | "host" | "agent"`. Always present
@@ -63,6 +64,24 @@ struct FoundJson {
     asserting_instance: Option<String>,
     asserted_at_ns: u64,
     trace_sequence: u64,
+    /// Slice-004 mid-flight extension: `InspectionDetail` carries the
+    /// fact value (required on the wire per bus protocol 0x04), so the
+    /// CLI surface renders it. Adjacent-tagged form, e.g.
+    /// `{"type":"u64","value":1}`.
+    value: FactValue,
+}
+
+/// JSON shape of a successful `weaver inspect` response. Fields mirror
+/// `specs/002-git-watcher-actor/contracts/cli-surfaces.md`:
+/// `asserting_behavior` for behavior-authored facts (slice 001);
+/// `asserting_service` + `asserting_instance` for service-authored
+/// facts (slice 002). At most one of those field groups is populated
+/// per response.
+#[derive(Debug, Serialize)]
+struct FoundJson {
+    fact: FactKeyJson,
+    #[serde(flatten)]
+    inner: FactInspectionJson,
 }
 
 #[derive(Debug, Serialize)]
@@ -100,12 +119,23 @@ pub fn parse_fact_key(input: &str) -> Result<FactKey, InspectCliError> {
     Ok(FactKey::new(EntityRef::new(entity_id), attribute))
 }
 
-/// Run `weaver inspect <fact-key>` end-to-end. Returns a non-zero exit
-/// code (via the caller's `Result`) if the fact is not found, per
-/// `cli-surfaces.md`.
+/// Run `weaver inspect <fact-key> [--why]` end-to-end. Returns a
+/// non-zero exit code (via the caller's `Result`) if the fact is not
+/// found, per `cli-surfaces.md`.
+///
+/// Without `--why`: existing slice-001 behavior — one InspectRequest
+/// → render `InspectionDetail` (or FactNotFound exit 2).
+///
+/// With `--why`: chain a second round-trip — take the returned
+/// `InspectionDetail.source_event`, issue `EventInspectRequest`, and
+/// render the walkback shape (per `specs/004-buffer-edit/contracts/
+/// cli-surfaces.md §weaver inspect --why`). Exit 2 on either
+/// FactNotFound or EventNotFound (both are "expected miss" per the
+/// slice-001 inspect convention).
 pub fn run(
     fact_key_str: &str,
     output: OutputFormat,
+    why: bool,
     socket_override: Option<PathBuf>,
 ) -> miette::Result<()> {
     // Parse errors exit 1 (miette default) — they're caller input
@@ -140,6 +170,37 @@ pub fn run(
             .map_err(|e| miette!("{e}"))?;
 
         let response = read_inspect_response(&mut client, request_id).await?;
+
+        // Slice-004 --why: when set AND the fact resolved, chain a
+        // second EventInspectRequest for the source-event walkback.
+        if why {
+            match &response {
+                Ok(detail) => {
+                    let event_id = detail.source_event;
+                    let req_id = next_request_id();
+                    client
+                        .send(&BusMessage::EventInspectRequest {
+                            request_id: req_id,
+                            event_id,
+                        })
+                        .await
+                        .map_err(|e| miette!("{e}"))?;
+                    let event_resp = read_event_inspect_response(&mut client, req_id).await?;
+                    render_walkback(&key, detail, &event_resp, output)?;
+                    if event_resp.is_err() {
+                        std::process::exit(crate::cli::errors::exit_code::EXPECTED);
+                    }
+                    return Ok(());
+                }
+                Err(_) => {
+                    // FactNotFound under --why: render the slice-001
+                    // not-found shape (no event to walk to) and exit 2.
+                    render(&key, &response, output)?;
+                    std::process::exit(crate::cli::errors::exit_code::EXPECTED);
+                }
+            }
+        }
+
         render(&key, &response, output)?;
         // `FactNotFound` is a documented outcome, not a crash. The
         // contract says exit 2; route through `std::process::exit` so
@@ -196,6 +257,23 @@ async fn read_inspect_response(
     }
 }
 
+async fn read_event_inspect_response(
+    client: &mut Client,
+    expected_id: u64,
+) -> miette::Result<Result<Event, EventInspectionError>> {
+    loop {
+        let msg = client.recv().await.map_err(|e| miette!("{e}"))?;
+        match msg {
+            BusMessage::EventInspectResponse { request_id, result }
+                if request_id == expected_id =>
+            {
+                return Ok(result);
+            }
+            _ => continue,
+        }
+    }
+}
+
 fn render(
     key: &FactKey,
     response: &Result<InspectionDetail, InspectionError>,
@@ -208,6 +286,110 @@ fn render(
         (Err(e), OutputFormat::Json) => print_not_found_json(key, e)?,
     }
     Ok(())
+}
+
+/// Slice-004 `--why` walkback rendering. Combines the existing
+/// fact-inspect output with the source-event's `Event` envelope (or
+/// an `event-not-found` marker if the trace lookup failed).
+fn render_walkback(
+    key: &FactKey,
+    detail: &InspectionDetail,
+    event_resp: &Result<Event, EventInspectionError>,
+    output: OutputFormat,
+) -> miette::Result<()> {
+    match output {
+        OutputFormat::Human => {
+            print_found_human(key, detail);
+            match event_resp {
+                Ok(event) => print_event_human(event),
+                Err(e) => println!("event: error: {}", event_inspection_error_label(e)),
+            }
+        }
+        OutputFormat::Json => {
+            print_walkback_json(key, detail, event_resp)?;
+        }
+    }
+    Ok(())
+}
+
+fn print_event_human(event: &Event) {
+    println!("event: {}", event.id);
+    println!("  name:               {}", event.name);
+    if let Some(t) = event.target {
+        println!("  target:             {t}");
+    } else {
+        println!("  target:             —");
+    }
+    println!("  payload_type:       {}", event.payload.type_tag());
+    println!(
+        "  provenance.source:  {}",
+        event.provenance.source.identifying_label()
+    );
+    println!("  timestamp_ns:       {}", event.provenance.timestamp_ns);
+    if let Some(parent) = event.provenance.causal_parent {
+        println!("  causal_parent:      {parent}");
+    } else {
+        println!("  causal_parent:      —");
+    }
+}
+
+fn print_walkback_json(
+    key: &FactKey,
+    detail: &InspectionDetail,
+    event_resp: &Result<Event, EventInspectionError>,
+) -> miette::Result<()> {
+    // Build the fact_inspection block from `FactInspectionJson` (the
+    // shared provenance/value shape). The top-level `fact` key already
+    // lives outside this block, so embedding `FoundJson` directly would
+    // emit `fact_inspection.fact` spuriously and drift from the
+    // documented walkback shape in cli-surfaces.md.
+    let fact_inspection = FactInspectionJson {
+        source_event: detail.source_event.as_u64(),
+        asserting_kind: detail.asserting_kind.clone(),
+        asserting_behavior: detail.asserting_behavior.as_ref().map(|b| b.to_string()),
+        asserting_service: detail.asserting_service.clone(),
+        asserting_instance: detail.asserting_instance.map(|u| u.to_string()),
+        asserted_at_ns: detail.asserted_at_ns,
+        trace_sequence: detail.trace_sequence,
+        value: detail.value.clone(),
+    };
+    let event_value = match event_resp {
+        Ok(event) => {
+            let payload_type = event.payload.type_tag();
+            // Provenance is already Serialize; wrap to keep the wire
+            // shape contract self-documenting (and to avoid leaking
+            // private struct field names if Provenance ever evolves
+            // without a wire bump).
+            let provenance = serde_json::to_value(&event.provenance).into_diagnostic()?;
+            serde_json::json!({
+                "id": event.id.as_u64(),
+                "name": event.name,
+                "target": event.target.map(|e| e.as_u64()),
+                "payload_type": payload_type,
+                "provenance": provenance,
+            })
+        }
+        Err(e) => serde_json::json!({
+            "error": event_inspection_error_label(e),
+        }),
+    };
+    let payload = serde_json::json!({
+        "fact": FactKeyJson {
+            entity: key.entity.as_u64(),
+            attribute: key.attribute.clone(),
+        },
+        "fact_inspection": serde_json::to_value(&fact_inspection).into_diagnostic()?,
+        "event": event_value,
+    });
+    let s = serde_json::to_string_pretty(&payload).into_diagnostic()?;
+    println!("{s}");
+    Ok(())
+}
+
+fn event_inspection_error_label(e: &EventInspectionError) -> &'static str {
+    match e {
+        EventInspectionError::EventNotFound => "EventNotFound",
+    }
 }
 
 fn print_found_human(key: &FactKey, d: &InspectionDetail) {
@@ -225,6 +407,7 @@ fn print_found_human(key: &FactKey, d: &InspectionDetail) {
     }
     println!("  asserted_at_ns:     {}", d.asserted_at_ns);
     println!("  trace_sequence:     {}", d.trace_sequence);
+    println!("  value:              {:?}", d.value);
 }
 
 fn print_found_json(key: &FactKey, d: &InspectionDetail) -> miette::Result<()> {
@@ -233,13 +416,16 @@ fn print_found_json(key: &FactKey, d: &InspectionDetail) -> miette::Result<()> {
             entity: key.entity.as_u64(),
             attribute: key.attribute.clone(),
         },
-        source_event: d.source_event.as_u64(),
-        asserting_kind: d.asserting_kind.clone(),
-        asserting_behavior: d.asserting_behavior.as_ref().map(|b| b.to_string()),
-        asserting_service: d.asserting_service.clone(),
-        asserting_instance: d.asserting_instance.map(|u| u.to_string()),
-        asserted_at_ns: d.asserted_at_ns,
-        trace_sequence: d.trace_sequence,
+        inner: FactInspectionJson {
+            source_event: d.source_event.as_u64(),
+            asserting_kind: d.asserting_kind.clone(),
+            asserting_behavior: d.asserting_behavior.as_ref().map(|b| b.to_string()),
+            asserting_service: d.asserting_service.clone(),
+            asserting_instance: d.asserting_instance.map(|u| u.to_string()),
+            asserted_at_ns: d.asserted_at_ns,
+            trace_sequence: d.trace_sequence,
+            value: d.value.clone(),
+        },
     };
     let s = serde_json::to_string_pretty(&payload).into_diagnostic()?;
     println!("{s}");

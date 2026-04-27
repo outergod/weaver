@@ -13,6 +13,7 @@
 
 use proptest::prelude::*;
 use uuid::Uuid;
+use weaver_core::types::fact::FactValue;
 use weaver_core::types::ids::{BehaviorId, EventId};
 use weaver_core::types::message::InspectionDetail;
 
@@ -50,14 +51,27 @@ fn arb_service_id() -> impl Strategy<Value = String> {
     proptest::collection::vec("[a-z0-9]{1,6}", 1..=4).prop_map(|parts| parts.join("-"))
 }
 
+fn arb_fact_value() -> impl Strategy<Value = FactValue> {
+    // Slice-004 mid-flight: InspectionDetail carries the fact value
+    // alongside provenance. Generate across the three currently-
+    // shipped FactValue variants so round-trip exercises every
+    // adjacent-tag shape.
+    prop_oneof![
+        any::<bool>().prop_map(FactValue::Bool),
+        any::<u64>().prop_map(FactValue::U64),
+        "[ -~]{0,32}".prop_map(FactValue::String),
+    ]
+}
+
 fn arb_detail_behavior() -> impl Strategy<Value = InspectionDetail> {
     (
         arb_event_id(),
         arb_behavior_id(),
         arb_asserted_at_ns(),
         arb_trace_sequence(),
+        arb_fact_value(),
     )
-        .prop_map(|(ev, bid, ts, seq)| InspectionDetail::behavior(ev, bid, ts, seq))
+        .prop_map(|(ev, bid, ts, seq, val)| InspectionDetail::behavior(ev, bid, ts, seq, val))
 }
 
 fn arb_detail_service() -> impl Strategy<Value = InspectionDetail> {
@@ -67,14 +81,22 @@ fn arb_detail_service() -> impl Strategy<Value = InspectionDetail> {
         any::<u128>().prop_map(Uuid::from_u128),
         arb_asserted_at_ns(),
         arb_trace_sequence(),
+        arb_fact_value(),
     )
-        .prop_map(|(ev, svc, inst, ts, seq)| InspectionDetail::service(ev, svc, inst, ts, seq))
+        .prop_map(|(ev, svc, inst, ts, seq, val)| {
+            InspectionDetail::service(ev, svc, inst, ts, seq, val)
+        })
 }
 
 fn arb_detail_kind_only() -> impl Strategy<Value = InspectionDetail> {
     prop_oneof![Just("core"), Just("tui")].prop_flat_map(|kind| {
-        (arb_event_id(), arb_asserted_at_ns(), arb_trace_sequence())
-            .prop_map(move |(ev, ts, seq)| InspectionDetail::kind_only(kind, ev, ts, seq))
+        (
+            arb_event_id(),
+            arb_asserted_at_ns(),
+            arb_trace_sequence(),
+            arb_fact_value(),
+        )
+            .prop_map(move |(ev, ts, seq, val)| InspectionDetail::kind_only(kind, ev, ts, seq, val))
     })
 }
 

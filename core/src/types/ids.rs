@@ -9,6 +9,16 @@ use serde::{Deserialize, Serialize};
 /// Authoritative bus messages (FactAssert, FactRetract, Lifecycle, Error)
 /// carry sequence numbers per publisher — see
 /// `docs/02-architecture.md` §3.1.
+///
+/// **Not globally unique** across producers. Production minting from
+/// wall-clock nanoseconds at multiple independent producers admits
+/// collision; `TraceStore::by_event` is last-writer-wins on collision,
+/// so `weaver inspect --why` can walk back to the wrong event under
+/// concurrent producers minting the same `EventId(N)`. Slice 004
+/// closed two deterministic-collision instances (bootstrap-index reuse
+/// and `EventId::ZERO`-sentinel collision); the cross-producer
+/// wall-clock-ns residue is tracked at `docs/07-open-questions.md §28`
+/// for a future wire-bump slice.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct EventId(u64);

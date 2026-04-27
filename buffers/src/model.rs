@@ -19,40 +19,20 @@ use std::path::{Path, PathBuf};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 use uuid::Uuid;
+use weaver_core::types::edit::{Position, TextEdit};
 use weaver_core::types::entity_ref::EntityRef;
 use weaver_core::types::fact::FactValue;
 
-/// Buffer-namespace bit in the derived `EntityRef`. Set on every
-/// buffer entity; distinct from the slice-002 reserved bits 62
-/// (watcher-instance) and 63 (repo). Trace inspection can classify an
-/// entity at a glance by this bit.
-const BUFFER_NAMESPACE_BIT: u64 = 1 << 61;
-
-/// Watcher-instance-namespace bit. Reused unchanged from slice 002: a
-/// `weaver-buffers` invocation's instance entity shares the namespace
-/// with git-watcher instances — the TUI/inspect machinery distinguishes
-/// them by asserted facts, not by entity-id bit layout.
-const INSTANCE_NAMESPACE_BIT: u64 = 1 << 62;
-
-/// Repo-namespace bit, owned by slice-002's `git-watcher`. Buffer
-/// derivations clear this bit so a low-order hash never accidentally
-/// claims the repo namespace.
-const REPO_NAMESPACE_BIT: u64 = 1 << 63;
-
-/// Derive a stable `EntityRef` for a buffer entity from its
-/// canonicalized absolute path.
-///
-/// The caller MUST pass an already-canonicalized path (e.g., the output
-/// of [`std::fs::canonicalize`]). This function is a pure function of
-/// its input — no I/O, no implicit canonicalization — so the entity id
-/// is deterministic for any canonical path.
-pub fn buffer_entity_ref(path: &Path) -> EntityRef {
-    let mut hasher = DefaultHasher::new();
-    path.hash(&mut hasher);
-    let h =
-        (hasher.finish() | BUFFER_NAMESPACE_BIT) & !(INSTANCE_NAMESPACE_BIT | REPO_NAMESPACE_BIT);
-    EntityRef::new(h)
-}
+// Slice-004 lifted `buffer_entity_ref` (and the buffer-namespace bit)
+// to `weaver_core` so the `weaver edit` CLI can derive the same
+// entity-id without a cross-crate runtime dependency. The canonical
+// implementation lives there; this module re-exports for slice-003
+// callers (publisher + tests) and the watcher-instance derivation
+// below, which still wants `INSTANCE_NAMESPACE_BIT` /
+// `REPO_NAMESPACE_BIT` accessible by short name.
+pub use weaver_core::types::buffer_entity::{
+    BUFFER_NAMESPACE_BIT, INSTANCE_NAMESPACE_BIT, REPO_NAMESPACE_BIT, buffer_entity_ref,
+};
 
 /// Derive a stable `EntityRef` for the buffer-service-instance entity
 /// (host of `watcher/status` for this invocation). Mirrors slice-002's
@@ -306,6 +286,349 @@ pub enum ObserverError {
     },
 }
 
+/// Endpoint of a [`Range`] — used by [`ApplyError::MidCodepointBoundary`]
+/// to identify which side of the range tripped the validator.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BoundarySide {
+    Start,
+    End,
+}
+
+impl std::fmt::Display for BoundarySide {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Start => f.write_str("start"),
+            Self::End => f.write_str("end"),
+        }
+    }
+}
+
+/// Categorised failure modes for [`BufferState::apply_edits`]. Each
+/// variant maps to one of the validation rules R1..R6 in
+/// `specs/004-buffer-edit/data-model.md §Validation rules`; the
+/// publisher's reader-loop arm uses [`Self::reason`] to populate the
+/// FR-018 `tracing::debug!` `reason` field.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum ApplyError {
+    /// R2/R3 — endpoint references a line or character beyond the
+    /// buffer's content (and is not the past-last virtual position).
+    #[error("edit {edit_index} out of bounds: {detail}")]
+    OutOfBounds { edit_index: usize, detail: String },
+
+    /// R4 — endpoint character lands inside a multi-byte UTF-8 codepoint
+    /// within the line's bytes.
+    #[error(
+        "edit {edit_index} {side} endpoint at line {line} character {character} \
+         falls mid-codepoint within the line's bytes"
+    )]
+    MidCodepointBoundary {
+        edit_index: usize,
+        side: BoundarySide,
+        line: u32,
+        character: u32,
+    },
+
+    /// Two edits within the same batch overlap. Indices reference the
+    /// original input order (not the post-sort order). FR-007 requires
+    /// per-batch composition to have a single unambiguous interpretation;
+    /// silent left-to-right composition is rejected in favour of an
+    /// explicit error so the operator/agent can correct the batch.
+    #[error("edits {first_index} and {second_index} overlap within the batch")]
+    IntraBatchOverlap {
+        first_index: usize,
+        second_index: usize,
+    },
+
+    /// R5 — edit has an empty range AND an empty `new_text`; pure no-op
+    /// at a point cursor. Distinguished from the empty-batch case (which
+    /// is structurally an identity per FR-008).
+    #[error("edit {edit_index} is a nothing-edit (empty range with empty new_text)")]
+    NothingEdit { edit_index: usize },
+
+    /// R1 — `range.start > range.end` (lexicographic compare on `(line,
+    /// character)`).
+    #[error("edit {edit_index} has start > end (swapped endpoints)")]
+    SwappedEndpoints { edit_index: usize },
+
+    /// R6 — `new_text` is not valid UTF-8. Structurally unreachable
+    /// under safe Rust because [`TextEdit::new_text`] is `String` (UTF-8
+    /// by construction); retained in the taxonomy so direct in-process
+    /// callers building a `String` via `unsafe` have a defined error
+    /// category rather than a panic.
+    #[error("edit {edit_index} new_text is not valid UTF-8")]
+    InvalidUtf8 { edit_index: usize },
+}
+
+impl ApplyError {
+    /// Stable kebab-case reason category for FR-018 `tracing::debug!`.
+    /// The publisher emits this verbatim in the `reason` field; tests
+    /// in `tests/e2e/buffer_edit_*.rs` match against these strings.
+    pub fn reason(&self) -> &'static str {
+        match self {
+            Self::OutOfBounds { .. } => "validation-failure-out-of-bounds",
+            Self::MidCodepointBoundary { .. } => "validation-failure-mid-codepoint-boundary",
+            Self::IntraBatchOverlap { .. } => "validation-failure-intra-batch-overlap",
+            Self::NothingEdit { .. } => "validation-failure-nothing-edit",
+            Self::SwappedEndpoints { .. } => "validation-failure-swapped-endpoints",
+            Self::InvalidUtf8 { .. } => "validation-failure-invalid-utf8",
+        }
+    }
+
+    /// Per-edit input index for diagnostics when one applies; `None` for
+    /// [`Self::IntraBatchOverlap`], which references a pair via its own
+    /// `first_index` / `second_index` fields.
+    pub fn edit_index(&self) -> Option<usize> {
+        match self {
+            Self::OutOfBounds { edit_index, .. }
+            | Self::MidCodepointBoundary { edit_index, .. }
+            | Self::NothingEdit { edit_index }
+            | Self::SwappedEndpoints { edit_index }
+            | Self::InvalidUtf8 { edit_index } => Some(*edit_index),
+            Self::IntraBatchOverlap { .. } => None,
+        }
+    }
+}
+
+impl BufferState {
+    /// Apply a batch of [`TextEdit`]s atomically against the in-memory
+    /// `:content` component.
+    ///
+    /// Pipeline (per `specs/004-buffer-edit/research.md §3` and
+    /// `data-model.md §Validation rules`):
+    ///
+    /// 1. **Per-edit validation** in input order, fail-fast: R1
+    ///    swapped-endpoints → R5 nothing-edit → R2/R3 bounds → R4
+    ///    codepoint boundaries.
+    /// 2. **Sort by `range.start` (stable)** + adjacent overlap scan.
+    ///    Tied starts where both edits are pure inserts (`start == end`)
+    ///    are not overlap; both apply, in stable-sort order.
+    /// 3. **Apply in descending byte-offset order** so earlier positions
+    ///    are not shifted by later applications (LSP 3.17 convention).
+    /// 4. **Recompute `memory_digest` once** at the end of the batch.
+    ///
+    /// Empty `edits` is a structural identity (FR-008): returns `Ok(())`
+    /// and leaves `content` and `memory_digest` byte-identical.
+    ///
+    /// On `Err(ApplyError)` the buffer is unchanged — atomicity is
+    /// guaranteed by validating the entire batch before any mutation.
+    pub fn apply_edits(&mut self, edits: &[TextEdit]) -> Result<(), ApplyError> {
+        if edits.is_empty() {
+            return Ok(());
+        }
+
+        let line_index = LineIndex::build(&self.content);
+
+        // Phase A — per-edit validation, fail-fast in input order.
+        for (i, edit) in edits.iter().enumerate() {
+            validate_edit(i, edit, &line_index)?;
+        }
+
+        // Phase B — sort by start (stable) + adjacent overlap scan.
+        let mut sorted: Vec<(usize, &TextEdit)> = edits.iter().enumerate().collect();
+        sorted.sort_by_key(|(_, e)| e.range.start);
+        for window in sorted.windows(2) {
+            let (i_first, e_first) = window[0];
+            let (i_second, e_second) = window[1];
+            let first_is_insert = e_first.range.start == e_first.range.end;
+            let second_is_insert = e_second.range.start == e_second.range.end;
+            let strictly_overlaps = e_first.range.end > e_second.range.start;
+            let tied_starts = e_first.range.start == e_second.range.start;
+            let tied_with_non_insert = tied_starts && !(first_is_insert && second_is_insert);
+            if strictly_overlaps || tied_with_non_insert {
+                let (a, b) = if i_first <= i_second {
+                    (i_first, i_second)
+                } else {
+                    (i_second, i_first)
+                };
+                return Err(ApplyError::IntraBatchOverlap {
+                    first_index: a,
+                    second_index: b,
+                });
+            }
+        }
+
+        // Phase C — apply in descending byte-offset order. Compute byte
+        // offsets while line_index is still valid, then mutate.
+        let plan: Vec<(usize, usize, &str)> = sorted
+            .iter()
+            .rev()
+            .map(|(_, e)| {
+                let start = line_index
+                    .byte_offset(e.range.start)
+                    .expect("range.start validated in Phase A");
+                let end = line_index
+                    .byte_offset(e.range.end)
+                    .expect("range.end validated in Phase A");
+                (start, end, e.new_text.as_str())
+            })
+            .collect();
+        drop(line_index);
+
+        for (start, end, new_text) in plan {
+            self.content.splice(start..end, new_text.bytes());
+        }
+
+        // Phase D — single digest recompute. Buffer-size cost dominates;
+        // batch size is irrelevant.
+        self.memory_digest = Sha256::digest(&self.content).into();
+        Ok(())
+    }
+}
+
+/// Cached `(line → start-byte)` index built once per `apply_edits`
+/// invocation. `line_count` follows the data-model rule: a trailing
+/// `\n` does not contribute a phantom line beyond the lines it
+/// terminates.
+struct LineIndex<'a> {
+    content: &'a [u8],
+    line_starts: Vec<usize>,
+    line_count: u32,
+}
+
+impl<'a> LineIndex<'a> {
+    fn build(content: &'a [u8]) -> Self {
+        let mut line_starts = Vec::with_capacity(16);
+        line_starts.push(0);
+        for (i, &b) in content.iter().enumerate() {
+            if b == b'\n' {
+                line_starts.push(i + 1);
+            }
+        }
+        // A trailing `\n` would push `content.len()` as the start of a
+        // virtual line that doesn't exist (data-model `+0` clause). Drop it.
+        if matches!(content.last(), Some(&b'\n')) {
+            line_starts.pop();
+        }
+        let line_count = u32::try_from(line_starts.len()).unwrap_or(u32::MAX);
+        Self {
+            content,
+            line_starts,
+            line_count,
+        }
+    }
+
+    /// Byte-length of `line`'s content, excluding any terminating `\n`.
+    /// Caller MUST ensure `line < self.line_count`.
+    fn line_byte_length(&self, line: u32) -> usize {
+        let line_idx = line as usize;
+        let start = self.line_starts[line_idx];
+        if line_idx + 1 < self.line_starts.len() {
+            self.line_starts[line_idx + 1] - 1 - start
+        } else if matches!(self.content.last(), Some(&b'\n')) {
+            self.content.len() - 1 - start
+        } else {
+            self.content.len() - start
+        }
+    }
+
+    fn line_bytes(&self, line: u32) -> &[u8] {
+        let start = self.line_starts[line as usize];
+        let len = self.line_byte_length(line);
+        &self.content[start..start + len]
+    }
+
+    /// Convert a `Position` to a byte offset within `content`. Returns
+    /// `None` when the position lies outside the buffer (the past-last
+    /// virtual position `(line_count, 0)` is in-bounds and maps to
+    /// `content.len()`).
+    fn byte_offset(&self, pos: Position) -> Option<usize> {
+        if pos.line < self.line_count {
+            let line_start = self.line_starts[pos.line as usize];
+            let len = self.line_byte_length(pos.line);
+            let ch = pos.character as usize;
+            (ch <= len).then_some(line_start + ch)
+        } else if pos.line == self.line_count && pos.character == 0 {
+            Some(self.content.len())
+        } else {
+            None
+        }
+    }
+}
+
+fn validate_edit(i: usize, edit: &TextEdit, idx: &LineIndex<'_>) -> Result<(), ApplyError> {
+    let r = edit.range;
+
+    if r.start > r.end {
+        return Err(ApplyError::SwappedEndpoints { edit_index: i });
+    }
+    if r.start == r.end && edit.new_text.is_empty() {
+        return Err(ApplyError::NothingEdit { edit_index: i });
+    }
+    check_position_bounds(i, BoundarySide::Start, r.start, idx)?;
+    check_position_bounds(i, BoundarySide::End, r.end, idx)?;
+    check_codepoint_boundary(i, BoundarySide::Start, r.start, idx)?;
+    check_codepoint_boundary(i, BoundarySide::End, r.end, idx)?;
+    // R6 (InvalidUtf8) is structurally unreachable under safe Rust:
+    // `TextEdit::new_text: String` is UTF-8 by construction. The variant
+    // exists in the taxonomy for direct in-process callers (e.g.,
+    // `unsafe`-built `String`s) so the error has a category rather than
+    // a panic.
+    Ok(())
+}
+
+fn check_position_bounds(
+    edit_index: usize,
+    side: BoundarySide,
+    pos: Position,
+    idx: &LineIndex<'_>,
+) -> Result<(), ApplyError> {
+    if pos.line < idx.line_count {
+        let len = idx.line_byte_length(pos.line);
+        if pos.character as usize > len {
+            return Err(ApplyError::OutOfBounds {
+                edit_index,
+                detail: format!(
+                    "{side} character {} exceeds line {} content length {len}",
+                    pos.character, pos.line
+                ),
+            });
+        }
+        Ok(())
+    } else if pos.line == idx.line_count && pos.character == 0 {
+        Ok(())
+    } else {
+        Err(ApplyError::OutOfBounds {
+            edit_index,
+            detail: format!(
+                "{side} line {} exceeds buffer line count {}",
+                pos.line, idx.line_count
+            ),
+        })
+    }
+}
+
+fn check_codepoint_boundary(
+    edit_index: usize,
+    side: BoundarySide,
+    pos: Position,
+    idx: &LineIndex<'_>,
+) -> Result<(), ApplyError> {
+    // Past-last virtual position is at content.len() — always a boundary.
+    if pos.line == idx.line_count {
+        return Ok(());
+    }
+    let line_bytes = idx.line_bytes(pos.line);
+    if !is_codepoint_boundary(line_bytes, pos.character as usize) {
+        return Err(ApplyError::MidCodepointBoundary {
+            edit_index,
+            side,
+            line: pos.line,
+            character: pos.character,
+        });
+    }
+    Ok(())
+}
+
+/// Mirrors `str::is_char_boundary` semantics over raw bytes so the
+/// validator remains defined on buffers whose contents may not be valid
+/// UTF-8. A continuation byte matches `0b10xxxxxx`.
+fn is_codepoint_boundary(bytes: &[u8], index: usize) -> bool {
+    if index == 0 || index >= bytes.len() {
+        return true;
+    }
+    bytes[index] & 0b1100_0000 != 0b1000_0000
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -442,5 +765,353 @@ mod tests {
         assert!(format!("{missing}").contains("missing"));
         assert!(format!("{not_regular}").contains("regular file"));
         assert!(format!("{startup}").contains("not openable"));
+    }
+
+    // ───────────────────────────────────────────────────────────────────
+    // Slice-004: BufferState::apply_edits + ApplyError taxonomy (T007).
+    // ───────────────────────────────────────────────────────────────────
+
+    use weaver_core::types::edit::{Position as EditPos, Range as EditRange, TextEdit};
+
+    fn pos(line: u32, character: u32) -> EditPos {
+        EditPos { line, character }
+    }
+
+    fn rng(start: EditPos, end: EditPos) -> EditRange {
+        EditRange { start, end }
+    }
+
+    fn edit(start: EditPos, end: EditPos, new_text: &str) -> TextEdit {
+        TextEdit {
+            range: rng(start, end),
+            new_text: new_text.into(),
+        }
+    }
+
+    fn state_from_bytes(bytes: &[u8]) -> BufferState {
+        let mut f = NamedTempFile::new().expect("tempfile");
+        f.write_all(bytes).expect("write");
+        let canonical = std::fs::canonicalize(f.path()).expect("canonicalize");
+        BufferState::open(canonical).expect("open")
+    }
+
+    #[test]
+    fn apply_edits_empty_batch_is_structural_identity() {
+        // FR-008: empty `edits: []` returns Ok(()) without mutating
+        // content or memory_digest.
+        let mut s = state_from_bytes(b"hello world\n");
+        let content_before = s.content().to_vec();
+        let digest_before = *s.memory_digest();
+        s.apply_edits(&[]).expect("empty batch must be Ok");
+        assert_eq!(s.content(), content_before.as_slice());
+        assert_eq!(s.memory_digest(), &digest_before);
+    }
+
+    #[test]
+    fn apply_edits_pure_insert_at_start() {
+        let mut s = state_from_bytes(b"world");
+        s.apply_edits(&[edit(pos(0, 0), pos(0, 0), "hello ")])
+            .expect("pure insert at start");
+        assert_eq!(s.content(), b"hello world");
+    }
+
+    #[test]
+    fn apply_edits_pure_delete() {
+        // Delete bytes 5..11 of "hello world" (the " world" suffix).
+        let mut s = state_from_bytes(b"hello world");
+        s.apply_edits(&[edit(pos(0, 5), pos(0, 11), "")])
+            .expect("pure delete");
+        assert_eq!(s.content(), b"hello");
+    }
+
+    #[test]
+    fn apply_edits_replace() {
+        let mut s = state_from_bytes(b"hello world");
+        s.apply_edits(&[edit(pos(0, 0), pos(0, 5), "HOWDY")])
+            .expect("replace");
+        assert_eq!(s.content(), b"HOWDY world");
+    }
+
+    #[test]
+    fn apply_edits_batched_descending_apply_preserves_input_positions() {
+        // Three insertions at original positions 0, 3, 6 of "AAABBBCCC".
+        // If apply order weren't descending, later edits would shift
+        // earlier ones; the test asserts each insertion lands at its
+        // ORIGINAL byte offset.
+        let mut s = state_from_bytes(b"AAABBBCCC");
+        s.apply_edits(&[
+            edit(pos(0, 0), pos(0, 0), ">"),
+            edit(pos(0, 3), pos(0, 3), "|"),
+            edit(pos(0, 6), pos(0, 6), "|"),
+        ])
+        .expect("batched insert");
+        assert_eq!(s.content(), b">AAA|BBB|CCC");
+    }
+
+    #[test]
+    fn apply_edits_supports_insert_at_past_last_virtual_position() {
+        // line_count = 1 for "abc\n" (trailing \n does NOT add a phantom line).
+        // (1, 0) is the past-last virtual position; legal for insertion.
+        let mut s = state_from_bytes(b"abc\n");
+        s.apply_edits(&[edit(pos(1, 0), pos(1, 0), "def")])
+            .expect("insert at past-last position");
+        assert_eq!(s.content(), b"abc\ndef");
+    }
+
+    #[test]
+    fn apply_edits_two_pure_inserts_at_same_position_both_apply_in_input_order() {
+        // Tied starts where both edits are pure inserts are NOT overlap.
+        // Stable sort preserves input order; descending-offset apply
+        // produces input-order left-to-right in the final content.
+        let mut s = state_from_bytes(b"world");
+        s.apply_edits(&[
+            edit(pos(0, 0), pos(0, 0), "hello "),
+            edit(pos(0, 0), pos(0, 0), "WAVE "),
+        ])
+        .expect("two tied pure inserts");
+        assert_eq!(s.content(), b"hello WAVE world");
+    }
+
+    #[test]
+    fn apply_edits_rejects_swapped_endpoints() {
+        let mut s = state_from_bytes(b"hello world");
+        let err = s
+            .apply_edits(&[edit(pos(0, 5), pos(0, 0), "x")])
+            .expect_err("swapped endpoints must be rejected");
+        assert!(matches!(
+            err,
+            ApplyError::SwappedEndpoints { edit_index: 0 }
+        ));
+        assert_eq!(s.content(), b"hello world");
+    }
+
+    #[test]
+    fn apply_edits_rejects_out_of_bounds_line() {
+        // Buffer "hello" has line_count = 1; line 5 is far past it and
+        // not the past-last virtual position.
+        let mut s = state_from_bytes(b"hello");
+        let err = s
+            .apply_edits(&[edit(pos(0, 0), pos(5, 0), "x")])
+            .expect_err("out-of-bounds line must be rejected");
+        match err {
+            ApplyError::OutOfBounds { edit_index, detail } => {
+                assert_eq!(edit_index, 0);
+                assert!(detail.contains("line"), "detail mentions line: {detail}");
+            }
+            other => panic!("expected OutOfBounds, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn apply_edits_rejects_out_of_bounds_character() {
+        // Buffer "hi" — line 0 length is 2 bytes. Character 5 is OOB.
+        let mut s = state_from_bytes(b"hi");
+        let err = s
+            .apply_edits(&[edit(pos(0, 5), pos(0, 5), "x")])
+            .expect_err("out-of-bounds character must be rejected");
+        match err {
+            ApplyError::OutOfBounds { edit_index, detail } => {
+                assert_eq!(edit_index, 0);
+                assert!(
+                    detail.contains("character"),
+                    "detail mentions character: {detail}"
+                );
+            }
+            other => panic!("expected OutOfBounds, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn apply_edits_rejects_mid_codepoint_boundary() {
+        // "héllo" UTF-8: h(0x68) é(0xC3 0xA9) l(0x6C) l(0x6C) o(0x6F).
+        // Position character=2 lands inside é (0xA9 is a continuation byte).
+        let mut s = state_from_bytes("héllo".as_bytes());
+        let err = s
+            .apply_edits(&[edit(pos(0, 2), pos(0, 2), "x")])
+            .expect_err("mid-codepoint must be rejected");
+        match err {
+            ApplyError::MidCodepointBoundary {
+                edit_index,
+                side,
+                line,
+                character,
+            } => {
+                assert_eq!(edit_index, 0);
+                assert_eq!(side, BoundarySide::Start);
+                assert_eq!(line, 0);
+                assert_eq!(character, 2);
+            }
+            other => panic!("expected MidCodepointBoundary, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn apply_edits_rejects_intra_batch_overlap() {
+        // Edits 0:0..0:5 and 0:3..0:7 overlap in [3, 5).
+        let mut s = state_from_bytes(b"hello world");
+        let err = s
+            .apply_edits(&[
+                edit(pos(0, 0), pos(0, 5), "X"),
+                edit(pos(0, 3), pos(0, 7), "Y"),
+            ])
+            .expect_err("overlap must be rejected");
+        assert!(matches!(
+            err,
+            ApplyError::IntraBatchOverlap {
+                first_index: 0,
+                second_index: 1,
+            }
+        ));
+    }
+
+    #[test]
+    fn apply_edits_rejects_intra_batch_overlap_tied_start_with_non_insert() {
+        // Tied starts where one edit is NOT a pure insert → overlap per
+        // data-model §Validation rules: "Tied starts ... are NOT overlap
+        // unless one of them has start < end."
+        let mut s = state_from_bytes(b"hello world");
+        let err = s
+            .apply_edits(&[
+                edit(pos(0, 0), pos(0, 5), "REPLACE"),
+                edit(pos(0, 0), pos(0, 0), "INSERT "),
+            ])
+            .expect_err("tied start with non-insert must be rejected");
+        assert!(matches!(
+            err,
+            ApplyError::IntraBatchOverlap {
+                first_index: 0,
+                second_index: 1,
+            }
+        ));
+    }
+
+    #[test]
+    fn apply_edits_rejects_nothing_edit() {
+        let mut s = state_from_bytes(b"hello");
+        let err = s
+            .apply_edits(&[edit(pos(0, 2), pos(0, 2), "")])
+            .expect_err("nothing-edit must be rejected");
+        assert!(matches!(err, ApplyError::NothingEdit { edit_index: 0 }));
+    }
+
+    #[test]
+    fn apply_edits_invalid_utf8_variant_is_in_taxonomy() {
+        // R6 is structurally unreachable under safe Rust (`String` is
+        // UTF-8 by construction). Pin Display + reason + edit_index so
+        // direct in-process callers get a well-defined error category.
+        let err = ApplyError::InvalidUtf8 { edit_index: 7 };
+        assert_eq!(err.reason(), "validation-failure-invalid-utf8");
+        assert_eq!(err.edit_index(), Some(7));
+        assert!(format!("{err}").contains("not valid UTF-8"));
+    }
+
+    #[test]
+    fn apply_edits_preserves_digest_invariant_on_accept() {
+        // The slice-003 invariant `memory_digest == sha256(content)`
+        // MUST hold after any accepted batch.
+        let mut s = state_from_bytes(b"hello world");
+        s.apply_edits(&[edit(pos(0, 0), pos(0, 0), "PRE-")])
+            .expect("accept");
+        let expected: [u8; 32] = Sha256::digest(s.content()).into();
+        assert_eq!(s.memory_digest(), &expected);
+    }
+
+    #[test]
+    fn apply_edits_state_unchanged_on_rejection() {
+        // Atomicity: if any edit in the batch fails validation, neither
+        // content nor memory_digest changes.
+        let mut s = state_from_bytes(b"hello world");
+        let content_before = s.content().to_vec();
+        let digest_before = *s.memory_digest();
+        let _ = s
+            .apply_edits(&[
+                edit(pos(0, 0), pos(0, 5), "ok"),
+                edit(pos(0, 99), pos(0, 99), "boom"),
+            ])
+            .expect_err("invalid second edit must reject whole batch");
+        assert_eq!(s.content(), content_before.as_slice());
+        assert_eq!(s.memory_digest(), &digest_before);
+    }
+
+    #[test]
+    fn apply_edits_handles_buffer_with_trailing_newline() {
+        // "abc\n" → line_count = 1, line 0 length = 3 (excludes the \n).
+        // Inserting at character=3 (end-of-line position) keeps the \n.
+        let mut s = state_from_bytes(b"abc\n");
+        s.apply_edits(&[edit(pos(0, 3), pos(0, 3), "X")])
+            .expect("end-of-line insert");
+        assert_eq!(s.content(), b"abcX\n");
+    }
+
+    #[test]
+    fn apply_edits_handles_empty_buffer() {
+        // Empty buffer: line_count = 1, line 0 is empty, (0,0)..(0,0)
+        // is the only valid insert position (and (1,0)..(1,0) past-last).
+        let mut s = state_from_bytes(b"");
+        s.apply_edits(&[edit(pos(0, 0), pos(0, 0), "first")])
+            .expect("empty-buffer insert");
+        assert_eq!(s.content(), b"first");
+    }
+
+    #[test]
+    fn apply_error_reason_categories_match_wire_vocabulary() {
+        // Pin the FR-018 reason strings — they're the public wire
+        // vocabulary the publisher emits and e2e tests grep for.
+        assert_eq!(
+            ApplyError::OutOfBounds {
+                edit_index: 0,
+                detail: String::new(),
+            }
+            .reason(),
+            "validation-failure-out-of-bounds",
+        );
+        assert_eq!(
+            ApplyError::MidCodepointBoundary {
+                edit_index: 0,
+                side: BoundarySide::Start,
+                line: 0,
+                character: 0,
+            }
+            .reason(),
+            "validation-failure-mid-codepoint-boundary",
+        );
+        assert_eq!(
+            ApplyError::IntraBatchOverlap {
+                first_index: 0,
+                second_index: 1,
+            }
+            .reason(),
+            "validation-failure-intra-batch-overlap",
+        );
+        assert_eq!(
+            ApplyError::NothingEdit { edit_index: 0 }.reason(),
+            "validation-failure-nothing-edit",
+        );
+        assert_eq!(
+            ApplyError::SwappedEndpoints { edit_index: 0 }.reason(),
+            "validation-failure-swapped-endpoints",
+        );
+        assert_eq!(
+            ApplyError::InvalidUtf8 { edit_index: 0 }.reason(),
+            "validation-failure-invalid-utf8",
+        );
+    }
+
+    #[test]
+    fn apply_error_edit_index_returns_none_for_intra_batch_overlap() {
+        // Pair-shaped error has its own first_index/second_index fields;
+        // edit_index() returns None to signal the structural difference.
+        let err = ApplyError::IntraBatchOverlap {
+            first_index: 2,
+            second_index: 5,
+        };
+        assert_eq!(err.edit_index(), None);
+    }
+
+    #[test]
+    fn boundary_side_displays_kebab_case() {
+        // Used in OutOfBounds.detail and human-readable diagnostics.
+        assert_eq!(format!("{}", BoundarySide::Start), "start");
+        assert_eq!(format!("{}", BoundarySide::End), "end");
     }
 }

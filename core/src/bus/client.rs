@@ -16,7 +16,8 @@ use tokio::net::UnixStream;
 
 use crate::bus::codec::{CodecError, read_message, write_message};
 use crate::types::message::{
-    BUS_PROTOCOL_VERSION, BusMessage, HelloMsg, LifecycleSignal, SubscribePattern,
+    BUS_PROTOCOL_VERSION, BusMessage, EventSubscribePattern, HelloMsg, LifecycleSignal,
+    SubscribePattern,
 };
 
 #[derive(Debug, Error)]
@@ -75,6 +76,26 @@ impl Client {
         write_message(&mut self.stream, &BusMessage::Subscribe(pattern)).await?;
         match read_message(&mut self.stream).await? {
             BusMessage::SubscribeAck { sequence } => Ok(sequence),
+            got => Err(ClientError::SubscribeAckUnexpected { got }),
+        }
+    }
+
+    /// Subscribe to events matching `pattern`; block until the
+    /// `SubscribeAck` is received. Slice 004; mirrors [`Self::subscribe`]
+    /// for the lossy-class event channel.
+    ///
+    /// MUST be called BEFORE the connection is split into reader/writer
+    /// halves (the ack is consumed inline). On success the listener has
+    /// registered the subscription and any subsequent matching event
+    /// will be delivered as a [`BusMessage::Event`] frame on the read
+    /// half.
+    pub async fn subscribe_events(
+        &mut self,
+        pattern: EventSubscribePattern,
+    ) -> Result<(), ClientError> {
+        write_message(&mut self.stream, &BusMessage::SubscribeEvents(pattern)).await?;
+        match read_message(&mut self.stream).await? {
+            BusMessage::SubscribeAck { .. } => Ok(()),
             got => Err(ClientError::SubscribeAckUnexpected { got }),
         }
     }

@@ -21,6 +21,7 @@ serde_json.workspace = true
 tempfile.workspace = true
 uuid.workspace = true
 libc = "0.2"
+proptest.workspace = true
 
 [[test]]
 name = "hello_fact"
@@ -85,3 +86,27 @@ path = "e2e/buffer_authority_conflict.rs"
 [[test]]
 name = "buffer_degraded_observable"
 path = "e2e/buffer_degraded_observable.rs"
+
+[[test]]
+name = "buffer_edit_single"
+path = "e2e/buffer_edit_single.rs"
+
+[[test]]
+name = "buffer_edit_inspect_why"
+path = "e2e/buffer_edit_inspect_why.rs"
+
+[[test]]
+name = "buffer_edit_atomic_batch"
+path = "e2e/buffer_edit_atomic_batch.rs"
+
+[[test]]
+name = "buffer_edit_emitter_parity"
+path = "e2e/buffer_edit_emitter_parity.rs"
+
+[[test]]
+name = "buffer_edit_sequential"
+path = "e2e/buffer_edit_sequential.rs"
+
+[[test]]
+name = "buffer_edit_stale_drop"
+path = "e2e/buffer_edit_stale_drop.rs"

@@ -14,6 +14,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::Mutex;
 
 use crate::bus::delivery::SequenceCounter;
+use crate::bus::event_subscriptions::EventSubscriptions;
 use crate::fact_space::{FactStore, InMemoryFactStore};
 use crate::provenance::{ActorIdentity, Provenance};
 use crate::trace::entry::{TracePayload, TraceSequence};
@@ -164,6 +165,13 @@ pub struct Dispatcher {
     /// same identity; any drift is rejected as IdentityDrift.
     /// Cleared on `release_connection`.
     conn_identity: Arc<Mutex<HashMap<u64, ActorIdentity>>>,
+    /// Slice-004 event-subscription registry. `process_event` calls
+    /// `broadcast` on this registry after the trace append + behavior
+    /// fire so external subscribers (e.g., `weaver-buffers` for
+    /// `BufferEdit`) receive the event over their bus connection.
+    /// See `bus/event_subscriptions.rs` and
+    /// `specs/004-buffer-edit/research.md §13`.
+    event_subscriptions: Arc<EventSubscriptions>,
 }
 
 impl Dispatcher {
@@ -177,6 +185,7 @@ impl Dispatcher {
             authority: Arc::new(Mutex::new(AuthorityMap::default())),
             conn_facts: Arc::new(Mutex::new(HashMap::new())),
             conn_identity: Arc::new(Mutex::new(HashMap::new())),
+            event_subscriptions: Arc::new(EventSubscriptions::new()),
         }
     }
 
@@ -186,6 +195,14 @@ impl Dispatcher {
 
     pub fn trace(&self) -> Arc<Mutex<TraceStore>> {
         Arc::clone(&self.trace)
+    }
+
+    /// Slice-004: shared handle to the event-broadcast registry. The
+    /// listener uses this from [`crate::bus::listener::handle_client_message`]
+    /// to register a subscription on receipt of
+    /// [`crate::types::message::BusMessage::SubscribeEvents`].
+    pub fn event_subscriptions(&self) -> Arc<EventSubscriptions> {
+        Arc::clone(&self.event_subscriptions)
     }
 
     /// Nanoseconds elapsed since the dispatcher was constructed.
@@ -199,10 +216,14 @@ impl Dispatcher {
     }
 
     /// Process one inbound event: append it to the trace, run any
-    /// registered behaviors, commit their outputs.
+    /// registered behaviors, commit their outputs, and broadcast to
+    /// any external event subscribers (slice 004).
     ///
     /// For slice 001 Phase 2 there are no behaviors registered, so
-    /// this only appends the event to the trace.
+    /// this only appends the event to the trace. Slice 004 adds the
+    /// broadcast step at the end so subscribers receive events
+    /// only after the trace + behaviors have observed them — keeping
+    /// the trace authoritative.
     pub async fn process_event(&self, event: Event) {
         let now = now_ns();
         let _ = self.sequence.next();
@@ -267,6 +288,16 @@ impl Dispatcher {
                 },
             );
         }
+
+        // Slice 004: broadcast to bus-level subscribers AFTER the
+        // trace append + behavior fire. Order is intentional — the
+        // trace is authoritative; subscribers observe events that
+        // have been recorded, never events that have not. The
+        // broadcast is non-async (Mutex over a Vec, no await), so it
+        // does not interleave with concurrent process_event calls
+        // before the trace append; sequential per-event semantics
+        // are preserved.
+        self.event_subscriptions.broadcast(&event);
     }
 }
 
