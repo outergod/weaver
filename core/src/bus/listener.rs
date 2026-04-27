@@ -542,6 +542,16 @@ async fn handle_client_message(
 /// `by_event` index. Slice 004 closed the deterministic-collision case
 /// (`weaver-buffers` bootstrap formerly minted `EventId::new(idx)`
 /// starting at 0; now wall-clock-based via `now_ns().wrapping_add(idx)`).
+///
+/// **Frame-size headroom asymmetry** (`docs/07-open-questions.md §29`):
+/// the caller's `BusMessage::EventInspectResponse` wrapper around the
+/// returned `Event` can hit `CodecError::FrameTooLarge` if a non-CLI
+/// producer ingested an event sized in
+/// `(MAX_EVENT_INGEST_FRAME, MAX_FRAME_SIZE]`. CLI emitters enforce
+/// the smaller limit at dispatch (`core/src/cli/edit.rs::send_event_with_ingest_check`),
+/// so no current production producer can trigger this; the listener
+/// stays unguarded pending a future producer landscape change (see §29
+/// candidate resolutions).
 async fn lookup_event_for_inspect(
     dispatcher: &Dispatcher,
     event_id: crate::types::ids::EventId,

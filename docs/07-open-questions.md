@@ -413,3 +413,36 @@ The defect is latent since slice 001 (the index has been last-writer-wins from t
 **Current lean**: defer to a dedicated soundness slice that fixes EventId allocation + trace indexing in one wire bump. Until then, the call sites carry a pointer here so reviewers landing at the lookup code can skip over the finding.
 
 First concrete pointers: `core/src/types/ids.rs::EventId` (type-level docstring), `core/src/trace/store.rs::TraceStore::find_event` + `update_indexes` (insert site), `core/src/bus/listener.rs::handle_message` `EventInspectRequest` arm. Originally surfaced by Codex review on PR #11 (slice 004).
+
+---
+
+## 29. EventInspectResponse Frame Headroom Asymmetry — FORWARD-COMPAT GAP
+
+Slice 004's `weaver edit` / `weaver edit-json` enforce `MAX_EVENT_INGEST_FRAME` (= `MAX_FRAME_SIZE` − `RESPONSE_WRAPPER_HEADROOM` = 65 280 bytes) at the emitter boundary so an `Event` accepted at ingest will round-trip cleanly through `weaver inspect --why`'s `BusMessage::EventInspectResponse` wrapper. The bus protocol itself, however, does NOT enforce this limit — the codec accepts any `BusMessage::Event` frame up to `MAX_FRAME_SIZE` (65 536 bytes), so a *non-CLI* producer that sends a `BufferEdit` event sized in `(MAX_EVENT_INGEST_FRAME, MAX_FRAME_SIZE]` lands cleanly in the trace.
+
+When `weaver inspect --why` then walks back, the listener's `lookup_event_for_inspect` returns the full `Event` envelope; the wrapper push to `BusMessage::EventInspectResponse { request_id, result: Ok(event) }` makes `write_message` hit `CodecError::FrameTooLarge` and drop the inspect connection. The caller sees a transport failure rather than a structured `EventInspectionError`.
+
+**Realistic exposure today**: zero. Production producers are CLI emitters (now enforce), `weaver-buffers` (only emits `BufferOpen` — tiny path string), and `weaver-git-watcher` (small events). No current code path can mint a near-frame-size event from a non-CLI client.
+
+**Why deferred from slice 004**:
+
+- Adding `EventInspectionError::EventTooLarge` is the cleanest fix (graceful structured error) but is a wire-shape change to the response enum mid-slice. Slice 004 is shipping at protocol 0x04 with the current variant set; an additive variant is borderline scope creep when no current producer triggers it.
+- Listener-side ingest enforcement (rejecting oversized `BusMessage::Event` frames at receive) requires either an API change to `read_message` (18 callers across crates) or a per-event re-serialise on the hot path. Both feel disproportionate to the realistic exposure.
+- The CLI's emitter-side `MAX_EVENT_INGEST_FRAME` check IS the practical mitigation today.
+
+**Candidate resolutions** (when a non-CLI event producer that can hit the size range is added — slice 006 agent is the most likely first trigger):
+
+- (a) **Add `EventInspectionError::EventTooLarge` variant + listener detection.** Pre-serialise the response inside `lookup_event_for_inspect`; on overflow, return `Err(EventTooLarge)`. Wire-incompat for clients that don't tolerate unknown error variants — fold the bump into a future slice that's already touching wire shape.
+- (b) **Listener-side ingest enforcement.** Plumb the original frame size from `codec::read_message` through to the listener, reject `BusMessage::Event` frames > `MAX_EVENT_INGEST_FRAME` at receive with a `BusMessage::Error { category: "event-too-large", .. }`. Symmetric contract: anything that ingests can be re-inspected.
+- (c) **Both.** Belt-and-braces: producers can't get oversized events through the wire, AND the listener gracefully degrades on residual edge cases.
+
+**Revisit triggers**:
+
+1. A non-CLI client (agent service, custom test harness, future plugin) emits a near-frame-size event and the operator hits a transport-drop on `weaver inspect --why`.
+2. The bus protocol bumps for any other reason — fold the variant addition in to amortise the wire-impact cost.
+3. A future producer legitimately needs frames > 64 KiB — re-evaluate `MAX_FRAME_SIZE` itself + the response-wrapper headroom together.
+
+**Current lean**: defer to either the next bus-protocol bump (option a folded in) OR the first non-CLI BufferEdit producer slice (whichever lands first). The CLI emitter check covers all current paths; this section pins the asymmetry so a future producer author + reviewer don't have to re-derive it.
+
+First concrete pointers: `core/src/cli/edit.rs::send_event_with_ingest_check` (emitter-side enforcement), `core/src/bus/listener.rs::lookup_event_for_inspect` (response-side wrap, currently unguarded), `core/src/bus/codec.rs::MAX_EVENT_INGEST_FRAME` + `RESPONSE_WRAPPER_HEADROOM`. Originally surfaced by Codex review on PR #11 (slice 004).
+
