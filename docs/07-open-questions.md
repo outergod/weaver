@@ -333,3 +333,36 @@ Slice 002 (`specs/002-git-watcher-actor/`, Clarification Q4) adopts the stopgap:
 **Current lean:** **(b) — components.** §2.4 already commits to the fact/component distinction; slice 002 is an acknowledged stopgap, not a rejection. Deferred until at least one revisit trigger fires.
 
 First concrete instance: `specs/002-git-watcher-actor/` Clarification Q4 (`repo/state/*`).
+
+---
+
+## 27. Bounded Subscriber Queues + Active Pruning — IMPLEMENTATION GAP
+
+§22 resolves the back-pressure *contract* at the architectural level (lossy → drop-oldest, authoritative → block-with-timeout, never block-forever, no policy admits unbounded memory growth). But the MVP implementation does not yet bound either subscriber path:
+
+- `core/src/fact_space/in_memory.rs::InMemoryFactStore` — authoritative class, uses `tokio::sync::mpsc::unbounded_channel` per subscriber (since slice 001).
+- `core/src/bus/event_subscriptions.rs::EventSubscriptions` — lossy class, mirrors the same pattern (since slice 004; module doc explicitly deferred).
+
+A second implementation gap rides along: both registries prune closed channels lazily — only when a *matching* event fires does `retain` notice a dropped receiver. A subscriber whose pattern never matches again (replaced by a `last-wins` re-subscribe, or a connection that disconnected) leaks until its channel is sent to. The leak is bounded by subscribe/disconnect *rate*, not by event volume — practically far from OOM-class even under churn — but it violates the documented lifecycle: "drop the handle ⇒ next broadcast prunes it" assumes any broadcast prunes every closed subscriber.
+
+**Concerns**:
+
+- A high-rate publisher with a slow subscriber grows core memory (Vec inside the channel) until the subscriber catches up. No drop-oldest enforcement at the channel level.
+- A high-churn `SubscribeEvents` client (e.g., one that re-subscribes with a new pattern every event) accumulates dead `Vec` entries until something matches the abandoned pattern.
+
+**Why deferred from slice 004**: bounding the event subscriber alone leaves the authoritative fact-subscriber (where the bound matters more, per architecture §3.1 — block-with-timeout requires a bound to time out *against*) inconsistent. Both paths must move in lockstep, and the design call is non-trivial:
+
+- queue size — fixed default + per-subscription override, or class-default only?
+- lossy drop-oldest implementation — `tokio::sync::mpsc` doesn't drop oldest; either a custom channel (`broadcast::channel` has its own semantics) or a wrapper that explicitly drops on `try_send` failure.
+- authoritative block-with-timeout — what timeout, and what does the publisher do when it fires? Drop the message and emit an error fact? Disconnect the slow subscriber?
+- active pruning — sweep-on-subscribe, periodic timer, or a notification path from the listener (drop ⇒ notify registry)?
+
+**Candidate triggers to revisit**:
+
+1. A subscriber slowness incident causes observable core RSS growth in operator runs.
+2. A new lossy publisher class appears (stream-item per architecture §3.1) — adds a third subscriber path and forces the design.
+3. Distribution work begins (§22 cross-network back-pressure becomes concrete) and bounds become wire-observable.
+
+**Current lean**: open a dedicated infrastructure slice when any trigger fires. Until then, both paths share the deferral note via this section reference (`event_subscriptions.rs` module doc + `in_memory.rs::broadcast` pointer).
+
+First concrete pointers: `core/src/bus/event_subscriptions.rs:22` (module doc), `core/src/fact_space/in_memory.rs::InMemoryFactStore::broadcast`. Originally surfaced by Codex review on PR #11 (slice 004).

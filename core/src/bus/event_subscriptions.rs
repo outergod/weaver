@@ -23,8 +23,12 @@
 //! implementation uses [`tokio::sync::mpsc::unbounded_channel`] for
 //! parity with [`crate::fact_space::InMemoryFactStore`]'s subscriber
 //! path (which is also unbounded in slices 001–003 despite being
-//! authoritative-class). True drop-oldest under back-pressure is
-//! deferred to a future infrastructure slice that bounds both.
+//! authoritative-class). True drop-oldest under back-pressure, and
+//! active pruning of closed subscribers whose pattern never matches
+//! again, are both deferred to a future infrastructure slice that
+//! bounds both registries in lockstep. Tracked at
+//! `docs/07-open-questions.md §27` — reviewers can skip over the
+//! unbounded-channel + lazy-prune findings via that reference.
 
 use std::sync::Mutex;
 

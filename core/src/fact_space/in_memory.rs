@@ -1,4 +1,16 @@
 //! In-memory, HashMap-backed [`FactStore`] implementation.
+//!
+//! **Subscriber discipline note**: per-subscriber channels are
+//! `tokio::sync::mpsc::unbounded_channel`, and `broadcast` prunes
+//! closed channels lazily (only on a *matching* event — a subscriber
+//! whose pattern never matches again leaks until something matches).
+//! Both deviations are tracked at `docs/07-open-questions.md §27`
+//! alongside the symmetric event-subscriber path in
+//! `core/src/bus/event_subscriptions.rs`. The §22 architectural
+//! resolution (block-with-timeout for authoritative class) requires
+//! a bound to time out *against*, so this fact-store path needs to
+//! move in lockstep with the event path when the dedicated
+//! infrastructure slice lands.
 
 use std::collections::HashMap;
 use std::sync::Arc;
