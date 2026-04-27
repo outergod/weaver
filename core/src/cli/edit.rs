@@ -18,7 +18,7 @@ use tokio::runtime::Builder;
 use tracing::warn;
 
 use crate::bus::client::{Client, ClientError};
-use crate::bus::codec::MAX_FRAME_SIZE;
+use crate::bus::codec::MAX_EVENT_INGEST_FRAME;
 use crate::cli::args::OutputFormat;
 use crate::cli::config::Config;
 use crate::cli::errors::{WeaverCliError, render_error};
@@ -188,7 +188,7 @@ pub fn handle_edit(
 ///   5. Reuse `handle_edit`'s connect + inspect + envelope path via
 ///      `prepare_dispatch`.
 ///   6. Pre-serialise the constructed `BusMessage::Event` envelope
-///      with `ciborium::into_writer`; on `len > MAX_FRAME_SIZE`
+///      with `ciborium::into_writer`; on `len > MAX_EVENT_INGEST_FRAME`
 ///      render WEAVER-EDIT-004 (exit 1).
 ///   7. Dispatch + exit 0 (fire-and-forget per FR-012).
 pub fn handle_edit_json(
@@ -255,15 +255,20 @@ pub fn handle_edit_json(
         // Step 6: pre-serialise + size-check. Catches oversized batches
         // before the codec rejects them at the framing layer (where the
         // operator would see a generic codec error post-dispatch
-        // instead of a precise WEAVER-EDIT-004).
+        // instead of a precise WEAVER-EDIT-004). The limit is
+        // `MAX_EVENT_INGEST_FRAME` (smaller than the wire `MAX_FRAME_SIZE`
+        // by `RESPONSE_WRAPPER_HEADROOM`) so the same `Event`, when
+        // wrapped as `BusMessage::EventInspectResponse` during a
+        // `weaver inspect --why` walkback, still fits within the codec's
+        // frame limit. See `bus/codec.rs` for the headroom rationale.
         let envelope = BusMessage::Event(event);
         let mut buf = Vec::new();
         ciborium::into_writer(&envelope, &mut buf)
             .map_err(|e| miette!("ciborium serialisation failed: {e}"))?;
-        if buf.len() > MAX_FRAME_SIZE {
+        if buf.len() > MAX_EVENT_INGEST_FRAME {
             let err = WeaverCliError::EditWireFrameTooLarge {
                 actual_bytes: buf.len(),
-                max_bytes: MAX_FRAME_SIZE,
+                max_bytes: MAX_EVENT_INGEST_FRAME,
                 context: Some("weaver edit-json".into()),
             };
             render_error(&err, output)?;

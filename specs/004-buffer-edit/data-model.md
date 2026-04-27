@@ -84,7 +84,7 @@ The bus-level edit-dispatch record.
 **Fields**:
 - `entity` — the buffer to edit (canonical entity, derived from `buffer_entity_ref(canonical_path)` in slice 003).
 - `version` — the emitter's snapshot of `buffer/version`. Service accepts iff `version == buffer's current buffer/version`.
-- `edits` — atomic batch. Empty `Vec` is a valid no-op; large batches are bounded only by the 64 KiB wire-frame limit (no explicit cap per spec Q3).
+- `edits` — atomic batch. Empty `Vec` is a valid no-op; large batches are bounded only by the ingest-frame limit (`MAX_FRAME_SIZE` − `RESPONSE_WRAPPER_HEADROOM` = 65 280 bytes; no explicit cap per spec Q3). The 256-byte headroom reserves space for the `BusMessage::EventInspectResponse` wrapper used by `weaver inspect --why` so any ingested event can be returned via walkback within the 64 KiB wire frame.
 
 **Delivery class**: lossy (per `EventPayload` convention, `docs/02-architecture.md §3.1`). No structured rejection path on the wire.
 

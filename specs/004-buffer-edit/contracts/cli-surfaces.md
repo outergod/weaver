@@ -118,14 +118,14 @@ The JSON top-level is an array of `TextEdit` objects (NOT a wrapped `BufferEdit`
 2. Parse to `Vec<TextEdit>`. Parse failure → exit `1` with `WEAVER-EDIT-003 — malformed edit-json input: <serde-json error chain>`.
 3. Canonicalise `<PATH>`, derive entity, connect, run inspect-lookup (same as `weaver edit` steps 1–3).
 4. Construct the envelope (same as `weaver edit` step 4).
-5. **Pre-check serialised wire size**: `ciborium::into_writer(&envelope, &mut buf)`; if `buf.len() > MAX_FRAME_SIZE` (64 KiB) → exit `1` with `WEAVER-EDIT-004 — serialised BufferEdit (<n> bytes) exceeds wire-frame limit (65 536 bytes)`.
+5. **Pre-check serialised wire size**: `ciborium::into_writer(&envelope, &mut buf)`; if `buf.len() > MAX_EVENT_INGEST_FRAME` (= `MAX_FRAME_SIZE` − `RESPONSE_WRAPPER_HEADROOM` = 65 536 − 256 = 65 280 bytes) → exit `1` with `WEAVER-EDIT-004 — serialised BufferEdit (<n> bytes) exceeds ingest-frame limit (65 280 bytes)`. The headroom ensures the same `Event`, when wrapped as `BusMessage::EventInspectResponse` during a `weaver inspect --why` walkback, still fits within the 64 KiB wire frame.
 6. Dispatch and exit `0`.
 
 **Exit codes** (same table as `weaver edit`, plus):
 
 | Code | Additional meaning |
 |---|---|
-| `1` | Malformed JSON (`WEAVER-EDIT-003`) **OR** serialised `BufferEdit` exceeds 64 KiB wire-frame limit (`WEAVER-EDIT-004`). |
+| `1` | Malformed JSON (`WEAVER-EDIT-003`) **OR** serialised `BufferEdit` exceeds the ingest-frame limit (`WEAVER-EDIT-004`). |
 
 **Example**:
 
@@ -207,7 +207,7 @@ Per L2 P6 (Humane shell), errors reference fact-space state. The `WEAVER-EDIT-NN
 - **`WEAVER-EDIT-001`** — buffer not opened. Triggered when pre-dispatch inspect-lookup returns `FactNotFound`. Diagnostic body: `"buffer not opened: <path> — no fact (entity:<u64-derived>, attribute:buffer/version) is asserted by any authority. Run \`weaver-buffers <path>\` to open the buffer."`
 - **`WEAVER-EDIT-002`** — invalid `<RANGE>` grammar. Triggered by `weaver edit` range-string parser. Body: `"invalid range \"<arg>\": expected <start-line>:<start-char>-<end-line>:<end-char> with decimal u32 components."`
 - **`WEAVER-EDIT-003`** — malformed JSON input. Triggered by `weaver edit-json` JSON parser. Body: serde-json error chain rendered through miette's source-span machinery.
-- **`WEAVER-EDIT-004`** — wire-frame too large. Triggered by `weaver edit-json` pre-dispatch size check. Body: `"serialised BufferEdit (<actual-bytes> bytes) exceeds wire-frame limit (65 536 bytes). Reduce the batch size or shorten new-text fields."`
+- **`WEAVER-EDIT-004`** — ingest-frame too large. Triggered by `weaver edit-json` pre-dispatch size check. Body: `"serialised BufferEdit (<actual-bytes> bytes) exceeds ingest-frame limit (65 280 bytes). Reduce the batch size or shorten new-text fields."` The 65 280 byte limit is `MAX_FRAME_SIZE` (65 536) − `RESPONSE_WRAPPER_HEADROOM` (256), reserving headroom for the `BusMessage::EventInspectResponse` wrapper used by `weaver inspect --why`.
 
 ## `weaver-buffers` — `--version` constant bump only
 

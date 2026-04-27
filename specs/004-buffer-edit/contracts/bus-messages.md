@@ -38,7 +38,7 @@ Plain structs (`TextEdit`, `Range`, `Position`) serialise as CBOR maps / JSON ob
 
 Unchanged from slices 001/002/003. 4-byte big-endian length prefix; one frame per message; **64 KiB max** (`weaver_core::bus::codec::MAX_FRAME_SIZE`).
 
-The 64 KiB frame limit is the **sole bound on `Vec<TextEdit>::len()`** in slice 004 (per spec Clarifications Q3). `weaver edit-json` MUST pre-check the serialised `BufferEdit` event size at CLI parse time (per CLI surface FR-015) and reject oversized inputs with `WEAVER-EDIT-004` exit 1.
+The wire-frame limit is the **sole bound on `Vec<TextEdit>::len()`** in slice 004 (per spec Clarifications Q3). `weaver edit-json` MUST pre-check the serialised `BufferEdit` event size at CLI parse time (per CLI surface FR-015) and reject oversized inputs with `WEAVER-EDIT-004` exit 1. The pre-check uses `MAX_EVENT_INGEST_FRAME` (= `MAX_FRAME_SIZE` − `RESPONSE_WRAPPER_HEADROOM` = 65 280 bytes), reserving 256 bytes of headroom so the same `Event`, when wrapped in `BusMessage::EventInspectResponse` for `weaver inspect --why` walkback, still fits within the wire frame.
 
 ## Weaver CBOR tag registry (slice 004)
 

@@ -745,4 +745,105 @@ mod tests {
         let back: BusMessage = serde_json::from_str(&s).expect("deserialize");
         assert_eq!(msg, back);
     }
+
+    /// Regression test for the slice-004 `weaver inspect --why` walkback
+    /// path. `MAX_EVENT_INGEST_FRAME` must be ≥ `RESPONSE_WRAPPER_HEADROOM`
+    /// smaller than `MAX_FRAME_SIZE` so an `Event` that ingests at the
+    /// limit can be returned via `EventInspectResponse` without exceeding
+    /// the codec's frame ceiling. This pins the headroom invariant: for
+    /// any `Event` whose `BusMessage::Event` envelope is ≤
+    /// `MAX_EVENT_INGEST_FRAME`, wrapping the same `Event` in
+    /// `BusMessage::EventInspectResponse { request_id, result: Ok(_) }`
+    /// must still serialise to ≤ `MAX_FRAME_SIZE`.
+    ///
+    /// Constructs a worst-case event near the ingest ceiling using
+    /// `BufferEdit` with a single oversized `new_text` payload (the
+    /// realistic vector for hitting the limit — `Vec<TextEdit>` size in
+    /// slice 004 is bounded only by the frame limit per spec Q3).
+    #[test]
+    fn event_inspect_response_fits_within_frame_after_ingest() {
+        use crate::bus::codec::{
+            MAX_EVENT_INGEST_FRAME, MAX_FRAME_SIZE, RESPONSE_WRAPPER_HEADROOM,
+        };
+        use crate::provenance::{ActorIdentity, Provenance};
+        use crate::types::edit::{Position, Range, TextEdit};
+        use crate::types::entity_ref::EntityRef;
+        use crate::types::event::EventPayload;
+        use crate::types::ids::EventId;
+
+        // Build a BufferEdit Event whose BusMessage::Event encoding lands
+        // within a small slack of MAX_EVENT_INGEST_FRAME by binary search
+        // over the new_text length. We don't need to hit the limit
+        // exactly — any event near it is sufficient to exercise the
+        // response-side headroom check.
+        let make_event = |new_text_len: usize| -> Event {
+            Event {
+                id: EventId::new(0),
+                name: "buffer/edit".into(),
+                target: Some(EntityRef::new(1)),
+                payload: EventPayload::BufferEdit {
+                    entity: EntityRef::new(1),
+                    version: 0,
+                    edits: vec![TextEdit {
+                        range: Range {
+                            start: Position {
+                                line: 0,
+                                character: 0,
+                            },
+                            end: Position {
+                                line: 0,
+                                character: 0,
+                            },
+                        },
+                        new_text: "x".repeat(new_text_len),
+                    }],
+                },
+                provenance: Provenance::new(ActorIdentity::User, 0, None).unwrap(),
+            }
+        };
+        let frame_size = |evt: &Event| -> usize {
+            let msg = BusMessage::Event(evt.clone());
+            let mut buf = Vec::new();
+            ciborium::into_writer(&msg, &mut buf).unwrap();
+            buf.len()
+        };
+
+        // Binary-search the largest new_text size whose BusMessage::Event
+        // frame is ≤ MAX_EVENT_INGEST_FRAME — i.e., the worst case the
+        // ingest check accepts.
+        let mut lo = 0usize;
+        let mut hi = MAX_EVENT_INGEST_FRAME;
+        while lo < hi {
+            let mid = lo + (hi - lo).div_ceil(2);
+            let size = frame_size(&make_event(mid));
+            if size <= MAX_EVENT_INGEST_FRAME {
+                lo = mid;
+            } else {
+                hi = mid - 1;
+            }
+        }
+        let event = make_event(lo);
+        let ingest_size = frame_size(&event);
+        assert!(
+            ingest_size <= MAX_EVENT_INGEST_FRAME,
+            "ingest worst-case must fit ingest limit: {ingest_size} > {MAX_EVENT_INGEST_FRAME}"
+        );
+
+        // Wrap the same Event in EventInspectResponse and verify the
+        // response frame still fits MAX_FRAME_SIZE.
+        let resp = BusMessage::EventInspectResponse {
+            request_id: u64::MAX,
+            result: Ok(event),
+        };
+        let mut resp_buf = Vec::new();
+        ciborium::into_writer(&resp, &mut resp_buf).unwrap();
+        assert!(
+            resp_buf.len() <= MAX_FRAME_SIZE,
+            "response frame ({} bytes) must fit MAX_FRAME_SIZE ({MAX_FRAME_SIZE} bytes); wrapper \
+             overhead exceeded RESPONSE_WRAPPER_HEADROOM ({RESPONSE_WRAPPER_HEADROOM}): \
+             ingest_size={ingest_size}, response_size={}",
+            resp_buf.len(),
+            resp_buf.len()
+        );
+    }
 }

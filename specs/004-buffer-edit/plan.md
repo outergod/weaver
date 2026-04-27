@@ -44,7 +44,7 @@ Gates derived from `.specify/memory/constitution.md` v0.7.0. Each L2 principle i
   - Buffer not opened: `WEAVER-EDIT-001 — buffer not opened: <path> — no fact (entity:<derived>, attribute:buffer/version) is asserted by any authority`.
   - Range parse failure: `WEAVER-EDIT-002 — invalid range "<arg>": expected <start-line>:<start-char>-<end-line>:<end-char>`.
   - JSON parse failure: `WEAVER-EDIT-003 — malformed edit-json input: <serde-json error chain>`.
-  - Frame too large: `WEAVER-EDIT-004 — serialised BufferEdit (<n> bytes) exceeds wire-frame limit (65 536 bytes)`.
+  - Ingest frame too large: `WEAVER-EDIT-004 — serialised BufferEdit (<n> bytes) exceeds ingest-frame limit (65 280 bytes)`.
 - **P7 — Public-Surface Enumeration.** Two surfaces touched:
   - **Bus protocol** — MAJOR wire-incompatible change. `Hello.protocol_version` advances `0x03 → 0x04`; `EventPayload::BufferEdit { entity, version, edits }` added; `TextEdit`/`Range`/`Position` struct types added (plain serialisation; no CBOR tag). Enumerated in `contracts/bus-messages.md`. No removals; no shape change to existing message kinds.
   - **CLI + structured output** — MINOR additive. `weaver edit` and `weaver edit-json` subcommands added to the `weaver` binary; `weaver --version` JSON `bus_protocol` field advances `0.3.0 → 0.4.0`; all four binaries (`weaver`, `weaver-buffers`, `weaver-git-watcher`, `weaver-tui`) inherit the bumped `bus_protocol` constant in their `--version` output (constant-driven; not a CLI-surface change). Enumerated in `contracts/cli-surfaces.md`.

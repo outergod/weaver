@@ -138,12 +138,16 @@ pub enum WeaverCliError {
     },
 
     /// WEAVER-EDIT-004 — the serialised `EventPayload::BufferEdit`
-    /// envelope exceeds the 64 KiB wire-frame limit. The serialised
-    /// byte count is captured pre-dispatch so the operator gets a
-    /// precise diagnostic rather than a generic codec error after a
-    /// partial round-trip. Exit 1.
+    /// envelope exceeds the ingest-frame limit. The limit is smaller
+    /// than the wire-level `MAX_FRAME_SIZE` (64 KiB) by
+    /// `RESPONSE_WRAPPER_HEADROOM` so the same `Event`, when wrapped as
+    /// `BusMessage::EventInspectResponse` during `weaver inspect --why`,
+    /// still fits within `MAX_FRAME_SIZE` on the response side. The
+    /// serialised byte count is captured pre-dispatch so the operator
+    /// gets a precise diagnostic rather than a generic codec error
+    /// after a partial round-trip. Exit 1.
     #[error(
-        "serialised BufferEdit ({actual_bytes} bytes) exceeds wire-frame limit ({max_bytes} bytes). Reduce the batch size or shorten new-text fields."
+        "serialised BufferEdit ({actual_bytes} bytes) exceeds ingest-frame limit ({max_bytes} bytes). Reduce the batch size or shorten new-text fields."
     )]
     #[diagnostic(code("WEAVER-EDIT-004"))]
     EditWireFrameTooLarge {
