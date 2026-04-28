@@ -4,8 +4,10 @@
 //! slice 001 keeps the full in-memory log.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use super::entry::{TraceEntry, TracePayload, TraceSequence};
+use crate::types::event::{Event, EventOutbound};
 use crate::types::fact::FactKey;
 use crate::types::ids::EventId;
 
@@ -30,6 +32,18 @@ pub struct TraceStore {
     /// behavior firing that asserted the fact. Populated by
     /// `BehaviorFired` entries.
     by_fact_asserting_behavior: HashMap<FactKey, (EventId, crate::types::ids::BehaviorId)>,
+    /// Per-trace monotonic `EventId` allocator (§28(a)). Producers no
+    /// longer mint `EventId` from wall-clock-ns; the bus listener
+    /// allocates a fresh stamped id from this counter on every
+    /// accepted [`EventOutbound`]. Initialised to `1` so the slice-001
+    /// `EventId::ZERO` sentinel meaning ("no causal parent" lookup) is
+    /// never returned by stamping. Per `specs/005-buffer-save/research.md` §5.
+    ///
+    // dead_code is suppressed transitionally: production wiring lands in
+    // T008 (listener stamping path); tests in this module already
+    // exercise the field via allocate_event_id / stamp_and_insert.
+    #[allow(dead_code)]
+    next_event_id: AtomicU64,
 }
 
 impl TraceStore {
@@ -41,7 +55,47 @@ impl TraceStore {
             by_fact: HashMap::new(),
             by_fact_assert: HashMap::new(),
             by_fact_asserting_behavior: HashMap::new(),
+            next_event_id: AtomicU64::new(1),
         }
+    }
+
+    /// Allocate a fresh stamped [`EventId`] (§28(a)). Counter starts at
+    /// `1`; ZERO is never returned.
+    ///
+    /// Atomic and contention-free under multi-producer bus traffic —
+    /// `Relaxed` ordering is sufficient because the only invariant
+    /// we need is uniqueness of allocated values; happens-before
+    /// against other operations is provided by whatever serialises
+    /// the actual trace insertion (the listener's `Mutex<TraceStore>`
+    /// today).
+    // dead_code is suppressed transitionally: production wiring lands in
+    // T008 (listener stamping path); tests exercise the API today.
+    #[allow(dead_code)]
+    pub(crate) fn allocate_event_id(&self) -> EventId {
+        let id_raw = self.next_event_id.fetch_add(1, Ordering::Relaxed);
+        EventId::new(id_raw)
+    }
+
+    /// Stamp an [`EventOutbound`] with a fresh [`EventId`], append the
+    /// resulting [`Event`] to the trace, and return the stamped event
+    /// for subscriber broadcast. Callers hold the `&mut TraceStore`
+    /// (typically via the listener's `Mutex<TraceStore>` guard) — the
+    /// counter is concurrent-safe in isolation, but the entries vec
+    /// and reverse indexes still serialise through the existing
+    /// borrow discipline.
+    // dead_code is suppressed transitionally: production wiring lands in
+    // T008 (listener stamping path); tests exercise the API today.
+    #[allow(dead_code)]
+    pub(crate) fn stamp_and_insert(&mut self, timestamp_ns: u64, outbound: EventOutbound) -> Event {
+        let id = self.allocate_event_id();
+        let event = Event::from_outbound(id, outbound);
+        self.append(
+            timestamp_ns,
+            TracePayload::Event {
+                event: event.clone(),
+            },
+        );
+        event
     }
 
     /// Append a trace entry and return its sequence.
@@ -162,9 +216,99 @@ mod tests {
     use crate::provenance::{ActorIdentity, Provenance};
     use crate::trace::entry::TracePayload;
     use crate::types::entity_ref::EntityRef;
-    use crate::types::event::{Event, EventPayload};
+    use crate::types::event::{Event, EventOutbound, EventPayload};
     use crate::types::fact::{Fact, FactValue};
     use crate::types::ids::BehaviorId;
+
+    fn sample_outbound() -> EventOutbound {
+        EventOutbound {
+            name: "buffer/open".into(),
+            target: Some(EntityRef::new(1)),
+            payload: EventPayload::BufferOpen {
+                path: "/tmp/weaver-fixture".into(),
+            },
+            provenance: Provenance::new(ActorIdentity::Tui, 100, None).unwrap(),
+        }
+    }
+
+    #[test]
+    fn allocate_event_id_is_monotonic_and_skips_zero() {
+        let store = TraceStore::new();
+        let ids: Vec<EventId> = (0..5).map(|_| store.allocate_event_id()).collect();
+        assert_eq!(ids[0], EventId::new(1), "counter must start at 1, not 0");
+        for window in ids.windows(2) {
+            assert!(
+                window[1].as_u64() > window[0].as_u64(),
+                "ids must be strictly monotonic: {:?}",
+                ids
+            );
+        }
+        for id in &ids {
+            assert_ne!(*id, EventId::ZERO, "ZERO must never be allocated");
+        }
+    }
+
+    #[test]
+    fn allocate_event_id_concurrent_uniqueness() {
+        // §28(a) intent: stamped EventIds are globally unique per
+        // trace, regardless of concurrent producer pressure on the
+        // listener. The atomic counter is the structural guarantee;
+        // this test exercises it directly without going through the
+        // listener's serialising mutex.
+        use std::collections::HashSet;
+        use std::sync::Arc;
+
+        let store = Arc::new(TraceStore::new());
+        let n_threads = 4;
+        let n_per_thread = 250;
+        let mut handles = Vec::with_capacity(n_threads);
+        for _ in 0..n_threads {
+            let store = Arc::clone(&store);
+            handles.push(std::thread::spawn(move || {
+                (0..n_per_thread)
+                    .map(|_| store.allocate_event_id())
+                    .collect::<Vec<EventId>>()
+            }));
+        }
+        let mut all_ids = Vec::with_capacity(n_threads * n_per_thread);
+        for h in handles {
+            all_ids.extend(h.join().unwrap());
+        }
+        assert_eq!(all_ids.len(), n_threads * n_per_thread);
+        let unique: HashSet<EventId> = all_ids.iter().copied().collect();
+        assert_eq!(
+            unique.len(),
+            all_ids.len(),
+            "every allocate_event_id call must return a unique id; {} duplicates",
+            all_ids.len() - unique.len()
+        );
+        assert!(
+            !unique.contains(&EventId::ZERO),
+            "ZERO must never be allocated"
+        );
+    }
+
+    #[test]
+    fn stamp_and_insert_records_event_under_stamped_id() {
+        let mut store = TraceStore::new();
+        let outbound = sample_outbound();
+        let event = store.stamp_and_insert(100, outbound.clone());
+
+        assert_ne!(event.id, EventId::ZERO);
+        assert_eq!(event.name, outbound.name);
+        assert_eq!(event.target, outbound.target);
+        assert_eq!(event.payload, outbound.payload);
+        assert_eq!(event.provenance, outbound.provenance);
+
+        let seq = store
+            .find_event(event.id)
+            .expect("event indexed by stamped id");
+        let entry = store.get(seq).expect("trace entry retrievable by sequence");
+        match &entry.payload {
+            TracePayload::Event { event: stored } => assert_eq!(stored, &event),
+            other => panic!("expected Event payload, got {other:?}"),
+        }
+    }
 
     #[test]
     fn append_and_lookup_event() {
