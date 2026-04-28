@@ -4,7 +4,7 @@
 //! `specs/001-hello-fact/contracts/bus-messages.md`.
 
 use crate::provenance::Provenance;
-use crate::types::event::Event;
+use crate::types::event::{Event, EventOutbound};
 use crate::types::fact::{Fact, FactKey, FactValue};
 use crate::types::ids::{BehaviorId, EventId};
 use serde::{Deserialize, Serialize};
@@ -52,11 +52,31 @@ pub const BUS_PROTOCOL_VERSION_STR: &str = "0.5.0";
 /// `FactRetract { key, provenance }` →
 /// `{"type":"fact-retract","payload":{"key":...,"provenance":...}}`.
 /// Consumers always dispatch on `.type` regardless of variant shape.
+///
+/// **Slice-005 §28(a): direction-typed event carrier.** The `Event(E)`
+/// variant is generic over its event-payload carrier so the wire-shape
+/// asymmetry between producer-side outbound traffic ([`EventOutbound`],
+/// no `id`) and listener-side broadcast ([`Event`], with stamped `id`)
+/// can be expressed in the type system. Two aliases pin the directions
+/// at use sites: [`BusMessageInbound`] and [`BusMessageOutbound`].
+///
+/// The default type parameter `E = Event` preserves every pre-§28(a)
+/// call site — `BusMessage` without parameter resolves to
+/// `BusMessage<Event>` (= `BusMessageOutbound`), the at-rest /
+/// listener-broadcast shape. T009/T010/T011 migrate producer-side
+/// write paths to construct [`BusMessageInbound`] (= `BusMessage<EventOutbound>`)
+/// instead.
+///
+/// The `EventInspectResponse` variant carries [`Event`] (with stamped
+/// `id`) regardless of direction — the listener stamps before
+/// returning a walked-back event, so callers always see the at-rest
+/// shape on the response side. This is intentional; the type
+/// parameter `E` only governs the `Event(E)` carrier.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "payload", rename_all = "kebab-case")]
-pub enum BusMessage {
+pub enum BusMessage<E = Event> {
     Hello(HelloMsg),
-    Event(Event),
+    Event(E),
     FactAssert(Fact),
     FactRetract {
         key: FactKey,
@@ -111,6 +131,21 @@ pub enum BusMessage {
         facts: Vec<Fact>,
     },
 }
+
+/// Producer → listener direction. The `Event(E)` carrier is
+/// [`EventOutbound`] (no `id`); the listener allocates a stamped
+/// [`crate::types::ids::EventId`] on accept and reconstructs an
+/// at-rest [`Event`] for trace insertion and subscriber broadcast.
+/// Per slice-005 FR-019..FR-021. T008 wires the listener's read path;
+/// T009/T010/T011 migrate the producers' write paths.
+pub type BusMessageInbound = BusMessage<EventOutbound>;
+
+/// Listener → subscriber direction (also: at-rest shape). The
+/// `Event(E)` carrier is [`Event`] (with stamped `id`). This is the
+/// default `BusMessage` shape — pre-§28(a) call sites resolved
+/// `BusMessage` to `BusMessage<Event>` implicitly via the default type
+/// parameter, and that resolution is preserved.
+pub type BusMessageOutbound = BusMessage<Event>;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HelloMsg {
@@ -836,8 +871,11 @@ mod tests {
         );
 
         // Wrap the same Event in EventInspectResponse and verify the
-        // response frame still fits MAX_FRAME_SIZE.
-        let resp = BusMessage::EventInspectResponse {
+        // response frame still fits MAX_FRAME_SIZE. Annotate the
+        // outbound direction explicitly because EventInspectResponse
+        // doesn't reference the BusMessage type parameter so inference
+        // can't pick a default here.
+        let resp: BusMessageOutbound = BusMessage::EventInspectResponse {
             request_id: u64::MAX,
             result: Ok(event),
         };
