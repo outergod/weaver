@@ -770,6 +770,18 @@ async fn handle_event(
                 "ignoring BufferOpen event on the publisher subscription path",
             );
         }
+        EventPayload::BufferSave { .. } => {
+            // Reader-loop dispatch for BufferSave is wired in slice-005
+            // T018 (specs/005-buffer-save/tasks.md). T006 introduces
+            // the variant at the wire layer; the publisher does not
+            // yet subscribe to "buffer-save" events, so any arrival
+            // here is best-effort ignored to keep the reader loop
+            // alive until the dispatch arm lands.
+            debug!(
+                event_id = event_id.as_u64(),
+                "ignoring BufferSave event pre-T018 (no dispatch arm yet)",
+            );
+        }
     }
     Ok(())
 }

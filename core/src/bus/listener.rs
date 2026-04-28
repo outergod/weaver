@@ -638,6 +638,16 @@ fn validate_event_envelope(event: &crate::types::event::Event) -> Result<(), Str
                 ));
             }
         },
+        EventPayload::BufferSave { entity, .. } => match event.target {
+            Some(target) if target == *entity => {}
+            other => {
+                return Err(format!(
+                    "BufferSave envelope/payload mismatch: target={} payload.entity={}",
+                    other.map_or("None".to_string(), |e| e.as_u64().to_string()),
+                    entity.as_u64()
+                ));
+            }
+        },
         EventPayload::BufferOpen { .. } => {
             // No entity in payload to compare; weaver-buffers re-derives
             // the canonical entity server-side from the path.
