@@ -767,16 +767,30 @@ mod handshake_tests {
 
     #[tokio::test]
     async fn mismatched_hello_is_rejected_with_contract_detail() {
+        // Client announces the immediate-prior protocol version. The
+        // contract (specs/005-buffer-save/contracts/bus-messages.md
+        // §Connection lifecycle) pins the exact `detail` wording the
+        // core must emit so operators see a consistent diagnostic.
+        assert_version_rejected_with_contract_detail(0x04).await;
+    }
+
+    #[tokio::test]
+    async fn forward_incompatible_hellos_are_rejected_with_contract_detail() {
+        // Forward-incompatibility check: every protocol version older
+        // than the immediate-prior must also reject with the same
+        // category and detail-string template, so a long-tail v0.1/v0.2
+        // client gets the same diagnostic shape as a v0.4 one.
+        for stale_version in [0x01u8, 0x02, 0x03] {
+            assert_version_rejected_with_contract_detail(stale_version).await;
+        }
+    }
+
+    async fn assert_version_rejected_with_contract_detail(stale_version: u8) {
         let (server, mut client) = UnixStream::pair().expect("pair");
         let dispatcher = Arc::new(Dispatcher::new());
 
         let server_task = tokio::spawn(handle_connection(server, dispatcher));
 
-        // Client announces the prior protocol version. The contract
-        // (specs/004-buffer-edit/contracts/bus-messages.md §Connection
-        // lifecycle) pins the exact `detail` wording the core must
-        // emit so operators see a consistent diagnostic.
-        let stale_version: u8 = 0x03;
         write_message(
             &mut client,
             &BusMessage::Hello(HelloMsg {

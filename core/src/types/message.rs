@@ -21,20 +21,26 @@ use serde::{Deserialize, Serialize};
 ///   [`EventPayload`] drops `BufferEdited` / `BufferCleaned` in favor
 ///   of `BufferOpen { path }`; `FactValue` gains a `U64` variant. See
 ///   `specs/003-buffer-service/contracts/bus-messages.md`.
-/// - `0x04` / `0.4.0` — **current**, slice 004. Breaking wire change:
+/// - `0x04` / `0.4.0` — slice 004. Breaking wire change:
 ///   [`crate::types::event::EventPayload`] gains a `BufferEdit { entity,
 ///   version, edits }` variant carrying the new
 ///   [`crate::types::edit::TextEdit`] / [`crate::types::edit::Range`] /
 ///   [`crate::types::edit::Position`] struct types. See
 ///   `specs/004-buffer-edit/contracts/bus-messages.md`.
+/// - `0x05` / `0.5.0` — **current**, slice 005. Breaking wire change:
+///   adds the `buffer-save` event variant; producers serialise an
+///   ID-stripped event envelope, with the bus listener allocating a
+///   fresh [`crate::types::ids::EventId`] on accept (closes the
+///   wall-clock-ns collision class — see `docs/07-open-questions.md`
+///   §28). See `specs/005-buffer-save/contracts/bus-messages.md`.
 ///
 /// Public surface per L2 P7. Increments follow the policy in
 /// `specs/003-buffer-service/contracts/bus-messages.md` §Versioning.
-pub const BUS_PROTOCOL_VERSION: u8 = 0x04;
+pub const BUS_PROTOCOL_VERSION: u8 = 0x05;
 
 /// Semver-style string representation of [`BUS_PROTOCOL_VERSION`].
 /// Used in CLI output (e.g., `weaver --version`).
-pub const BUS_PROTOCOL_VERSION_STR: &str = "0.4.0";
+pub const BUS_PROTOCOL_VERSION_STR: &str = "0.5.0";
 
 /// The top-level enum of bus messages.
 ///
