@@ -105,29 +105,35 @@ where F: FnMut(WriteStep) -> Result<(), io::Error>,
 
 ## 4. `EventOutbound` ↔ `Event` relationship
 
-**Decision**: two parallel structs in `core/src/types/event.rs`:
+**Decision**: two parallel structs in `core/src/types/event.rs`. `EventOutbound` is the slice-001 canonical `Event` shape minus `id`; `Event` (the at-rest / broadcast shape) is unchanged from slice 004. `causal_parent` continues to live on `provenance.causal_parent` per the slice-001 data model — Q1 (ID-stripped envelope) governs the `id` field only; no Provenance-shape change rides this slice.
 
 ```rust
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "kebab-case")]
 pub struct EventOutbound {
+    pub name: String,
+    pub target: Option<EntityRef>,
     pub payload: EventPayload,
     pub provenance: Provenance,
-    pub causal_parent: Option<EventId>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "kebab-case")]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Event {
     pub id: EventId,
+    pub name: String,
+    pub target: Option<EntityRef>,
     pub payload: EventPayload,
     pub provenance: Provenance,
-    pub causal_parent: Option<EventId>,
 }
 
 impl Event {
     pub fn from_outbound(id: EventId, outbound: EventOutbound) -> Self {
-        Self { id, payload: outbound.payload, provenance: outbound.provenance, causal_parent: outbound.causal_parent }
+        Self {
+            id,
+            name: outbound.name,
+            target: outbound.target,
+            payload: outbound.payload,
+            provenance: outbound.provenance,
+        }
     }
 }
 ```
@@ -137,7 +143,7 @@ impl Event {
 **Rationale**:
 
 - Each type has its own serde derive; codec emits/accepts shapes that are byte-identical to slice-004's `Event` (modulo the absent `id` field on outbound). No special-cased serializer.
-- Field-name parity (`payload`, `provenance`, `causal_parent`) makes inflation a trivial copy. Future additions to `Event` add to both structs in lockstep; the relationship `Event = EventOutbound + id` is preserved structurally.
+- Field-name parity (`name`, `target`, `payload`, `provenance`) makes inflation a trivial copy. Future additions to `Event` add to both structs in lockstep; the relationship `Event = EventOutbound + id` is preserved structurally.
 - Public conversion in one direction only — the type system prevents a stamped Event from being downgraded to outbound shape (which would lose its trace identity).
 
 **Alternatives considered**:

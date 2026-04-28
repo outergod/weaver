@@ -99,16 +99,17 @@ A producer that attempts to send a wire-level `Event` (with `id`) on the inbound
 
 ```json
 {
+  "name": "buffer/save",
+  "target": 4611686018427387946,
   "payload": {
     "type": "buffer-save",
     "payload": {"entity": 4611686018427387946, "version": 7}
   },
   "provenance": {
     "source": {"type": "user"},
-    "timestamp-ns": 1714217040123456789,
-    "causal-parent": null
-  },
-  "causal-parent": null
+    "timestamp_ns": 1714217040123456789,
+    "causal_parent": null
+  }
 }
 ```
 
@@ -117,16 +118,17 @@ A producer that attempts to send a wire-level `Event` (with `id`) on the inbound
 ```json
 {
   "id": 4216,
+  "name": "buffer/save",
+  "target": 4611686018427387946,
   "payload": {
     "type": "buffer-save",
     "payload": {"entity": 4611686018427387946, "version": 7}
   },
   "provenance": {
     "source": {"type": "user"},
-    "timestamp-ns": 1714217040123456789,
-    "causal-parent": null
-  },
-  "causal-parent": null
+    "timestamp_ns": 1714217040123456789,
+    "causal_parent": null
+  }
 }
 ```
 

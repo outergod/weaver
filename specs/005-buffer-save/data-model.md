@@ -8,32 +8,41 @@ This document captures the new types introduced by slice 005, their wire shapes,
 
 ```rust
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "kebab-case")]
 pub struct EventOutbound {
+    pub name: String,
+    pub target: Option<EntityRef>,
     pub payload: EventPayload,
     pub provenance: Provenance,
-    pub causal_parent: Option<EventId>,
 }
 ```
 
-The wire-level shape of an event in flight from a producer to the listener. Has **no `id` field** — the listener allocates a stamped `EventId` on accept (per FR-021 + research §5).
+The wire-level shape of an event in flight from a producer to the listener — `Event` minus `id`. The listener allocates a stamped `EventId` on accept (per FR-021 + research §5). Field set mirrors slice-001's canonical `Event` shape (`name` is the wire-stable identifier per L2 P7; `target` carries the entity the event is about, used for filtered subscriptions and `weaver inspect` rendering); `causal_parent` continues to live on `provenance.causal_parent` per slice-001 data-model.md:55, unchanged across slices 002/003/004.
 
-**Wire shape (JSON, kebab-case)**:
+**Wire shape (JSON)**:
 ```json
 {
+  "name": "buffer/save",
+  "target": 42,
   "payload": {"type": "buffer-save", "payload": {"entity": 42, "version": 7}},
-  "provenance": {"source": {"type": "user"}, "timestamp-ns": 1714217040123456789, "causal-parent": null},
-  "causal-parent": null
+  "provenance": {"source": {"type": "user"}, "timestamp_ns": 1714217040123456789, "causal_parent": null}
 }
 ```
 
-**Wire shape (CBOR)**: plain CBOR map with text-string keys `payload`, `provenance`, `causal-parent`. No CBOR tag.
+(`Provenance` field names are snake_case on the wire, matching slice-003/004 contracts; `EventPayload` variant tags are kebab-case per Amendment 5 because the enum carries `#[serde(rename_all = "kebab-case")]`.)
+
+**Wire shape (CBOR)**: plain CBOR map carrying the four `EventOutbound` fields as text-string keys (`name`, `target`, `payload`, `provenance`). No CBOR tag.
 
 **Conversion to `Event`**:
 ```rust
 impl Event {
     pub fn from_outbound(id: EventId, outbound: EventOutbound) -> Self {
-        Self { id, payload: outbound.payload, provenance: outbound.provenance, causal_parent: outbound.causal_parent }
+        Self {
+            id,
+            name: outbound.name,
+            target: outbound.target,
+            payload: outbound.payload,
+            provenance: outbound.provenance,
+        }
     }
 }
 ```
@@ -136,20 +145,20 @@ Test-injection hook surface for `atomic_write_with_hooks` (per `research.md §3`
 
 ## Inherited types — extended
 
-### `Event` (extended)
+### `Event` (unchanged shape; production-side semantics revised)
 
 ```rust
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "kebab-case")]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Event {
     pub id: EventId,
+    pub name: String,
+    pub target: Option<EntityRef>,
     pub payload: EventPayload,
     pub provenance: Provenance,
-    pub causal_parent: Option<EventId>,
 }
 ```
 
-Unchanged shape from slice 004. Now produced ONLY by the listener (via `Event::from_outbound`); no longer produced by producers (per FR-019). Subscribers receive `Event` via `BusMessageOutbound::Event(_)`.
+Field set unchanged from slice 004 — listed here for cross-reference against `EventOutbound` (which is `Event` minus `id`). Under §28(a), `Event` is now produced ONLY by the listener (via `Event::from_outbound`); no longer constructed by producers (per FR-019). Subscribers continue to receive `Event` via `BusMessageOutbound::Event(_)`.
 
 ### `EventId` (semantics revised under §28(a))
 
