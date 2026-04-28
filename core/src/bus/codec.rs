@@ -14,7 +14,7 @@
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
-use crate::types::message::BusMessage;
+use crate::types::message::{BusMessage, BusMessageInbound};
 
 /// Maximum frame payload in bytes (64 KiB).
 pub const MAX_FRAME_SIZE: usize = 64 * 1024;
@@ -57,10 +57,66 @@ pub enum CodecError {
     Decode(String),
 }
 
-/// Encode a message as a length-prefixed CBOR frame and write it.
+/// Encode an at-rest [`BusMessage`] (= [`crate::types::message::BusMessageOutbound`])
+/// as a length-prefixed CBOR frame and write it. This is the
+/// listener→subscriber broadcast direction and the pre-§28(a)
+/// producer→listener direction (still used by call sites that have
+/// not yet migrated to [`write_message_inbound`]).
 pub async fn write_message<W>(writer: &mut W, msg: &BusMessage) -> Result<(), CodecError>
 where
     W: AsyncWrite + Unpin,
+{
+    write_frame(writer, msg).await
+}
+
+/// Encode a [`BusMessageInbound`] (post-§28(a) producer→listener
+/// direction; `Event` carrier is [`crate::types::event::EventOutbound`],
+/// no `id`) as a length-prefixed CBOR frame and write it. T009/T010/T011
+/// migrate the existing producers to this entry point; the existing
+/// [`write_message`] continues to serve at-rest broadcast paths and
+/// any callers that still construct the at-rest [`BusMessage`] shape
+/// during the transition.
+pub async fn write_message_inbound<W>(
+    writer: &mut W,
+    msg: &BusMessageInbound,
+) -> Result<(), CodecError>
+where
+    W: AsyncWrite + Unpin,
+{
+    write_frame(writer, msg).await
+}
+
+/// Read one length-prefixed CBOR frame and decode it as a
+/// [`BusMessage`] (= at-rest broadcast / response shape). This is the
+/// producer-side response-read direction and the pre-§28(a)
+/// listener inbound-read direction (still used by call sites that
+/// have not yet migrated to [`read_message_inbound`]).
+pub async fn read_message<R>(reader: &mut R) -> Result<BusMessage, CodecError>
+where
+    R: AsyncRead + Unpin,
+{
+    read_frame(reader).await
+}
+
+/// Read one length-prefixed CBOR frame and decode it as a
+/// [`BusMessageInbound`] (post-§28(a) listener inbound shape; `Event`
+/// carrier is [`crate::types::event::EventOutbound`], no `id`).
+///
+/// `#[serde(deny_unknown_fields)]` on `EventOutbound` is what makes a
+/// producer-supplied `Event { id, .. }` shape on the inbound channel
+/// hit a structured [`CodecError::Decode`] here, satisfying SC-506.
+/// T008 wires the listener to use this entry point.
+pub async fn read_message_inbound<R>(reader: &mut R) -> Result<BusMessageInbound, CodecError>
+where
+    R: AsyncRead + Unpin,
+{
+    read_frame(reader).await
+}
+
+async fn write_frame<W, M>(writer: &mut W, msg: &M) -> Result<(), CodecError>
+where
+    W: AsyncWrite + Unpin,
+    M: serde::Serialize,
 {
     let mut payload = Vec::new();
     ciborium::into_writer(msg, &mut payload).map_err(|e| CodecError::Encode(e.to_string()))?;
@@ -80,10 +136,10 @@ where
     Ok(())
 }
 
-/// Read one length-prefixed CBOR frame and decode it as a message.
-pub async fn read_message<R>(reader: &mut R) -> Result<BusMessage, CodecError>
+async fn read_frame<R, M>(reader: &mut R) -> Result<M, CodecError>
 where
     R: AsyncRead + Unpin,
+    M: serde::de::DeserializeOwned,
 {
     let mut len_buf = [0u8; 4];
     reader.read_exact(&mut len_buf).await?;
@@ -102,7 +158,10 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::message::{BUS_PROTOCOL_VERSION, BusMessage, HelloMsg};
+    use crate::provenance::{ActorIdentity, Provenance};
+    use crate::types::entity_ref::EntityRef;
+    use crate::types::event::{EventOutbound, EventPayload};
+    use crate::types::message::{BUS_PROTOCOL_VERSION, BusMessage, BusMessageInbound, HelloMsg};
 
     #[tokio::test]
     async fn round_trip_hello() {
@@ -115,6 +174,31 @@ mod tests {
 
         let mut cursor = buf.as_slice();
         let back = read_message(&mut cursor).await.unwrap();
+        assert_eq!(msg, back);
+    }
+
+    #[tokio::test]
+    async fn round_trip_inbound_event_outbound() {
+        // Slice 005: write an inbound BusMessage carrying EventOutbound
+        // (no `id`); confirm it round-trips through the direction-typed
+        // codec entry points.
+        let outbound = EventOutbound {
+            name: "buffer/save".into(),
+            target: Some(EntityRef::new(42)),
+            payload: EventPayload::BufferSave {
+                entity: EntityRef::new(42),
+                version: 7,
+            },
+            provenance: Provenance::new(ActorIdentity::User, 1_714_217_040_123_456_789, None)
+                .unwrap(),
+        };
+        let msg: BusMessageInbound = BusMessage::Event(outbound);
+
+        let mut buf: Vec<u8> = Vec::new();
+        write_message_inbound(&mut buf, &msg).await.unwrap();
+
+        let mut cursor = buf.as_slice();
+        let back = read_message_inbound(&mut cursor).await.unwrap();
         assert_eq!(msg, back);
     }
 
