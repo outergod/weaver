@@ -9,57 +9,10 @@ use crate::types::ids::EventId;
 use serde::{Deserialize, Serialize};
 
 /// An event published on the bus.
-///
-/// Slice 005 splits the event lifecycle: producers serialise
-/// [`EventOutbound`] (no `id`) and the bus listener allocates a
-/// stamped [`EventId`] on accept, constructing the at-rest [`Event`]
-/// via [`Event::from_outbound`]. Subscribers always observe `Event`.
-/// See `specs/005-buffer-save/spec.md` FR-019..FR-024 and
-/// `docs/07-open-questions.md` §28.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Event {
     pub id: EventId,
     /// Wire-stable event name (e.g., `"buffer/open"`).
-    pub name: String,
-    pub target: Option<EntityRef>,
-    pub payload: EventPayload,
-    pub provenance: Provenance,
-}
-
-impl Event {
-    /// Promote an [`EventOutbound`] to the at-rest [`Event`] shape by
-    /// stamping a listener-allocated [`EventId`]. This is the sole
-    /// production path for `Event` under §28(a) — producers no
-    /// longer mint EventIds.
-    pub fn from_outbound(id: EventId, outbound: EventOutbound) -> Self {
-        Self {
-            id,
-            name: outbound.name,
-            target: outbound.target,
-            payload: outbound.payload,
-            provenance: outbound.provenance,
-        }
-    }
-}
-
-/// The wire-level shape of an event in flight from a producer to the
-/// listener — [`Event`] minus `id`. The listener allocates a stamped
-/// [`EventId`] on accept (per `specs/005-buffer-save/spec.md` FR-021)
-/// via [`Event::from_outbound`]; producers MUST construct
-/// `EventOutbound` and never mint `EventId` themselves.
-///
-/// `causal_parent` continues to live on `provenance.causal_parent` per
-/// the slice-001 data model — Q1 (ID-stripped envelope) governs the
-/// `id` field only; no `Provenance`-shape change rides slice 005.
-///
-/// `#[serde(deny_unknown_fields)]` is load-bearing: a producer that
-/// erroneously serialises an `Event { id, .. }` shape on the inbound
-/// channel hits a structured decode error (SC-506) rather than
-/// silently dropping the `id` and producing a stamped event with
-/// mismatched producer expectations.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct EventOutbound {
     pub name: String,
     pub target: Option<EntityRef>,
     pub payload: EventPayload,
@@ -332,76 +285,6 @@ mod tests {
             let back: Event = serde_json::from_str(&s).unwrap();
             prop_assert_eq!(e, back);
         }
-    }
-
-    // ----- EventOutbound shape (slice 005, §28(a)) -----
-
-    fn sample_outbound(seed: u64) -> EventOutbound {
-        EventOutbound {
-            name: "buffer/open".into(),
-            target: Some(EntityRef::new(1)),
-            payload: EventPayload::BufferOpen {
-                path: "/tmp/weaver-fixture".into(),
-            },
-            provenance: Provenance::new(ActorIdentity::Tui, seed.saturating_mul(1000), None)
-                .unwrap(),
-        }
-    }
-
-    #[test]
-    fn event_outbound_json_round_trip() {
-        let o = sample_outbound(42);
-        let s = serde_json::to_string(&o).unwrap();
-        let back: EventOutbound = serde_json::from_str(&s).unwrap();
-        assert_eq!(o, back);
-    }
-
-    #[test]
-    fn event_outbound_cbor_round_trip() {
-        let o = sample_outbound(42);
-        let mut buf = Vec::new();
-        ciborium::into_writer(&o, &mut buf).unwrap();
-        let back: EventOutbound = ciborium::from_reader(buf.as_slice()).unwrap();
-        assert_eq!(o, back);
-    }
-
-    #[test]
-    fn event_from_outbound_preserves_fields() {
-        let o = sample_outbound(42);
-        let e = Event::from_outbound(EventId::new(7), o.clone());
-        assert_eq!(e.id, EventId::new(7));
-        assert_eq!(e.name, o.name);
-        assert_eq!(e.target, o.target);
-        assert_eq!(e.payload, o.payload);
-        assert_eq!(e.provenance, o.provenance);
-    }
-
-    /// SC-506 regression: a producer that erroneously serialises an
-    /// `Event { id, .. }` shape on the inbound channel must hit a
-    /// structured decode error rather than silently dropping the
-    /// `id` field. `#[serde(deny_unknown_fields)]` on `EventOutbound`
-    /// is what enforces this — without it serde would accept the
-    /// payload and produce a stamped event with an unintended id
-    /// (the listener's allocation, not the producer's).
-    #[test]
-    fn event_outbound_rejects_id_field_on_deserialise() {
-        let event_with_id = serde_json::json!({
-            "id": 7,
-            "name": "buffer/open",
-            "target": 1,
-            "payload": {"type": "buffer-open", "payload": {"path": "/tmp/x"}},
-            "provenance": {
-                "source": {"type": "tui"},
-                "timestamp_ns": 1000,
-                "causal_parent": null,
-            },
-        });
-        let result: Result<EventOutbound, _> = serde_json::from_value(event_with_id);
-        let err = result.expect_err("deny_unknown_fields must reject the `id` key");
-        assert!(
-            err.to_string().contains("id"),
-            "decode error must name the unknown field: {err}"
-        );
     }
 
     #[test]
