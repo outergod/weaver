@@ -240,6 +240,18 @@ pub fn handle_edit_json(
         }
     };
 
+    // Note: an empty `[]` here intentionally does NOT short-circuit
+    // — `edits` may be the empty Vec, which still proceeds through
+    // the dispatch path and produces a wire-level empty `BufferEdit`
+    // that the service applies as a no-op. Asymmetric vs. the
+    // positional grammar (`weaver edit <path> 0:0-0:0 ""`), which
+    // produces a one-empty-edit batch that fails `apply_edits`'s
+    // nothing-edit validation. The wire-level empty-batch is
+    // reserved as a future-tool handshake-probe affordance per
+    // slice-004 spec §220 and FR-025; CLI-side short-circuit would
+    // remove that affordance. See also slice-004 session-3 handoff
+    // and T029 cross-pointer.
+
     // Step 3: canonicalise path.
     let canonical = match std::fs::canonicalize(&path) {
         Ok(c) => c,
