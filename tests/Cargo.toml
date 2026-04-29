@@ -122,3 +122,7 @@ path = "e2e/buffer_save_clean_noop.rs"
 [[test]]
 name = "buffer_save_inode_refusal"
 path = "e2e/buffer_save_inode_refusal.rs"
+
+[[test]]
+name = "buffer_save_atomic_invariant"
+path = "e2e/buffer_save_atomic_invariant.rs"

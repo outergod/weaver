@@ -34,8 +34,14 @@ use uuid::Uuid;
 /// One step of the atomic-write sequence. The hook surface for
 /// [`atomic_write_with_hooks`] is parametric over this enum so tests
 /// can target a chosen failure point.
+///
+/// Visibility note: `pub` only so it can be re-exported via the
+/// [`crate::test_support`] module (which is `#[doc(hidden)]`) for
+/// cross-crate integration tests. Production callers reach this
+/// enum through the `pub(crate)` `atomic_write_with_hooks` API.
+#[doc(hidden)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum WriteStep {
+pub enum WriteStep {
     OpenTempfile,
     WriteContents,
     FsyncTempfile,

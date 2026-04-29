@@ -24,3 +24,10 @@ pub mod model;
 pub mod observer;
 pub mod publisher;
 pub mod version;
+
+/// Test seams for cross-crate integration tests. Not part of the
+/// stable API; consider unstable + internal. Mirrors the pattern in
+/// `weaver-git-watcher::publisher::test_support`. Production code
+/// MUST NOT import from this module.
+#[doc(hidden)]
+pub mod test_support;

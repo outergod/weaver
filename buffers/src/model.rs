@@ -204,6 +204,16 @@ impl BufferState {
         self.last_observable = v;
     }
 
+    /// Test-only: overwrite the in-memory content. Reachable across
+    /// crates via [`crate::test_support::set_buffer_content`]. Used by
+    /// `tests/e2e/buffer_save_atomic_invariant.rs` (slice 005 T025)
+    /// to set up "edit applied" pre-save states without going through
+    /// `apply_edits` (which would require constructing TextEdits with
+    /// position arithmetic against the seed content).
+    pub(crate) fn set_content_for_test(&mut self, content: Vec<u8>) {
+        self.content = content;
+    }
+
     /// Save the in-memory `content` to `path` atomically, refusing if
     /// `path/inode` no longer matches what was captured at open time.
     ///
