@@ -14,6 +14,7 @@
 
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 
 use sha2::{Digest, Sha256};
@@ -58,6 +59,7 @@ pub fn watcher_instance_entity_ref(instance: &Uuid) -> EntityRef {
 pub struct BufferState {
     path: PathBuf,
     entity: EntityRef,
+    inode: u64,
     content: Vec<u8>,
     memory_digest: [u8; 32],
     last_dirty: bool,
@@ -69,6 +71,7 @@ impl std::fmt::Debug for BufferState {
         f.debug_struct("BufferState")
             .field("path", &self.path)
             .field("entity", &self.entity)
+            .field("inode", &self.inode)
             .field("byte_size", &self.byte_size())
             .field("memory_digest", &hex_digest(&self.memory_digest))
             .field("last_dirty", &self.last_dirty)
@@ -116,6 +119,11 @@ impl BufferState {
                 kind: StartupKind::NotRegularFile,
             });
         }
+        // Capture inode at open time. Used by the slice-005 save path
+        // to refuse the write when the path/inode pair has changed
+        // externally between open and save (atomic-replace, rename,
+        // delete-then-create with a new inode); see WEAVER-SAVE-005.
+        let inode = metadata.ino();
         let content = match std::fs::read(&path) {
             Ok(c) => c,
             Err(e) if e.kind() == std::io::ErrorKind::OutOfMemory => {
@@ -138,6 +146,7 @@ impl BufferState {
         Ok(Self {
             path,
             entity,
+            inode,
             content,
             memory_digest,
             last_dirty: false,
@@ -151,6 +160,12 @@ impl BufferState {
 
     pub fn entity(&self) -> EntityRef {
         self.entity
+    }
+
+    /// Inode captured at [`Self::open`] time. Pre-rename inode equality
+    /// gates `WEAVER-SAVE-005` refusal in slice 005.
+    pub fn inode(&self) -> u64 {
+        self.inode
     }
 
     pub fn content(&self) -> &[u8] {
@@ -717,6 +732,47 @@ mod tests {
         // Initial transient flags.
         assert!(!state.last_dirty(), "initial dirty must be false");
         assert!(state.last_observable(), "initial observable must be true");
+    }
+
+    #[test]
+    fn buffer_state_open_captures_inode_matching_stat() {
+        // Slice 005: BufferState::open captures the inode at open time
+        // via std::os::unix::fs::MetadataExt::ino(). The captured value
+        // must equal an independent stat(2) of the same path.
+        let mut f = NamedTempFile::new().expect("tempfile");
+        f.write_all(b"x").expect("write");
+        let canonical = std::fs::canonicalize(f.path()).expect("canonicalize");
+
+        let stat_inode = std::fs::metadata(&canonical).expect("stat").ino();
+        let state = BufferState::open(canonical).expect("open");
+
+        assert_eq!(state.inode(), stat_inode);
+        assert_ne!(state.inode(), 0, "inode must be non-zero on a real file");
+    }
+
+    #[test]
+    fn buffer_state_open_through_symlink_captures_target_inode() {
+        // POSIX `metadata` follows symlinks (vs `symlink_metadata`
+        // which does not). Opening a symlink path must capture the
+        // *target's* inode — atomic-replace detection relies on this.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let target = dir.path().join("target.txt");
+        std::fs::write(&target, b"target content").expect("write target");
+        let target_canonical = std::fs::canonicalize(&target).expect("canonicalize target");
+
+        let link = dir.path().join("link.txt");
+        std::os::unix::fs::symlink(&target_canonical, &link).expect("symlink");
+
+        let target_inode = std::fs::metadata(&target_canonical)
+            .expect("stat target")
+            .ino();
+        // Open via the symlink's path. `BufferState::open` requires a
+        // canonical path; canonicalize resolves the symlink, so the
+        // captured inode is the target's regardless. Pin the property
+        // explicitly.
+        let opened_canonical = std::fs::canonicalize(&link).expect("canonicalize link");
+        let state = BufferState::open(opened_canonical).expect("open through link");
+        assert_eq!(state.inode(), target_inode);
     }
 
     #[test]
