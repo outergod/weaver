@@ -2,49 +2,9 @@
 
 Phase 0 decisions. Each entry resolves an implementation-level question that the plan depended on. Rationale + alternatives preserved so post-slice reviewers understand *why*, not just *what*.
 
-## 1. `BusMessage` shape under §28(a)
+## 1. `BusMessage` shape under §28(a) — SUPERSEDED
 
-**Decision**: introduce a generic envelope `BusMessage<E>` parameterised over the event payload type. Two type aliases pin the directions:
-
-```rust
-pub enum BusMessage<E> {
-    Hello { ... },
-    Welcome { ... },
-    Event(E),
-    FactAssert(Fact),
-    FactRetract(FactKey),
-    SubscribeFacts(SubscribePattern),
-    SubscribeEvents(EventSubscribePattern),
-    InspectRequest { ... },
-    InspectResponse { ... },
-    EventInspectRequest { ... },
-    EventInspectResponse { ... },
-    Error { ... },
-    Ping, Pong,
-}
-
-pub type BusMessageInbound  = BusMessage<EventOutbound>;
-pub type BusMessageOutbound = BusMessage<Event>;
-```
-
-Codec is direction-typed:
-- `read_message(...) -> BusMessageInbound` — what the listener receives from a connected client.
-- `write_message(... , msg: BusMessageOutbound)` — what the listener broadcasts to subscribers.
-
-A producer that wishes to send an event constructs `BusMessageInbound::Event(EventOutbound { .. })`; a subscriber receives `BusMessageOutbound::Event(Event { .. })`. The wire byte representation is identical for non-Event variants; only the `Event` variant's payload differs.
-
-**Rationale**:
-
-- The asymmetry under §28(a) is fundamental: outbound events have no ID; at-rest events do. The type system MUST express this — Q1's resolution rejected sentinel-as-meaning. A single `BusMessage` enum with two event variants (`Event(Event)` AND `EventOutbound(EventOutbound)`) would compile-allow producers to construct the wrong variant, requiring runtime rejection at the listener — the same anti-pattern Q1 declined.
-- The generic `BusMessage<E>` keeps every direction-agnostic variant defined exactly once. Only the `Event` carrier varies. Maintenance burden under future variant additions is unchanged from slice 004.
-- Codec direction-typing prevents a producer from accidentally sending `BusMessageOutbound::Event(Event { id: <forged>, .. })` — the codec functions enforce the right type at the boundary.
-
-**Alternatives considered**:
-
-- **Two parallel non-generic enums** (`BusMessageInbound`, `BusMessageOutbound`) with most variants duplicated — works but every direction-agnostic variant addition (Ping, Hello, Error) must be made twice. Rejected: ceremony without payoff.
-- **Single `BusMessage` with two event variants** (`Event(Event)` for outbound + `EventOutbound(EventOutbound)` for inbound) — collapses to runtime discrimination at the listener; Q1's anti-pattern.
-- **Refactor `Event::id` to `Option<EventId>`** — equivalent to `EventId::Placeholder` (option-typed sentinel). Rejected at Q1.
-- **Wrapper enum `EventForm::{Outbound(EventOutbound), Stamped(Event)}`** — sentinel-by-another-name; same Q1 anti-pattern.
+The 2026-04-27 direction introduced a generic `BusMessage<E>` with `BusMessageInbound = BusMessage<EventOutbound>` and `BusMessageOutbound = BusMessage<Event>`, plus direction-typed codec entry points, to encode the asymmetry "producers send no `id`; listener stamps". The 2026-04-29 constitutional re-derivation found listener-stamping misaligned on `docs/00-constitution.md` §2/§11/§12/§15/§16 (originator-pattern bootstrap-chain regression) and in tension with §1/§6/§17. The replacement direction (UUIDv8 with hashed producer-instance-id prefix; see §12 below) keeps producers the authoritative ID source, so there is no inbound/outbound asymmetry on the `Event` carrier — `BusMessage` reverts to its slice-004 non-generic shape. The generic refactor and direction-typed codec siblings revert in the implementation step that follows the spec amendment.
 
 ## 2. Inode capture mechanism
 
@@ -103,85 +63,72 @@ where F: FnMut(WriteStep) -> Result<(), io::Error>,
 - **Filesystem quota fixture (tmpfs with bounded size)** — requires mount privileges; not all CI environments allow. Rejected.
 - **Read-only target directory** — simulates `EACCES`, not `ENOSPC` or `EXDEV`. Doesn't cover the full FR-015 rename-failure surface. Rejected.
 
-## 4. `EventOutbound` ↔ `Event` relationship
+## 4. `EventOutbound` ↔ `Event` relationship — SUPERSEDED
 
-**Decision**: two parallel structs in `core/src/types/event.rs`. `EventOutbound` is the slice-001 canonical `Event` shape minus `id`; `Event` (the at-rest / broadcast shape) is unchanged from slice 004. `causal_parent` continues to live on `provenance.causal_parent` per the slice-001 data model — Q1 (ID-stripped envelope) governs the `id` field only; no Provenance-shape change rides this slice.
+The 2026-04-27 direction introduced an `EventOutbound` struct (slice-001 canonical `Event` shape minus `id`) for the inbound wire shape and `Event::from_outbound(id, outbound)` for listener-side inflation. Under the 2026-04-29 re-derivation (see §12), producers mint UUIDv8 EventIds locally; there is no envelope split. `Event` retains its slice-001 canonical shape (`{ id, name, target, payload, provenance }`); `causal_parent` continues to live on `provenance.causal_parent`. `EventOutbound` and `Event::from_outbound` are removed in the implementation step that follows the spec amendment.
+
+## 5. UUIDv8 producer-prefix scheme
+
+**Decision**: `EventId` becomes `EventId(Uuid)` (16-byte UUIDv8 — UUID format with custom payload, version field set to `0x8`). Producer-side mint helper:
 
 ```rust
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-pub struct EventOutbound {
-    pub name: String,
-    pub target: Option<EntityRef>,
-    pub payload: EventPayload,
-    pub provenance: Provenance,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-pub struct Event {
-    pub id: EventId,
-    pub name: String,
-    pub target: Option<EntityRef>,
-    pub payload: EventPayload,
-    pub provenance: Provenance,
-}
-
-impl Event {
-    pub fn from_outbound(id: EventId, outbound: EventOutbound) -> Self {
-        Self {
-            id,
-            name: outbound.name,
-            target: outbound.target,
-            payload: outbound.payload,
-            provenance: outbound.provenance,
-        }
+impl EventId {
+    /// Mint a UUIDv8 EventId with the producer's hashed-instance-id prefix in the high 58 bits
+    /// of the custom payload, and `time_or_counter` (typically `now_ns()` or a process-monotonic
+    /// counter) in the low 64 bits.
+    pub fn mint_v8(producer_prefix_58: u64, time_or_counter: u64) -> Self {
+        // UUIDv8 layout (RFC 9562):
+        //   bytes 0..6   = high 48 bits of custom payload (here: bits 10..58 of producer_prefix)
+        //   byte  6 high = version nibble (set to 0x8)
+        //   byte  6 low  + byte 7 = next 12 bits of custom payload (here: low 10 bits of producer_prefix + 2 reserved)
+        //   byte  8 high = variant bits (set to 0b10)
+        //   byte  8 low  + bytes 9..16 = remaining 62 bits of custom payload (here: low 64 bits of time_or_counter, with 2 bits dropped to fit variant)
+        // Implementation uses `uuid::Builder::from_custom_bytes` or equivalent; exact bit layout
+        // is implementation-internal — what's load-bearing is that distinct (producer_prefix, time)
+        // pairs map to distinct UUIDs and that the prefix is recoverable for display purposes.
+        ...
     }
+
+    pub const fn nil() -> Self { EventId(Uuid::nil()) }
+
+    /// Deterministic constructor for tests; wraps a u128 into a UUID.
+    pub fn for_testing(value: u128) -> Self { EventId(Uuid::from_u128(value)) }
 }
 ```
 
-`From<(EventId, EventOutbound)> for Event` is exposed for ergonomics. **No reverse conversion** is provided — events do not regress to outbound shape after stamping.
-
-**Rationale**:
-
-- Each type has its own serde derive; codec emits/accepts shapes that are byte-identical to slice-004's `Event` (modulo the absent `id` field on outbound). No special-cased serializer.
-- Field-name parity (`name`, `target`, `payload`, `provenance`) makes inflation a trivial copy. Future additions to `Event` add to both structs in lockstep; the relationship `Event = EventOutbound + id` is preserved structurally.
-- Public conversion in one direction only — the type system prevents a stamped Event from being downgraded to outbound shape (which would lose its trace identity).
-
-**Alternatives considered**:
-
-- **Single `Event<HasId: Bool>` with const-generic id presence** — Rust's const generics don't support struct-field elision; would require unsafe transmute or duplicate impls. Rejected.
-- **`Event` with `id: PhantomId`** — `PhantomId` either holds a real `EventId` or is zero-sized for outbound. Same complexity as Q1's sentinel approach. Rejected.
-- **Flatten via `EventOutbound: Deref<Target=Event>`** — semantic violation (`Event` requires `id`; `EventOutbound` doesn't have one).
-
-## 5. Stamped-EventId counter location
-
-**Decision**: an `AtomicU64` field on `TraceStore`, named `next_event_id`, initialised to `1` (skipping `EventId::ZERO`). `TraceStore` exposes:
+Producer-side prefix derivation:
 
 ```rust
-impl TraceStore {
-    pub(crate) fn stamp_and_insert(&self, outbound: EventOutbound) -> Event {
-        let id_raw = self.next_event_id.fetch_add(1, Ordering::Relaxed);
-        let id = EventId::new(id_raw);
-        let event = Event::from_outbound(id, outbound);
-        self.insert_event(event.clone());
-        event
-    }
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
+
+fn hash_to_58(uuid: &Uuid) -> u64 {
+    let mut h = DefaultHasher::new();
+    uuid.hash(&mut h);
+    // Mask to 58 bits — high 6 bits dropped to leave room for UUIDv8 version + variant fields.
+    h.finish() & ((1 << 58) - 1)
 }
 ```
 
-The listener calls `trace_store.stamp_and_insert(outbound)` once per accepted `BusMessageInbound::Event(_)`, then broadcasts the returned stamped event to subscribers via the existing `EventSubscriptions::broadcast` path.
+For Service producers: `hash_to_58(&actor_identity.instance_id)`. For non-Service producers: each producer process generates a per-process UUIDv4 at startup (`OnceLock<Uuid>` initialised lazily on first emit), hashes that to 58 bits.
+
+`TraceStore::by_event` becomes `HashMap<EventId, TraceSequence>` where `EventId(Uuid)` is the key. Insert is collision-free for any two distinct producer-mint events because the prefix-namespace partition is by-construction disjoint across producers.
 
 **Rationale**:
 
-- Single owner for stamping authority — `TraceStore` is the natural home because stamped IDs ARE trace identities.
-- `Relaxed` ordering is sufficient: the counter increments are independent (no two threads stamp the same ID; the atomic-fetch-add primitive is the synchronisation). Stamped order does not need to match insertion order with finer-than-Relaxed semantics — only uniqueness matters.
-- Counter starts at `1`: `EventId::ZERO` retains its sentinel meaning for "no causal parent" lookups (FR-024). Skipping it via the initial value is structurally cleaner than a runtime check.
-- Counter resets on restart: the trace itself does not persist across core restarts (in-process trace only); pre-restart stamped IDs are never re-issued because they exist only in memory of the now-defunct trace. Long-running deployment is out of scope until trace persistence (a future slice).
+- **Collision-freedom by construction**: distinct producers occupy distinct 58-bit-prefix namespaces. The hash maps the producer's internal UUID identity to a partition; two producers with distinct UUIDs cannot collide unless the SipHash collides on that pair (probability ~2⁻⁵⁸ per pair, structurally negligible at K-producer scales the system will encounter).
+- **No listener-side coordination**: each producer's mint is purely local. Bootstrap-chain affordance (originator pattern: producer publishes one event AND immediately publishes facts whose `causal_parent` is that event's id) works trivially because the producer's local id is final and known immediately at construction.
+- **Single-typed key**: `HashMap<EventId, _>` stays one field. The tuple form `(UUIDv4, producer_id)` would force a wrapper struct with manual `Hash`/`Eq`/`Ord` impls, plus every wire-level fact's `causal_parent: Option<EventId>` would become a tuple (two CBOR fields per occurrence) — ergonomic and wire-bloat cost across the entire trace.
+- **Wire compactness**: 16 bytes per `EventId`. Tuple form would be 16 + N bytes per `EventId`, compounding across `causal_parent` chains.
+- **Display**: existing `uuid` crate's `Display` impl renders any UUID; client-side passive caching binds prefix → friendly_name (see §12) for human-readable display, with full UUID available via `--output=json`.
+- **Future security check**: prefix-vs-provenance verification is bit-extraction on UUIDv8; on the tuple form it would be a field comparison — both work, UUIDv8 keeps the check more contained.
 
 **Alternatives considered**:
 
-- **`Mutex<u64>` instead of `AtomicU64`** — needless contention for an integer increment.
-- **Counter in `EventSubscriptions` or `BusListener`** — couples the stamping authority to transport, not to the trace. The trace's `by_event` index is what stamping serves.
-- **UUID v7 (timestamp-ordered) instead of `u64`** — wider IDs (128 bits); larger CBOR; doesn't add value over a simple monotonic counter for a single-process trace.
+- **Listener-stamped monotonic `u64` counter** (the 2026-04-27 ID-stripped-envelope direction) — REJECTED on constitutional grounds (§2/§11/§12/§15/§16 originator-pattern bootstrap-chain regression; §1/§6/§17 centralisation tension). See §12 below for the per-principle audit.
+- **UUIDv4 alone, no producer-ID partitioning** — REJECTED on VM step-clock collision risk (a previous slice's spec flagged this: two producers seeing the same time after a clock jump can collide in `Uuid::new_v4()` if RNG quality varies). Producer-ID partitioning gives by-construction freedom regardless of time component or RNG quality.
+- **Composite `(UUIDv4, producer_id)` tuple form** — REJECTED on wire bloat + Hash/Eq complexity at every `EventId` site (see Rationale above).
+- **UUIDv7 (timestamp-ordered)** — single-namespace; identical collision concern to UUIDv4 alone in multi-producer scenarios; loses the producer-prefix recoverability for display purposes.
 
 ## 6. Tempfile naming + entropy source
 
@@ -230,26 +177,30 @@ dir_fd.sync_all()?;
 
 ## 8. §28(a) migration ordering
 
-**Decision**: all four producer-side `EventId::new(now_ns())` mint sites migrate atomically with the wire-bump `0x04 → 0x05`. No phased migration; no parallel pre/post-bump support.
+**Decision**: the `EventId` `u64 → Uuid` type change cascades through every construction site workspace-wide; the wire bump `0x04 → 0x05` is the atomic migration boundary. Two-step landing for incremental CI-greenness:
 
-Migration sites:
-1. `core/src/cli/edit.rs` (`weaver edit`, `weaver edit-json`) — replace `Event::new(EventId::new(now_ns()), payload, provenance)` with `EventOutbound { payload, provenance, causal_parent }`.
-2. `buffers/src/publisher.rs` — replace producer-minted EventId at poll-tick re-emissions and `bootstrap_tick` allocation. Re-emitter sites (those that consume an inbound stamped Event and re-emit facts referencing `event.id` as `causal_parent`) are unaffected — they continue to read the stamped ID from the inbound `Event`.
-3. `git-watcher/src/publisher.rs` — same migration as buffers' poll-tick.
-4. `core/src/cli/save.rs` — born compliant; never minted EventId.
+1. **Type-shape cascade**: rewrite `EventId(u64)` → `EventId(Uuid)` and update every `EventId::new(<u64>)` construction site:
+   - Test fixtures: `EventId::new(42)` → `EventId::for_testing(42)`.
+   - Sentinel sites: `EventId::ZERO` → `EventId::nil()`. Includes the slice-004 `lookup_event_for_inspect` ZERO-short-circuit.
+   - Production callers: temporarily wrap the existing `now_ns()` via `Uuid::from_u128(now_ns() as u128)` so the workspace stays internally consistent at this commit; the producer-mint-site UUIDv8 migration happens in step 2.
+2. **Producer-mint-site migration**: per-producer commits (or one combined commit; operator preference — per-producer aligns with PR-discipline "one logical change per commit") replace the `Uuid::from_u128(now_ns() as u128)` placeholder with `EventId::mint_v8(producer_prefix_58, now_ns())`:
+   - `core/src/cli/edit.rs` (`weaver edit`, `weaver edit-json`) — User identity, per-process UUIDv4 prefix.
+   - `buffers/src/publisher.rs` (poll-tick re-emissions, `bootstrap_tick`) — Service identity, hashed `instance_id` prefix.
+   - `git-watcher/src/publisher.rs` (poll-tick re-emissions) — Service identity, hashed `instance_id` prefix.
+   - `core/src/cli/save.rs` — User identity, per-process UUIDv4 prefix; born compliant.
 
-The wire bump is enforced at handshake (`Hello.protocol_version = 0x05`); pre-bump clients receive the version-mismatch error and close. Post-bump and pre-bump clients cannot coexist on one bus instance.
+The wire bump is enforced at handshake (`Hello.protocol_version = 0x05`); pre-bump clients receive the version-mismatch error and close. Post-bump and pre-bump clients cannot coexist on one bus instance because the `EventId` wire shape changes from CBOR unsigned-int (8 bytes) to CBOR byte-string (16 bytes) — even a wall-clock-ns-derived UUIDv8 will not deserialise as a slice-004 `EventId(u64)`.
 
 **Rationale**:
 
 - Clean break is consistent with operator's "no users yet, wire-stability is not a concern" framing.
-- Phased migration would require the listener to accept both `EventOutbound` (post-bump) AND `Event` (pre-bump from un-migrated producers) inbound — defeats the type-system enforcement of FR-021 and re-introduces runtime sentinel checks.
-- The four mint sites are all in workspaces under `cargo build` together; atomic migration is a single PR / commit set.
+- Two-step landing keeps every commit CI-green: step 1 changes only the wire shape (passes round-trip tests against the new shape); step 2 changes only producer-side mint logic (passes property tests against UUIDv8 collision-freedom).
+- The four mint sites are all in workspaces under `cargo build` together; atomic migration of step 2 is a single PR / commit set.
 
 **Alternatives considered**:
 
-- **Phased: keep `0x04` accepting Event-shape, add `0x05` accepting EventOutbound-shape, sunset 0x04 in slice 006** — complicates the listener's accept logic for no operator benefit; perpetuates the producer-side mint hazard for one more slice. Rejected.
-- **Per-producer migration without wire bump** — impossible: the wire shape change IS the migration; producers serialise the new shape, listener deserialises it.
+- **Single-step landing (type cascade + mint logic in one commit)** — possible, but the diff size makes review harder; two-step keeps each commit reviewable.
+- **Phased: keep `0x04` accepting `EventId(u64)`, add `0x05` accepting `EventId(Uuid)`, sunset 0x04 in slice 006** — complicates the listener's accept logic for no operator benefit; perpetuates the producer-side wall-clock-ns collision class for one more slice. Rejected.
 
 ## 9. `BufferSaveOutcome` taxonomy
 
@@ -313,22 +264,67 @@ Maps 1:1 to the six diagnostic codes (and one info-level no-op success):
 
 ## 11. Documentation lockstep — `docs/07-open-questions.md §28`
 
-**Decision**: slice 005 closes §28 by updating the entry's status from "PARTIALLY RESOLVED" (slice-004 closed deterministic instances) to "RESOLVED" (option a chosen, ID-stripped envelope sub-variant). The entry is rewritten:
+**Decision**: slice 005 closes §28 by updating the entry's status to `RESOLVED` with the 2026-04-29 re-derivation framing. Specifically:
 
 - Status line changes to `RESOLVED`.
-- A new paragraph at the top names the resolution: "Resolved in slice 005: option (a), ID-stripped-envelope sub-variant. Producers serialise `EventOutbound` (no `id`); the listener stamps `Event { id, .. }` on accept. See `specs/005-buffer-save/spec.md` FR-019..FR-024 and `specs/005-buffer-save/research.md §1, §4`."
-- The "Candidate resolutions" section is preserved but annotated: (a) `[ADOPTED — ID-stripped envelope]`, (b) `[NOT ADOPTED — would have left trace-store internal gap]`, (c) `[NOT ADOPTED — scope-explosive]`.
-- The "Revisit triggers" section is preserved; future reviewers landing at the §28 entry see the resolution + the original trade-off context.
+- A new paragraph at the top names the resolution: "Resolved in slice 005 (2026-04-29 constitutional re-derivation): producer-minted UUIDv8 EventIds with hashed-producer-instance-id prefix. Service producers hash `ActorIdentity::Service::instance_id` to 58 bits via SipHash; non-Service producers generate a per-process UUIDv4 and hash similarly. The listener does NOT stamp; producer's local id is final. Listener-side prefix-vs-provenance verification is DEFERRED to slice 006 alongside FR-029. See `specs/005-buffer-save/spec.md` FR-019..FR-024 + `specs/005-buffer-save/research.md §5, §12`."
+- The "Candidate resolutions" section is preserved but annotated: (a) `[ADOPTED — UUIDv8 with hashed producer-instance-id prefix; spoofing-detection deferred to FR-029 close-out in slice 006]`, (b) `[NOT ADOPTED — addresses inspect-side surface only, not the producer-side mint hazard]`, (c) `[NOT ADOPTED — wire-bloat + Hash/Eq complexity at every EventId site]`.
+- The "Revisit triggers" section is preserved with strikethrough annotations indicating each trigger is addressed by the resolution; the "Reopens at" line points at slice 006 for the carry-forward prefix-vs-provenance check.
 
 **Rationale**:
 
-- Constitution §17 (Documentation in lockstep) requires open-question entries to remain authoritative. Slice 005 is the resolving slice; the doc update lands as part of the slice's commit set.
-- Keeping the candidate-resolution and revisit-trigger context preserves "why this choice over those" for future archaeologists.
+- Constitution §17 (Documentation in lockstep) requires open-question entries to remain authoritative. Slice 005 is the resolving slice; the doc update lands as part of the spec-amendment commit (Step 1 of the slice-005-session-2 rework plan).
+- Keeping the candidate-resolution and revisit-trigger context preserves "why this choice over those" for future archaeologists, including the supersession note that the original 2026-04-27 listener-stamping framing was rejected on per-principle constitutional audit (see §12 of this research document for the audit table).
 
 **Alternatives considered**:
 
-- **Delete §28 entirely** — loses the historical context. Rejected.
+- **Delete §28 entirely** — loses the historical context, including the 2026-04-27 → 2026-04-29 re-derivation arc. Rejected.
 - **Mark RESOLVED but leave content unchanged** — confusing for future readers (status disagrees with body). Rejected.
+- **Open a new §30 for the carry-forward prefix-vs-provenance verification rather than using the existing FR-029 deferral** — fragments the unauthenticated-channel hazard class. The "Reopens at" pointer in §28 + the FR-029 cross-reference is sufficient. Rejected.
+
+## 12. UUIDv8 producer-ID namespacing — constitutional re-derivation (2026-04-29)
+
+**Decision**: `EventId` becomes `EventId(Uuid)` (UUIDv8) with the producer's hashed identity in the high 58 bits and nanoseconds in the low 64 bits (see §5 for wire-shape detail). Producers mint locally; the listener does not stamp.
+
+This decision **supersedes** §1 (BusMessage<E> generic refactor) and §4 (EventOutbound ↔ Event relationship) and **replaces** the original §5 (listener-side AtomicU64 counter) and §8 (producer→EventOutbound migration).
+
+**Why §28(a) listener-stamping was rejected**
+
+Per-principle audit against `docs/00-constitution.md` (v0.2):
+
+| § | Principle | Listener-stamping verdict | UUIDv8 verdict |
+|---|---|---|---|
+| 1 | No monolithic runtime; no privileged opaque locus | Concentrates ID authority at the listener (a centralisation regression) | Distributes; listener routes/records but doesn't arbitrate ID space |
+| 2 | Everything Is Introspectable | Breaks bootstrap → bootstrap-fact chain (`weaver-buffers`'s `bootstrap_tick` shares the BufferOpen event's id as `causal_parent` for its bootstrap facts; under listener-stamping the producer cannot synchronously learn that id) | Producer-minted ID locally known; chain works trivially |
+| 6 | Distribution Is First-Class; communication explicit; partial knowledge | Producer never learns its own event's stamped id (knowledge gap, no reconciliation under lossy delivery / fire-and-forget) | Producer's local knowledge matches the trace's stored knowledge |
+| 11 | Shared State vs Local View; reconcilable | Producer↔trace divergence with no path | No divergence; agreement by construction |
+| 12 | Composition Is First-Class — inspect / debug / "understand why compositions fired" | "Why this fact?" walk loses the bootstrap link | Walk preserved structurally |
+| 15 | Provenance Is Mandatory: source, authority, **causal chain**, freshness, derivation | Causal chain truncated for originator-pattern facts | Causal chain preserved end-to-end |
+| 16 | Explainability Over Cleverness | Listener-centralisation IS the cleverness; the slice-003 affordance loss IS the explainability cost | Walks back the cleverness; pays no explainability cost |
+| 17 | Multi-Actor Coherence; conflicts explicit; no opaque authority | Listener as ID-arbitration authority — centralised | Authority distributed; producer namespace structurally encoded in the ID |
+
+Listener-stamping was misaligned on **§2 / §11 / §12 / §15 / §16** (the chain regression) AND in tension with **§1 / §6 / §17** (centralisation). UUIDv8 with producer-ID namespacing repairs all of these simultaneously.
+
+**Carry-forward constitutional deferral**
+
+UUIDv8 carries one residual deferral: §17 ("make conflicts and overlaps between contributions explicit and inspectable") requires the listener to verify that an inbound event's UUIDv8 producer-prefix matches the connection's authenticated `ActorIdentity`. Without this check, a malicious producer can spoof another producer's prefix silently.
+
+This is the **same hazard class as FR-029** ("unauthenticated edit/save channel — any process with a bus connection can dispatch any ActorIdentity"). FR-029 is already an explicitly-accepted Known Hazard for slice-005, deferred to close before slice-006. The UUIDv8-prefix-verification check joins FR-029's deferral — slice-006 (agent emitter introduction; first non-CLI ActorIdentity producer) is the natural close-out for both.
+
+**Hash function: SipHash via `DefaultHasher`**
+
+Stability across re-invocations matters less than collision-resistance, because slice-005 traces are in-memory only (do not survive listener restart). `std::collections::hash_map::DefaultHasher` (SipHash) is already in std; in-process stable; cross-rust-std-version stability is not a load-bearing property here. `xxhash-rust` is the natural upgrade path if a future slice persists traces; deferred until that need surfaces.
+
+**Per-process UUIDv4 source for non-Service producers**
+
+Each producer process generates a per-process UUIDv4 at startup, held in a `OnceLock<Uuid>` (or the equivalent for the producer's runtime). The first call to `EventId::mint_v8` on the producer initialises the UUIDv4; all subsequent mints in the process reuse it. Producer restart yields a fresh UUIDv4 — that is fine; in-memory traces don't survive listener restart anyway.
+
+**Alternatives considered (re-stated for completeness)**
+
+- **Listener-stamped IDs** — rejected per the per-principle audit above.
+- **UUIDv4 alone, no producer-ID partitioning** — rejected on VM step-clock collision risk.
+- **(UUIDv4, producer_id) tuple form** — rejected on wire bloat + Hash/Eq complexity at every `EventId` site (`HashMap<EventId, _>` becomes a tuple-keyed map; every `causal_parent: Option<EventId>` is two CBOR fields per occurrence).
+- **UUIDv7** — single-namespace; same collision concern as UUIDv4 alone in multi-producer scenarios; loses the producer-prefix recoverability for display purposes.
 
 ---
 

@@ -37,8 +37,8 @@ weaver save <ENTITY> [--socket <PATH>]
 1. Resolve `<ENTITY>` → `entity: EntityRef`. Canonicalise the path (if path form) before derivation; an unresolvable path exits `1` with the existing path-canonicalisation diagnostic (matches slice-003/004 convention).
 2. **In-process inspect-lookup** of `<entity>:buffer/version` via the slice-004 library function `weaver_core::cli::inspect::lookup_fact`. (Same mechanism slice-004 introduced for `weaver edit`.)
 3. **Buffer-not-opened detection**: `InspectResponse::FactNotFound` → exit `1` with `WEAVER-SAVE-001` diagnostic (`"buffer not opened: <ENTITY> — no fact (entity:<derived>, attribute:buffer/version) is asserted by any authority"`).
-4. Buffer found at `version = N`: construct `EventOutbound { payload: EventPayload::BufferSave { entity, version: N }, provenance: Provenance { source: ActorIdentity::User, timestamp_ns: now_ns(), causal_parent: None }, causal_parent: None }`. Note: the producer does NOT mint an `EventId` (the listener stamps; per §28(a) FR-019..FR-021).
-5. Send `BusMessageInbound::Event(outbound)` via the existing bus client. Exit `0` on successful send.
+4. Buffer found at `version = N`: construct `Event { id: EventId::mint_v8(get_user_prefix(), now_ns()), name: "buffer/save", target: Some(entity), payload: EventPayload::BufferSave { entity, version: N }, provenance: Provenance { source: ActorIdentity::User, timestamp_ns: now_ns(), causal_parent: None } }`. The producer mints `EventId` locally as UUIDv8 with its per-process User-prefix (a `OnceLock<u64>` initialised on first emit via `hash_to_58(&Uuid::new_v4())`); per FR-019..FR-022 (§28(a) UUIDv8 re-derivation).
+5. Send `BusMessage::Event(event)` via the existing bus client. Exit `0` on successful send.
 
 **Exit codes**:
 
@@ -64,7 +64,7 @@ Seven structured diagnostic codes covering the slice-005 failure surface. Format
 | `WEAVER-SAVE-006` | Service stderr | `warn` | Refusal: path was deleted on disk between open and save. | `entity`, `path` |
 | `WEAVER-SAVE-007` | Service stderr | `info` | Clean-save no-op (`buffer/dirty = false` at dispatch time; no disk I/O performed; idempotent fact re-emission). Operator-informational. | `entity`, `path`, `event_id`, `version` |
 
-All `tracing` records additionally carry the `event_id` field (the core-stamped ID per FR-022; absent on `WEAVER-SAVE-001` because that fires CLI-side before any event is dispatched).
+All `tracing` records additionally carry the `event_id` field (the producer-minted UUIDv8 EventId per FR-022; absent on `WEAVER-SAVE-001` because that fires CLI-side before any event is dispatched). The TUI and `weaver inspect` passive-cache layer (slice-005 tasks T-A3 + T-A4) renders the field as `EventId(<friendly_name>/<short-suffix>)` for known producer prefixes; the underlying tracing field is the full UUID for grep-ability.
 
 ## `weaver-buffers` — UNCHANGED CLI surface
 
@@ -74,11 +74,11 @@ The `weaver-buffers` startup retains its slice-003/004 lifecycle and adds one ne
 
 ## `weaver-git-watcher` — UNCHANGED CLI surface
 
-CLI grammar unchanged; `--version` JSON `bus_protocol` field advances `0.4.0 → 0.5.0` (constant-driven). Internal change: producer-side EventId minting migrated to `EventOutbound` per FR-019 — no observer-visible behavior change beyond the wire bump.
+CLI grammar unchanged; `--version` JSON `bus_protocol` field advances `0.4.0 → 0.5.0` (constant-driven). Internal change: producer-side EventId minting migrated to UUIDv8 with the Service-identity-hashed prefix per FR-019 — no observer-visible behavior change beyond the wire bump.
 
-## `weaver-tui` — UNCHANGED CLI surface
+## `weaver-tui` — CLI surface unchanged; rendering enhanced
 
-CLI grammar unchanged; `--version` JSON `bus_protocol` field advances `0.4.0 → 0.5.0` (constant-driven). The TUI's existing `buffer/*` subscription captures the new `buffer/dirty = false` re-emissions on accepted save without code change.
+CLI grammar unchanged; `--version` JSON `bus_protocol` field advances `0.4.0 → 0.5.0` (constant-driven). The TUI's existing `buffer/*` subscription captures the new `buffer/dirty = false` re-emissions on accepted save without code change. **Internal rendering change** (slice-005 task T-A3): the TUI gains a passive-cache binding for UUIDv8 prefix → friendly_name (Service `name` for Service producers; `"user"` for User; `"agent"` for future Agent), so `event EventId(...)` annotations render `EventId(<friendly_name>/<short-suffix>)` for prefixes it has observed previously, full UUID hex otherwise. Cache scope: per-process; no persistence.
 
 ## `weaver --version` JSON shape (`weaver --version --output=json`)
 
@@ -96,15 +96,17 @@ CLI grammar unchanged; `--version` JSON `bus_protocol` field advances `0.4.0 →
 
 The `bus_protocol` field bump from `0.4.0` to `0.5.0` is the only field-value change; the field set is unchanged. All four binaries (`weaver`, `weaver-buffers`, `weaver-git-watcher`, `weaver-tui`) inherit this constant.
 
-## `weaver inspect` — UNCHANGED at the CLI shape
+## `weaver inspect` — CLI shape unchanged; rendering enhanced
 
-Slice 005 does not change `weaver inspect`'s grammar, flags, or output shape. `weaver inspect --why <entity>:buffer/dirty` walks transparently through `BufferSave` events and stamped `EventId`s — the walkback machinery (slice 004) is unaffected by §28(a)'s wire-shape change because subscribers always receive `Event` (with stamped `id`).
+Slice 005 does not change `weaver inspect`'s grammar, flags, or output shape. `weaver inspect --why <entity>:buffer/dirty` walks transparently through `BufferSave` events and producer-minted UUIDv8 `EventId`s — the walkback machinery (slice 004) is unaffected by §28(a)'s wire-shape change because the `Event` envelope shape is unchanged from slice-001 canonical.
 
 `weaver inspect --why` walkback semantics under §28(a):
 
-- For a `buffer/dirty` fact emitted on accepted save: walkback resolves to the `BufferSave` event with stamped `id`. The event's provenance carries `ActorIdentity::User` (the CLI emitter's identity). Inspect renders this transparently.
-- For multi-producer scenarios: stamped IDs are globally unique per trace; walkback never resolves to a foreign producer's event due to wall-clock-ns collision. SC-505 verifies.
-- For pre-§28(a) trace entries (only relevant in long-running deployments bridging the upgrade): the slice-004 ZERO-short-circuit on `lookup_event_for_inspect` (FR-024) preserves correctness; pre-fix events at id `0` are returned as `EventNotFound`.
+- For a `buffer/dirty` fact emitted on accepted save: walkback resolves to the `BufferSave` event with its producer-minted UUIDv8 `id`. The event's provenance carries `ActorIdentity::User` (the CLI emitter's identity). Inspect renders this transparently.
+- For multi-producer scenarios: distinct producers occupy disjoint UUIDv8 prefix namespaces; walkback never resolves to a foreign producer's event because cross-producer collision is structurally impossible. SC-505 verifies.
+- For `EventId::nil()` walkbacks (the "no causal parent" sentinel): the slice-004 short-circuit on `lookup_event_for_inspect` (FR-024) returns `EventNotFound` regardless of trace contents (defence-in-depth).
+
+**Internal rendering change** (slice-005 task T-A4): `weaver inspect` gains a passive-cache binding for UUIDv8 prefix → friendly_name (lazy-populated during walkback rendering by extracting `provenance.source` from each fact/event encountered; for OLD events pre-cache-warmup, the client issues an existing `EventInspectRequest` by EventId → receives full Event with provenance → seeds the binding). Display format: `EventId(<friendly_name>/<short-suffix>)` for known prefixes; full UUID via `--output=json`.
 
 ## Slice-004 hygiene carryover
 

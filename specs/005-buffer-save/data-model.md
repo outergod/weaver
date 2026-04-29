@@ -4,51 +4,6 @@ This document captures the new types introduced by slice 005, their wire shapes,
 
 ## New types
 
-### `EventOutbound`
-
-```rust
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-pub struct EventOutbound {
-    pub name: String,
-    pub target: Option<EntityRef>,
-    pub payload: EventPayload,
-    pub provenance: Provenance,
-}
-```
-
-The wire-level shape of an event in flight from a producer to the listener — `Event` minus `id`. The listener allocates a stamped `EventId` on accept (per FR-021 + research §5). Field set mirrors slice-001's canonical `Event` shape (`name` is the wire-stable identifier per L2 P7; `target` carries the entity the event is about, used for filtered subscriptions and `weaver inspect` rendering); `causal_parent` continues to live on `provenance.causal_parent` per slice-001 data-model.md:55, unchanged across slices 002/003/004.
-
-**Wire shape (JSON)**:
-```json
-{
-  "name": "buffer/save",
-  "target": 42,
-  "payload": {"type": "buffer-save", "payload": {"entity": 42, "version": 7}},
-  "provenance": {"source": {"type": "user"}, "timestamp_ns": 1714217040123456789, "causal_parent": null}
-}
-```
-
-(`Provenance` field names are snake_case on the wire, matching slice-003/004 contracts; `EventPayload` variant tags are kebab-case per Amendment 5 because the enum carries `#[serde(rename_all = "kebab-case")]`.)
-
-**Wire shape (CBOR)**: plain CBOR map carrying the four `EventOutbound` fields as text-string keys (`name`, `target`, `payload`, `provenance`). No CBOR tag.
-
-**Conversion to `Event`**:
-```rust
-impl Event {
-    pub fn from_outbound(id: EventId, outbound: EventOutbound) -> Self {
-        Self {
-            id,
-            name: outbound.name,
-            target: outbound.target,
-            payload: outbound.payload,
-            provenance: outbound.provenance,
-        }
-    }
-}
-```
-
-No reverse conversion is provided. Stamped events do not regress to outbound shape.
-
 ### `EventPayload::BufferSave`
 
 ```rust
@@ -79,38 +34,6 @@ Note: no `edits` analogue. Save is a non-mutating operation w.r.t. content (the 
   }
 }
 ```
-
-### `BusMessage<E>` (generic refactor)
-
-```rust
-pub enum BusMessage<E> {
-    Hello { protocol_version: u8, ... },
-    Welcome { actor_identity: ActorIdentity },
-    Event(E),                                        // <-- generic over event shape
-    FactAssert(Fact),
-    FactRetract(FactKey),
-    SubscribeFacts(SubscribePattern),
-    SubscribeEvents(EventSubscribePattern),
-    InspectRequest { request_id: u64, target: InspectTarget },
-    InspectResponse { request_id: u64, result: Result<InspectionDetail, InspectionError> },
-    EventInspectRequest { request_id: u64, event_id: EventId },
-    EventInspectResponse { request_id: u64, result: Result<Event, EventInspectionError> },
-    Error { category: String, detail: String },
-    Ping,
-    Pong,
-}
-
-pub type BusMessageInbound  = BusMessage<EventOutbound>;
-pub type BusMessageOutbound = BusMessage<Event>;
-```
-
-Codec functions are direction-typed:
-- `read_message(&mut R) -> Result<BusMessageInbound, CodecError>` — listener-side reception.
-- `write_message(&mut W, msg: BusMessageOutbound) -> Result<(), CodecError>` — listener-side broadcast.
-
-Producer-side reception (CLI clients receiving responses): `read_message` returns `BusMessageOutbound`. Producer-side sending: `write_message` takes `BusMessageInbound` (the producer's outbound is the listener's inbound).
-
-Wire byte representation is identical for non-Event variants — `BusMessageInbound::Hello { .. }` and `BusMessageOutbound::Hello { .. }` serialize to the same bytes. Only the Event variant's payload differs.
 
 ### `BufferSaveOutcome`
 
@@ -145,7 +68,7 @@ Test-injection hook surface for `atomic_write_with_hooks` (per `research.md §3`
 
 ## Inherited types — extended
 
-### `Event` (unchanged shape; production-side semantics revised)
+### `Event` (slice-001 canonical shape; unchanged)
 
 ```rust
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -158,17 +81,32 @@ pub struct Event {
 }
 ```
 
-Field set unchanged from slice 004 — listed here for cross-reference against `EventOutbound` (which is `Event` minus `id`). Under §28(a), `Event` is now produced ONLY by the listener (via `Event::from_outbound`); no longer constructed by producers (per FR-019). Subscribers continue to receive `Event` via `BusMessageOutbound::Event(_)`.
+Field set unchanged from slice 004. Under §28(a)'s 2026-04-29 re-derivation (UUIDv8 with hashed-producer-instance-id prefix; see `research.md §5, §12`), producers continue to mint `Event` directly with a producer-local UUIDv8 EventId — no envelope split (no `EventOutbound`), no listener-side stamping. `causal_parent` continues to live on `provenance.causal_parent` per slice-001's data model.
 
-### `EventId` (semantics revised under §28(a))
+### `EventId` (wire shape revised under §28(a))
 
-Wire shape unchanged: 64-bit unsigned integer.
+Wire shape changes from `u64` (8-byte CBOR unsigned int) to `Uuid` (16-byte CBOR byte-string). Internally `EventId(Uuid)`.
 
 Semantic shift:
-- **Before slice 005**: producer-minted from `now_ns()`. `TraceStore::by_event` indexed by producer-minted ID; cross-producer collision was latent (§28).
-- **After slice 005**: listener-allocated from `TraceStore::next_event_id` monotonic counter (per `research.md §5`). Producer code never constructs an `EventId` value for outbound events; producers construct `EventOutbound` (no `id`).
+- **Before slice 005**: producer-minted from `now_ns()` as `EventId(u64)`. `TraceStore::by_event` indexed by producer-minted `u64` ID; cross-producer collision was latent (§28).
+- **After slice 005**: producer-minted as **UUIDv8** with the producer's hashed identity in the high 58 bits of the custom payload (Service `instance_id` for Service producers, hashed via `std::collections::hash_map::DefaultHasher`; per-process UUIDv4 for non-Service producers, same hash) and nanoseconds (process-monotonic or wall-clock) in the low 64 bits. Cross-producer collision is structurally impossible — distinct producers occupy distinct 58-bit-prefix namespaces. See `research.md §5, §12`.
 
-`EventId::ZERO` retains its sentinel meaning for "no causal parent" lookups. The `next_event_id` counter starts at `1` to skip ZERO. The slice-004 `lookup_event_for_inspect` ZERO-short-circuit (slice 004 PR #11 commit `f0112d4`) is preserved per FR-024.
+`EventId::nil()` (`Uuid::nil()` — all-zero bytes) replaces the slice-004 `EventId::ZERO` sentinel for "no causal parent" lookups. The slice-004 `lookup_event_for_inspect` short-circuit (slice 004 PR #11 commit `f0112d4`) is preserved against `EventId::nil()` walkbacks per FR-024. The slice-004 `validate_event_envelope` ZERO-rejection at the listener is preserved as `EventId::nil()`-rejection — semantically unchanged, retargeted at the new wire shape.
+
+Mint helper:
+```rust
+impl EventId {
+    /// UUIDv8 with `producer_prefix_58` in the custom-payload high bits and `time_or_counter`
+    /// in the low bits. See `research.md §5` for bit layout.
+    pub fn mint_v8(producer_prefix_58: u64, time_or_counter: u64) -> Self;
+
+    /// Nil sentinel ("no causal parent"); replaces slice-004 `EventId::ZERO`.
+    pub const fn nil() -> Self;
+
+    /// Deterministic constructor for tests; wraps a u128 into a UUID.
+    pub fn for_testing(value: u128) -> Self;
+}
+```
 
 ### `BufferState` (extended)
 
@@ -258,11 +196,11 @@ Call `atomic_write_with_hooks(self.path, &self.content, |_| Ok(()))`:
 
 ### R6 — Success re-emission
 
-Outcome: `BufferSaveOutcome::Saved { entity, path, version }`. Trace `tracing::info!` accepted-save event. Re-emission: `FactAssert(buffer/dirty, Bool(false))` with `causal_parent = Some(event.id)` (stamped by listener per FR-021). Authoring identity: `weaver-buffers`'s own `ActorIdentity::Service`.
+Outcome: `BufferSaveOutcome::Saved { entity, path, version }`. Trace `tracing::info!` accepted-save event. Re-emission: `FactAssert(buffer/dirty, Bool(false))` with `causal_parent = Some(event.id)` (the producer-minted UUIDv8 EventId per FR-022). Authoring identity: `weaver-buffers`'s own `ActorIdentity::Service`.
 
 ## State-transition mapping
 
-For an inbound `BufferSave { entity, version }` event with stamped `event.id`:
+For an inbound `BufferSave { entity, version }` event with producer-minted UUIDv8 `event.id`:
 
 ```
 event arrives → R1 ownership → owned ─┬→ R2 version match ─┬→ R3 dirty? ──┬─ false ──→ CleanSaveNoOp + dirty=false re-emit
@@ -291,8 +229,9 @@ The following invariants hold across slice-005:
 - **`save_to_disk` preserves the `memory_digest == sha256(content)` invariant on success**: `BufferState::content` is read-only during save (no mutation); the digest invariant from slice-003/004 is structurally untouched.
 - **Disk content matches `BufferState::content` post-success**: under `Saved` outcome, `read(path) == BufferState::content` byte-for-byte (the `rename(2)` atomicity guarantees no partial writes are visible).
 - **Inode field is immutable post-open**: `BufferState::inode` is set once at `open` and never updated. External mutations after open do not affect this field; the inode check at save time uses the pristine open-time value.
-- **Stamped EventId monotonicity**: every accepted `BufferSave` (and every other accepted event under §28(a)) carries a stamped `EventId` strictly greater than the previous-accepted event's stamped ID, modulo `u64` wraparound (which is unreachable in any plausible single-process trace lifetime).
-- **No producer-minted EventId reaches the trace**: the listener rejects any inbound event shape that carries an ID (structurally — there is no inbound shape with an `id` field; the `BusMessageInbound::Event(_)` variant carries `EventOutbound`, which lacks `id`).
+- **Producer-prefix-namespace partitioning**: every accepted `Event` (BufferSave or otherwise) carries an `EventId` whose UUIDv8 high 58 bits match the producer's hashed-identity prefix; distinct producers occupy disjoint prefix namespaces. Cross-producer EventId collision is structurally impossible (modulo SipHash collision on producer-identity pairs, probability ~2⁻⁵⁸ per pair).
+- **Producer-local monotonicity**: within a single producer process, the low 64 bits of each minted UUIDv8 reflect process-monotonic or wall-clock nanoseconds; per-producer mint order is preserved by the low bits.
+- **`EventId::nil()` rejection at the listener**: the slice-004 `validate_event_envelope` ZERO-rejection is preserved as `EventId::nil()` rejection on inbound events — a producer that emits an event with `id == EventId::nil()` is rejected at the codec/envelope-validation boundary; no event with `id == nil()` is appended to the trace.
 
 ## Forward-direction notes
 

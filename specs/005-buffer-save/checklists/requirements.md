@@ -8,7 +8,7 @@
 ## Content Quality
 
 - [x] No implementation details (languages, frameworks, APIs)
-  - *Note: spec uses Rust-internal names (`BufferState`, `validate_event_envelope`, `EventPayload::BufferSave`, `EventOutbound`) because these ARE the public surfaces — the wire-level contract IS the implementation contract for an MVP-stage Rust-only system. Pattern matches slice-004 spec.md, which the constitution treats as precedent.*
+  - *Note: spec uses Rust-internal names (`BufferState`, `validate_event_envelope`, `EventPayload::BufferSave`, `EventId::mint_v8`) because these ARE the public surfaces — the wire-level contract IS the implementation contract for an MVP-stage Rust-only system. Pattern matches slice-004 spec.md, which the constitution treats as precedent.*
 - [x] Focused on user value and business needs
 - [x] Written for non-technical stakeholders
   - *Note: stakeholder here is the operator dogfooding the editor; the spec is operator-readable per slice-004 norm.*

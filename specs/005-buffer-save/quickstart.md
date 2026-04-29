@@ -51,16 +51,18 @@ echo "exit code: $?"   # expect 0
 - `dirty → clean` — `buffer/dirty` flips back to `false`. Operator-visible state-flip signal.
 - `[v=1]` unchanged — save does NOT bump `buffer/version` (FR-004).
 - `[23 bytes]` unchanged — `buffer/byte-size` is not re-emitted on save (FR-004).
-- The annotation line refreshes: `event EventId(<n>)` now carries the BufferSave event's stamped id (different from the BufferEdit id from the prior step).
+- The annotation line refreshes: `event EventId(<n>)` now carries the BufferSave event's UUIDv8 id (different from the BufferEdit id from the prior step).
 - **The on-disk file matches the in-memory content**: `cat /tmp/weaver-slice-005/file.txt` prints `PREFIX initial content` (the post-edit, post-save content).
 - `weaver inspect --why <entity>:buffer/dirty --output=json` walks back to the accepted `BufferSave` event. The event's provenance renders `{"source":{"type":"user"},...}` — `ActorIdentity::User`.
 
-**Verify the §28(a) stamping invariant** (FR-021):
+**Verify the §28(a) UUIDv8 producer-prefix invariant** (FR-019..FR-022):
 
-- The `event EventId(<n>)` field renders a small monotonic integer (e.g., `EventId(4)` after a few prior events), NOT a `now_ns()`-shaped value (~`1714217040123456789`). The stamped IDs are listener-allocated counters starting from `1`.
-- A second observer subscribed to the same trace sees the SAME EventId for the BufferSave — the listener's allocation is the canonical identity.
+- The `event EventId(<n>)` field renders as `EventId(user/<short-hex-suffix>)` once the TUI's passive-cache layer has bound the per-process User-prefix → "user" friendly_name (typically on first observed `weaver edit` / `weaver save` event). Before the cache-warmup, raw UUID hex (`EventId(01863f4e-9c2a-8000-...)`) is rendered.
+- The `BufferSave` event's UUID's high 58 bits encode the User-process's hashed UUIDv4 prefix; the low 64 bits encode the producer's mint-time nanoseconds. The prefix differs from the `weaver-buffers` Service-process's hashed-`instance_id` prefix on its bootstrap-tick / poll-tick events — distinct producers occupy disjoint prefix namespaces.
+- A second observer subscribed to the same trace sees the SAME UUID for the BufferSave — the producer's local mint is the canonical identity (no listener-stamping reconciliation needed).
+- `weaver inspect --why <entity>:buffer/dirty --output=json` returns the full UUID hex in the `event.id` field for grep-ability (`"id": "01863f4e-9c2a-8000-8421-c5d2e4f6a7b8"`).
 
-**E2e coverage**: `tests/e2e/buffer_save_dirty.rs` (SC-501 + §28(a) stamping verification in one fixture).
+**E2e coverage**: `tests/e2e/buffer_save_dirty.rs` (SC-501 + UUIDv8 producer-prefix verification in one fixture).
 
 ## Scenario 2 — Refuse save on inode mismatch (US2, SC-502)
 
@@ -89,7 +91,7 @@ echo "exit code: $?"   # expect 0 (CLI doesn't know the save will be refused)
   WARN weaver_buffers: WEAVER-SAVE-005 path/inode mismatch on save
     entity=<entity-ref> path=/tmp/weaver-slice-005/file.txt
     expected_inode=<inode-at-open> actual_inode=<missing>
-    event_id=<stamped-id>
+    event_id=<uuidv8>
   ```
   (Or for the inode-delta case, `actual_inode=<some-other-value>` instead of `<missing>`.)
 - `cat /tmp/weaver-slice-005/file.txt.bak` still prints `initial content` (the pre-edit content; the rename happened externally before the save attempt; the buffer's edits never made it to disk).
@@ -129,7 +131,7 @@ echo "exit code: $?"   # expect 0
   ```
   WARN weaver_buffers: WEAVER-SAVE-006 path missing on save
     entity=<entity-ref> path=/tmp/weaver-slice-005/file.txt
-    event_id=<stamped-id>
+    event_id=<uuidv8>
   ```
 - `ls /tmp/weaver-slice-005/file.txt` reports `No such file or directory` — the save did NOT recreate the file.
 - The buffer's in-memory state is unchanged; the operator can re-create the file externally + restart `weaver-buffers` to recover.
@@ -157,47 +159,51 @@ The test:
 
 **E2e coverage**: `tests/e2e/buffer_save_atomic_invariant.rs` (SC-504).
 
-## Scenario 5 — Multi-producer EventId stamping (US3, SC-505)
+## Scenario 5 — Multi-producer UUIDv8 prefix-uniqueness (US3, SC-505)
 
 **Setup**: this scenario also uses an in-process test harness for stress-volume control; manual reproduction would require launching three concurrent producer scripts and is impractical for routine quickstart use.
 
-**Action** (test-binary-driven; see `tests/e2e/multi_producer_stamping.rs`):
+**Action** (test-binary-driven; see `tests/e2e/multi_producer_uuidv8.rs`):
 
 The test:
 1. Sets up a core listener + trace store.
-2. Spawns three producers in parallel:
-   - Producer A: emits 1000 `BufferEdit` events on a buffer entity.
-   - Producer B: emits 1000 `BufferSave` events on the same entity.
-   - Producer C: emits 1000 git-watcher poll-tick events.
+2. Spawns three producers in parallel, each with its own `ActorIdentity` (Service A with `instance_id_A`, Service B with `instance_id_B`, User C with per-process UUIDv4_C):
+   - Producer A: emits 1000 `BufferEdit` events on a buffer entity (UUIDv8 EventIds with prefix = `hash_to_58(&instance_id_A)`).
+   - Producer B: emits 1000 `BufferSave` events on the same entity (prefix = `hash_to_58(&instance_id_B)`).
+   - Producer C: emits 1000 git-watcher poll-tick events (prefix = `hash_to_58(&UUIDv4_C)`).
 3. After all producers finish, walks every accepted event's `causal_parent` chain via `weaver inspect --why` (in-process invocation).
 4. Asserts: every walkback resolves to the correct source producer (verified by cross-checking `event.provenance.source` against the producer that originated the event).
+5. Asserts: every event's `EventId::extract_prefix(...)` matches its producer's expected prefix (no producer's events leaked into another's prefix namespace).
+6. Asserts: total event count == 3000 with no two events sharing an EventId.
 
 **Verify** (test passes):
 
-- `cargo test --test multi_producer_stamping` exits `0`.
-- 100% of walkbacks resolve correctly. Pre-§28(a) (slice 004 baseline) would have non-zero collision rate under this stress; post-§28(a) the rate is structurally zero.
+- `cargo test --test multi_producer_uuidv8` exits `0`.
+- 100% of walkbacks resolve correctly. Pre-§28(a) (slice 004 baseline) would have non-zero collision rate under this stress; post-§28(a)'s UUIDv8 prefix-namespace partition makes the rate structurally zero.
 
-**E2e coverage**: `tests/e2e/multi_producer_stamping.rs` (SC-505).
+**E2e coverage**: `tests/e2e/multi_producer_uuidv8.rs` (SC-505).
 
-## Scenario 6 — Producer-supplied non-Outbound event rejection (US3, SC-506)
+## Scenario 6 — Codec strict-parsing rejection on malformed UUID (US3, SC-506)
 
-**Setup**: also test-binary-driven; the scenario exercises a wire-shape rejection that operator tooling will not normally encounter (post-§28(a) clients always construct `EventOutbound` correctly).
+**Setup**: also test-binary-driven; the scenario exercises a codec-layer rejection that operator tooling will not normally encounter (well-behaved clients always mint structurally-valid UUIDv8s).
 
-**Action** (test-binary-driven; see `tests/e2e/event_outbound_codec_validation.rs`):
+**Action** (test-binary-driven; see `tests/e2e/eventid_uuid_strict_parsing.rs`):
 
 The test:
 1. Sets up a core listener.
-2. Establishes a bus connection.
-3. Manually serialises a `BusMessageInbound::Event(_)` frame whose payload is the wire shape of an `Event { id, .. }` (with an `id` field — i.e., a slice-004-or-earlier client's outbound shape).
+2. Establishes a bus connection (handshake at protocol 0x05).
+3. Manually constructs a `BusMessage::Event(Event)` frame whose `id` is malformed UUID bytes — e.g., 16 bytes whose version nibble is `0x9` (not `0x8` for UUIDv8) or bytes that fail UUID parsing entirely. Uses raw `serde_json::to_writer` + `ciborium::ser::into_writer` bypassing the typed codec.
 4. Sends the frame.
-5. Asserts: the codec returns a structured decode error to the producer; the connection receives `BusMessage::Error { category: "decode", .. }` and closes; the trace contains no entry for the rejected event.
+5. Asserts: the codec returns a structured decode error to the producer via the `uuid` crate's strict-parsing path; the connection receives `BusMessage::Error { category: "decode", .. }` and closes; the trace contains no entry for the rejected event.
 
 **Verify**:
 
-- `cargo test --test event_outbound_codec_validation` exits `0`.
+- `cargo test --test eventid_uuid_strict_parsing` exits `0`.
 - `BusMessage::Error` with `category: "decode"` observed on the producer's connection.
 
-**E2e coverage**: `tests/e2e/event_outbound_codec_validation.rs` (SC-506).
+**Note**: this is a weaker version of the original 2026-04-27 SC-506 ("wire-shape rejection on producer-supplied `Event { id, .. }`"), narrowed under the 2026-04-29 re-derivation because there is no `Event` / `EventOutbound` envelope split anymore. The stronger spirit of "listener catches identity spoofing" (a producer mints UUIDv8s under another producer's prefix) is DEFERRED to slice 006 alongside FR-029.
+
+**E2e coverage**: `tests/e2e/eventid_uuid_strict_parsing.rs` (SC-506).
 
 ## Scenario 7 — Save against clean buffer (SC-507)
 
@@ -224,7 +230,7 @@ echo "diff exit: $?"   # expect 0 (no diff — mtime preserved)
   ```
   INFO weaver_buffers: WEAVER-SAVE-007 nothing to save: buffer was already clean
     entity=<entity-ref> path=/tmp/weaver-slice-005/file.txt
-    event_id=<stamped-id> version=1
+    event_id=<uuidv8> version=1
   ```
 - The TUI Buffers row remains in `clean` state. The annotation line refreshes — `event EventId(<n>)` now points at the latest BufferSave event (different from Scenario 1's id) — but the value `clean` is unchanged.
 - `diff /tmp/before-mtime.txt /tmp/after-mtime.txt` exits `0` — the file's mtime was NOT touched. SC-507 verifies no disk I/O on clean save.
@@ -240,8 +246,8 @@ After completing scenarios 1–7, the operator has demonstrated:
 - [x] **SC-502**: external rename between open and save → `WEAVER-SAVE-005` + buffer state preserved + original file content preserved.
 - [x] **SC-503**: external delete between open and save → `WEAVER-SAVE-006` + no file created + buffer state preserved.
 - [x] **SC-504**: I/O failure between tempfile write and rename → original file byte-identical to pre-save state + tempfile cleaned up + `WEAVER-SAVE-004` (test-binary verification).
-- [x] **SC-505**: multi-producer stress → 100% `weaver inspect --why` walkback resolution (test-binary verification).
-- [x] **SC-506**: wire-shape rejection on `Event`-with-id from inbound channel (test-binary verification).
+- [x] **SC-505**: multi-producer stress → 100% `weaver inspect --why` walkback resolution + UUIDv8 prefix-namespace partitioning verified across 3 producers × 1000 events (test-binary verification).
+- [x] **SC-506**: codec strict-parsing rejection on malformed UUID payload (test-binary verification). Note: stronger spoofing-detection deferred to slice 006 + FR-029.
 - [x] **SC-507**: clean-save no-op → `WEAVER-SAVE-007` + idempotent `buffer/dirty = false` re-emission + mtime preserved.
 
 ## Operator-pace notes

@@ -370,7 +370,17 @@ First concrete pointers: `core/src/bus/event_subscriptions.rs:22` (module doc + 
 
 ---
 
-## 28. EventId Allocation + Trace Indexing Semantics — LATENT CORRECTNESS GAP
+## 28. EventId Allocation + Trace Indexing Semantics — RESOLVED
+
+**Resolved in slice 005** (2026-04-29 constitutional re-derivation): producer-minted **UUIDv8** EventIds with hashed-producer-instance-id prefix. Service producers hash `ActorIdentity::Service::instance_id` to 58 bits via `std::collections::hash_map::DefaultHasher` (SipHash); non-Service producers generate a per-process UUIDv4 at startup and hash similarly. The hashed prefix occupies the high 58 bits of the UUIDv8 custom payload; nanoseconds (process-monotonic or wall-clock; producer's local invariant) occupy the low 64 bits. Cross-producer collision is structurally impossible — distinct producers occupy disjoint 58-bit-prefix namespaces. The producer's local id is final; the listener does NOT stamp.
+
+Listener-side **prefix-vs-provenance verification** (catching a malicious producer that mints UUIDv8s under another producer's hashed-instance-id prefix) is **DEFERRED** to slice 006 alongside FR-029, the unauthenticated-edit/save-channel close-out — both share the same hazard class (the bus does not yet bind `ActorIdentity` to the connection at handshake time).
+
+The 2026-04-27 listener-stamping / ID-stripped-envelope direction (originally proposed as the resolution for §28(a)) was superseded by the 2026-04-29 re-derivation after a per-principle audit against `docs/00-constitution.md` found it misaligned on §2/§11/§12/§15/§16 (originator-pattern bootstrap-chain regression — `weaver-buffers`'s `bootstrap_tick` shares the BufferOpen event's id as `causal_parent` for its bootstrap facts; under listener-stamping the producer cannot synchronously learn that id under fire-and-forget / lossy delivery) and in tension with §1/§6/§17 (centralisation of ID-arbitration authority). Constitutional re-derivation rationale at `specs/005-buffer-save/research.md §12`. See also `specs/005-buffer-save/spec.md` FR-019..FR-024 + `specs/005-buffer-save/research.md §5, §12`.
+
+Original problem statement preserved below for archaeological context.
+
+---
 
 `EventId` (`core/src/types/ids.rs:6-14`) is a `u64` documented as "Monotonic per producer; unique for the lifetime of a bus connection" — explicitly NOT globally unique. Production minting in slices 001–004 is from wall-clock nanoseconds at multiple independent producers:
 
@@ -401,21 +411,21 @@ The defect is latent since slice 001 (the index has been last-writer-wins from t
 - Core-side re-stamping breaks `causal_parent` linkage if any caller already references the producer's `EventId` (e.g., `weaver-buffers` re-emission triple shares the BufferEdit's EventId as `causal_parent`).
 - A `MultiMap<EventId, TraceSequence>` doesn't help: the call site has no extra discriminator to disambiguate.
 
-**Candidate resolutions** (one slice, not piecemeal):
+**Candidate resolutions** (annotated with adoption status post-2026-04-29 re-derivation):
 
-- (a) **Core-assigned globally unique EventIds.** Producers send events with a placeholder ID; core stamps a monotonic per-trace EventId on `process_event`. Wire-incompatible — all producers must adopt the placeholder convention. `causal_parent` chains rely on the core-assigned ID being available on the response side (or via subscribe-events fan-out).
-- (b) **`source_event` carries `TraceSequence` instead of `EventId` on the wire.** Wire-incompat for `InspectionDetail`; `find_event(seq)` becomes a direct array lookup, no index needed. Cleanest semantically.
-- (c) **Composite ID (`producer_instance, EventId`).** Producers stamp their `(ActorIdentity, EventId)` tuple as the trace key. Wire-incompat; relies on `ActorIdentity::Service` carrying instance UUID, but `ActorIdentity::User` is a unit variant in slice 004 — would need expansion. Adds one CBOR field per index entry.
+- (a) **Core-assigned globally unique EventIds (re-derived as producer-minted UUIDv8 with hashed producer-instance-id prefix)** — `[ADOPTED — UUIDv8 with hashed producer-instance-id prefix; spoofing-detection deferred to FR-029 close-out in slice 006]`. Original framing: "Producers send events with a placeholder ID; core stamps a monotonic per-trace EventId on `process_event`" — REJECTED on per-principle constitutional audit (see resolution paragraph above). Re-derived under 2026-04-29 as: producers mint UUIDv8 locally with their own hashed-identity prefix; listener does not stamp; producer's local id is final, preserving the bootstrap → bootstrap-fact chain affordance.
+- (b) **`source_event` carries `TraceSequence` instead of `EventId` on the wire** — `[NOT ADOPTED — addresses inspect-side surface only, not the producer-side mint hazard]`. The proposal would change `InspectionDetail.source_event` to `TraceSequence` for direct-array lookup, but producers would still mint `EventId(u64)` from `now_ns()` and the trace's `by_event` would still be hazard-prone. UUIDv8 closes the producer-side mint hazard at the source.
+- (c) **Composite ID (`producer_instance, EventId`)** — `[NOT ADOPTED — wire-bloat + Hash/Eq complexity at every EventId site]`. The tuple form would force a wrapper struct with manual Hash/Eq/Ord impls, plus every wire-level fact's `causal_parent: Option<EventId>` would become a tuple (two CBOR fields per occurrence). UUIDv8 packs the producer-id + time into a single 16-byte key with the same collision-freedom property.
 
-**Revisit triggers**:
+**Revisit triggers** (preserved for archaeological context, all addressed by the resolution):
 
-1. An operator reports a confused `weaver inspect --why` walkback (a fact's source-event resolves to a different producer's event in the field).
-2. A future slice exercises `causal_parent` chaining across more than one producer simultaneously (e.g., agent + user concurrent edits) — the collision rate scales with concurrent producer count.
-3. The bus protocol bumps for any other reason (slice 005 disk-save? slice 006 agent?) — fold the EventId/TraceSequence change in to amortise the wire-impact cost.
+1. ~~An operator reports a confused `weaver inspect --why` walkback (a fact's source-event resolves to a different producer's event in the field).~~ Addressed: cross-producer UUIDv8 collision is structurally impossible.
+2. ~~A future slice exercises `causal_parent` chaining across more than one producer simultaneously (e.g., agent + user concurrent edits) — the collision rate scales with concurrent producer count.~~ Addressed: prefix-namespace partitioning makes collision rate structurally zero regardless of producer count.
+3. ~~The bus protocol bumps for any other reason (slice 005 disk-save? slice 006 agent?) — fold the EventId/TraceSequence change in to amortise the wire-impact cost.~~ Addressed: slice 005 is the amortising wire bump (0x04 → 0x05).
 
-**Current lean**: defer to a dedicated soundness slice that fixes EventId allocation + trace indexing in one wire bump. Until then, the call sites carry a pointer here so reviewers landing at the lookup code can skip over the finding.
+**Reopens at**: slice 006 — the listener-side prefix-vs-provenance verification (UUIDv8-prefix-spoofing detection, joined with FR-029 unauthenticated-channel close-out) is the carry-forward residual; closing it ships the §17 (Multi-Actor Coherence) end-state.
 
-First concrete pointers: `core/src/types/ids.rs::EventId` (type-level docstring), `core/src/trace/store.rs::TraceStore::find_event` + `update_indexes` (insert site), `core/src/bus/listener.rs::handle_message` `EventInspectRequest` arm. Originally surfaced by Codex review on PR #11 (slice 004).
+First concrete pointers (post-resolution): `core/src/types/ids.rs::EventId` (UUIDv8 wire shape + `mint_v8` helper + `extract_prefix`), `core/src/trace/store.rs::TraceStore::by_event` (re-keyed at `EventId(Uuid)`), `core/src/bus/listener.rs::validate_event_envelope` (preserved entity-match check; UUIDv8-prefix-vs-provenance verification deferred — FR-029 cross-reference TODO comment). Originally surfaced by Codex review on PR #11 (slice 004).
 
 ---
 
