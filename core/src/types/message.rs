@@ -171,13 +171,24 @@ pub enum EventSubscribePattern {
     /// entity; subscribers that only care about specific targets MUST
     /// filter at receipt time.
     PayloadType(String),
+    /// Match events whose payload type tag is in the provided list —
+    /// equivalent to a logical OR of multiple `PayloadType`
+    /// subscriptions on a single connection. Required because the
+    /// listener implements last-wins per-connection: two consecutive
+    /// `SubscribeEvents` calls would drop the first subscription.
+    /// Slice 005 introduces this variant so `weaver-buffers` can
+    /// receive both `buffer-edit` and `buffer-save` events through
+    /// one subscription handle.
+    PayloadTypes(Vec<String>),
 }
 
 impl EventSubscribePattern {
     /// Return `true` when the event matches this subscription.
     pub fn matches(&self, event: &crate::types::event::Event) -> bool {
+        let tag = event.payload.type_tag();
         match self {
-            Self::PayloadType(tag) => event.payload.type_tag() == tag.as_str(),
+            Self::PayloadType(t) => t.as_str() == tag,
+            Self::PayloadTypes(ts) => ts.iter().any(|t| t.as_str() == tag),
         }
     }
 }
@@ -690,6 +701,59 @@ mod tests {
         let unknown = EventSubscribePattern::PayloadType("nonexistent-variant".into());
         assert!(!unknown.matches(&buffer_edit));
         assert!(!unknown.matches(&buffer_open));
+
+        // Slice 005: PayloadTypes(Vec<String>) — multi-tag matcher.
+        let buffer_save = fixture(EventPayload::BufferSave {
+            entity: crate::types::entity_ref::EntityRef::new(1),
+            version: 0,
+        });
+        let edit_or_save =
+            EventSubscribePattern::PayloadTypes(vec!["buffer-edit".into(), "buffer-save".into()]);
+        assert!(
+            edit_or_save.matches(&buffer_edit),
+            "PayloadTypes(edit,save) matches edit"
+        );
+        assert!(
+            edit_or_save.matches(&buffer_save),
+            "PayloadTypes(edit,save) matches save"
+        );
+        assert!(
+            !edit_or_save.matches(&buffer_open),
+            "PayloadTypes(edit,save) does NOT match open"
+        );
+
+        let empty_set = EventSubscribePattern::PayloadTypes(vec![]);
+        assert!(
+            !empty_set.matches(&buffer_edit),
+            "PayloadTypes([]) is the structural never-matches"
+        );
+    }
+
+    #[test]
+    fn event_subscribe_pattern_payload_types_json_wire_shape() {
+        // Wire shape under the kebab-case adjacent-tagging convention:
+        // `{"type":"payload-types","pattern":["buffer-edit","buffer-save"]}`.
+        // Pinned so a future serde-derive change can't silently drift
+        // the variant tag or the field name on this surface.
+        let p =
+            EventSubscribePattern::PayloadTypes(vec!["buffer-edit".into(), "buffer-save".into()]);
+        let s = serde_json::to_string(&p).expect("serialize");
+        assert_eq!(
+            s,
+            r#"{"type":"payload-types","pattern":["buffer-edit","buffer-save"]}"#,
+        );
+        let back: EventSubscribePattern = serde_json::from_str(&s).expect("deserialize");
+        assert_eq!(p, back);
+    }
+
+    #[test]
+    fn event_subscribe_pattern_payload_types_cbor_round_trip() {
+        let p =
+            EventSubscribePattern::PayloadTypes(vec!["buffer-edit".into(), "buffer-save".into()]);
+        let mut buf = Vec::new();
+        ciborium::into_writer(&p, &mut buf).expect("encode");
+        let back: EventSubscribePattern = ciborium::from_reader(buf.as_slice()).expect("decode");
+        assert_eq!(p, back);
     }
 
     #[test]

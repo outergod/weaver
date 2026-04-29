@@ -504,21 +504,21 @@ pub async fn run(
     // `dispatch_buffer_edit`'s NotOwned outcome (the registry is the
     // ownership source of truth; subscribing per-entity here would
     // duplicate that gate without payoff).
+    // The listener is last-wins per connection on event subscriptions
+    // (`core/src/bus/event_subscriptions.rs`'s subscribe contract). To
+    // receive both `buffer-edit` (slice 004) and `buffer-save`
+    // (slice 005) on a single handle, we issue ONE
+    // `SubscribeEvents(PayloadTypes(...))` rather than two consecutive
+    // `PayloadType(...)` subscriptions — the second of which would
+    // silently drop the first.
     client
-        .subscribe_events(EventSubscribePattern::PayloadType("buffer-edit".into()))
+        .subscribe_events(EventSubscribePattern::PayloadTypes(vec![
+            "buffer-edit".into(),
+            "buffer-save".into(),
+        ]))
         .await
         .map_err(|source| PublisherError::BusUnavailable { source })?;
-    debug!("subscribed to buffer-edit events");
-
-    // Slice 005: subscribe to BufferSave events as well. Same pattern
-    // as the buffer-edit subscription — filtering by target entity
-    // happens at dispatch time via dispatch_buffer_save's NotOwned
-    // outcome.
-    client
-        .subscribe_events(EventSubscribePattern::PayloadType("buffer-save".into()))
-        .await
-        .map_err(|source| PublisherError::BusUnavailable { source })?;
-    debug!("subscribed to buffer-save events");
+    debug!("subscribed to buffer-edit + buffer-save events");
 
     let (reader, writer_half) = client.stream.into_split();
     let mut writer = BusWriter {
