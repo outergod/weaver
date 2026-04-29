@@ -470,7 +470,7 @@ mod tests {
             Provenance::new(
                 ActorIdentity::behavior(BehaviorId::new("core/dirty-tracking")),
                 2,
-                Some(EventId::new(7)),
+                Some(EventId::for_testing(7)),
             )
             .is_ok()
         );
@@ -483,7 +483,7 @@ mod tests {
         let p = Provenance::new(
             ActorIdentity::behavior(BehaviorId::new("core/dirty-tracking")),
             1000,
-            Some(EventId::new(42)),
+            Some(EventId::for_testing(42)),
         )
         .unwrap();
         let s = serde_json::to_string(&p).unwrap();

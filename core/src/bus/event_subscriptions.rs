@@ -123,7 +123,7 @@ mod tests {
 
     fn fixture_event(payload: EventPayload) -> Event {
         Event {
-            id: EventId::new(0),
+            id: EventId::for_testing(0),
             name: "test".into(),
             target: None,
             payload,

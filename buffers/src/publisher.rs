@@ -519,8 +519,12 @@ pub async fn run(
         // Per-tick event id: one synthesised EventId shared across
         // every transition this tick emits — per data-model.md,
         // retract/assert of `buffer/observable` and re-assert of
-        // `buffer/dirty` correlate to the same poll tick.
-        let poll_tick_id = EventId::new(now_ns());
+        // `buffer/dirty` correlate to the same poll tick. Slice 005
+        // T-A1 (this commit) wraps the legacy `now_ns()` mint via
+        // `Uuid::from_u128` as a transitional placeholder; T010
+        // replaces with `EventId::mint_v8(hash_to_58(&instance_id),
+        // now_ns())` to install the UUIDv8 producer-prefix scheme.
+        let poll_tick_id = EventId::new(uuid::Uuid::from_u128(now_ns() as u128));
 
         for state in registry.buffers.values_mut() {
             if let Err(e) =
@@ -611,7 +615,7 @@ async fn handle_event(
                 } => {
                     info!(
                         entity = entity.as_u64(),
-                        event_id = event_id.as_u64(),
+                        event_id = %event_id,
                         new_version,
                         new_byte_size,
                         edits = edits.len(),
@@ -689,7 +693,7 @@ async fn handle_event(
                 BufferEditOutcome::NotOwned => {
                     debug!(
                         entity = entity.as_u64(),
-                        event_id = event_id.as_u64(),
+                        event_id = %event_id,
                         reason = "unowned-entity",
                         "buffer edit dropped",
                     );
@@ -697,7 +701,7 @@ async fn handle_event(
                 BufferEditOutcome::StaleVersion { current, emitted } => {
                     debug!(
                         entity = entity.as_u64(),
-                        event_id = event_id.as_u64(),
+                        event_id = %event_id,
                         reason = "stale-version",
                         emitted_version = emitted,
                         current_version = current,
@@ -707,7 +711,7 @@ async fn handle_event(
                 BufferEditOutcome::FutureVersion { current, emitted } => {
                     debug!(
                         entity = entity.as_u64(),
-                        event_id = event_id.as_u64(),
+                        event_id = %event_id,
                         reason = "future-version",
                         emitted_version = emitted,
                         current_version = current,
@@ -717,7 +721,7 @@ async fn handle_event(
                 BufferEditOutcome::EmptyBatch => {
                     debug!(
                         entity = entity.as_u64(),
-                        event_id = event_id.as_u64(),
+                        event_id = %event_id,
                         reason = "empty-batch",
                         "buffer edit dropped",
                     );
@@ -736,7 +740,7 @@ async fn handle_event(
                         } => {
                             debug!(
                                 entity = entity.as_u64(),
-                                event_id = event_id.as_u64(),
+                                event_id = %event_id,
                                 reason = err.reason(),
                                 first_index,
                                 second_index,
@@ -750,7 +754,7 @@ async fn handle_event(
                             );
                             debug!(
                                 entity = entity.as_u64(),
-                                event_id = event_id.as_u64(),
+                                event_id = %event_id,
                                 reason = err.reason(),
                                 edit_index,
                                 error = %err,
@@ -766,7 +770,7 @@ async fn handle_event(
             // to "buffer-open" events. If one arrives anyway (a
             // future producer subscribes us to it), ignore.
             debug!(
-                event_id = event_id.as_u64(),
+                event_id = %event_id,
                 "ignoring BufferOpen event on the publisher subscription path",
             );
         }
@@ -778,7 +782,7 @@ async fn handle_event(
             // here is best-effort ignored to keep the reader loop
             // alive until the dispatch arm lands.
             debug!(
-                event_id = event_id.as_u64(),
+                event_id = %event_id,
                 "ignoring BufferSave event pre-T018 (no dispatch arm yet)",
             );
         }
@@ -938,7 +942,9 @@ async fn open_and_bootstrap_all(
         // (events are lossy-class, no retract), so the caller owns
         // the "event emission only once ownership is confirmed"
         // ordering.
-        let bootstrap_tick = EventId::new(bootstrap_base.wrapping_add(idx as u64));
+        let bootstrap_tick = EventId::new(uuid::Uuid::from_u128(
+            bootstrap_base.wrapping_add(idx as u64) as u128,
+        ));
         let entity = state.entity();
         publish_buffer_bootstrap(writer, identity, &state, tracked, bootstrap_tick).await?;
         registry.insert(state);

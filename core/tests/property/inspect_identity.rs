@@ -18,7 +18,7 @@ use weaver_core::types::ids::{BehaviorId, EventId};
 use weaver_core::types::message::InspectionDetail;
 
 fn arb_event_id() -> impl Strategy<Value = EventId> {
-    any::<u64>().prop_map(EventId::new)
+    any::<u64>().prop_map(|x| EventId::for_testing(x as u128))
 }
 
 fn arb_asserted_at_ns() -> impl Strategy<Value = u64> {

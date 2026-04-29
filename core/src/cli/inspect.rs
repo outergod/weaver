@@ -17,6 +17,7 @@ use crate::cli::config::Config;
 use crate::types::entity_ref::EntityRef;
 use crate::types::event::Event;
 use crate::types::fact::{FactKey, FactValue};
+use crate::types::ids::EventId;
 use crate::types::message::{BusMessage, EventInspectionError, InspectionDetail, InspectionError};
 
 /// Exit code for `weaver inspect` when the core is unreachable.
@@ -49,7 +50,13 @@ pub enum InspectCliError {
 /// original `print_walkback_json` design intent.
 #[derive(Debug, Serialize)]
 struct FactInspectionJson {
-    source_event: u64,
+    /// Slice 005 §28(a) re-derivation: serialises as a UUID hex
+    /// string (the `uuid` crate's default Serialize for human-readable
+    /// formats; transparent through [`EventId`]'s `#[serde(transparent)]`
+    /// derive). Slice 004 emitted this as a JSON number; the wire-bump
+    /// 0x04 → 0x05 advances both the bus shape and this CLI-output
+    /// shape in lockstep.
+    source_event: EventId,
     /// Wire-level discriminator — one of `"behavior" | "service" |
     /// "core" | "tui" | "user" | "host" | "agent"`. Always present
     /// so consumers can parse the response without peeking at which
@@ -344,7 +351,7 @@ fn print_walkback_json(
     // emit `fact_inspection.fact` spuriously and drift from the
     // documented walkback shape in cli-surfaces.md.
     let fact_inspection = FactInspectionJson {
-        source_event: detail.source_event.as_u64(),
+        source_event: detail.source_event,
         asserting_kind: detail.asserting_kind.clone(),
         asserting_behavior: detail.asserting_behavior.as_ref().map(|b| b.to_string()),
         asserting_service: detail.asserting_service.clone(),
@@ -362,7 +369,7 @@ fn print_walkback_json(
             // without a wire bump).
             let provenance = serde_json::to_value(&event.provenance).into_diagnostic()?;
             serde_json::json!({
-                "id": event.id.as_u64(),
+                "id": event.id,
                 "name": event.name,
                 "target": event.target.map(|e| e.as_u64()),
                 "payload_type": payload_type,
@@ -417,7 +424,7 @@ fn print_found_json(key: &FactKey, d: &InspectionDetail) -> miette::Result<()> {
             attribute: key.attribute.clone(),
         },
         inner: FactInspectionJson {
-            source_event: d.source_event.as_u64(),
+            source_event: d.source_event,
             asserting_kind: d.asserting_kind.clone(),
             asserting_behavior: d.asserting_behavior.as_ref().map(|b| b.to_string()),
             asserting_service: d.asserting_service.clone(),

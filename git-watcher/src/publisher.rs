@@ -319,7 +319,7 @@ pub async fn run(
             if prev != &obs {
                 // Synthesize a poll-tick event id so transition
                 // retract+assert share a causal parent.
-                let poll_tick_id = EventId::new(now_ns());
+                let poll_tick_id = EventId::new(uuid::Uuid::from_u128(now_ns() as u128));
                 diff_publish(
                     &mut writer,
                     repo_entity,

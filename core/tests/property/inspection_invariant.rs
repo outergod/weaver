@@ -39,7 +39,7 @@ fn run(event_count: usize) -> Option<(String, u64, usize)> {
         )));
 
         for i in 0..event_count {
-            let id = EventId::new((i as u64) + 1);
+            let id = EventId::for_testing(((i as u64) + 1) as u128);
             d.process_event(Event {
                 id,
                 name: "buffer/open".into(),

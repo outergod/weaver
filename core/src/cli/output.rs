@@ -174,7 +174,7 @@ mod tests {
                 provenance: Provenance::new(
                     ActorIdentity::behavior(BehaviorId::new("core/dirty-tracking")),
                     12_340_000_000,
-                    Some(EventId::new(42)),
+                    Some(EventId::for_testing(42)),
                 )
                 .unwrap(),
             }],

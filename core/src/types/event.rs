@@ -112,7 +112,7 @@ mod tests {
 
     fn sample_event(id: u64) -> Event {
         Event {
-            id: EventId::new(id),
+            id: EventId::for_testing(id as u128),
             name: "buffer/open".into(),
             target: Some(EntityRef::new(1)),
             payload: EventPayload::BufferOpen {
@@ -137,7 +137,7 @@ mod tests {
             new_text: "hello ".into(),
         };
         Event {
-            id: EventId::new(id),
+            id: EventId::for_testing(id as u128),
             name: "buffer/edit".into(),
             target: Some(EntityRef::new(42)),
             payload: EventPayload::BufferEdit {
@@ -261,7 +261,7 @@ mod tests {
     fn gen_buffer_edit_event() -> impl Strategy<Value = Event> {
         (0u64..1_000_000, gen_buffer_edit_payload(), 0u64..u64::MAX).prop_map(
             |(id, payload, ts)| Event {
-                id: EventId::new(id),
+                id: EventId::for_testing(id as u128),
                 name: "buffer/edit".into(),
                 target: Some(EntityRef::new(0xDEAD_BEEF)),
                 payload,

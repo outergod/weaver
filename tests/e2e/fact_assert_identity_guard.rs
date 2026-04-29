@@ -129,7 +129,7 @@ async fn retract_provenance_is_synthesized_server_side() {
     }
 
     // Publisher retracts with forged Core provenance.
-    let forged_parent = weaver_core::types::ids::EventId::new(0xDEADBEEF);
+    let forged_parent = weaver_core::types::ids::EventId::for_testing(0xDEADBEEF);
     let forged_retract_prov =
         Provenance::new(ActorIdentity::Core, now_ns(), Some(forged_parent)).unwrap();
     publisher
@@ -386,7 +386,7 @@ async fn rejects_event_with_malformed_service_identity() {
         instance_id: Uuid::new_v4(),
     };
     let event = Event {
-        id: EventId::new(now_ns()),
+        id: EventId::new(uuid::Uuid::from_u128(now_ns() as u128)),
         name: "buffer/open".into(),
         target: Some(EntityRef::new(1)),
         payload: EventPayload::BufferOpen {

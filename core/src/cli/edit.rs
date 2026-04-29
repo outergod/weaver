@@ -383,14 +383,19 @@ async fn prepare_dispatch(
     };
 
     // Provenance carries ActorIdentity::User per research §6 — first
-    // production use of the variant reserved at slice 002. EventId
-    // is synthesised from wall-clock ns; uniqueness within a single
-    // CLI invocation suffices (the trace dedupes via stable ordering).
+    // production use of the variant reserved at slice 002. EventId is
+    // a UUIDv8 producer-minted by the CLI emitter (slice-005 §28(a)
+    // re-derivation; producer prefix derives from a per-process UUIDv4
+    // hashed via SipHash — landed in slice-005 task T-A2). T-A1 (this
+    // commit) wraps the legacy `now_ns()` mint via `Uuid::from_u128`
+    // as a transitional placeholder so the workspace stays internally
+    // consistent at the type-cascade commit; T009 then replaces this
+    // with `EventId::mint_v8(get_user_prefix(), now_ns())`.
     let now = now_ns();
     let provenance = Provenance::new(ActorIdentity::User, now, None)
         .expect("ActorIdentity::User has no fields to validate");
     let event = Event {
-        id: EventId::new(now),
+        id: EventId::new(uuid::Uuid::from_u128(now as u128)),
         name: "buffer/edit".into(),
         target: Some(entity),
         payload: EventPayload::BufferEdit {
@@ -715,7 +720,7 @@ mod tests {
         // even after subtracting wrapper overhead.
         let new_text = "x".repeat(MAX_EVENT_INGEST_FRAME + 1024);
         let event = Event {
-            id: EventId::new(0),
+            id: EventId::for_testing(0),
             name: "buffer/edit".into(),
             target: Some(EntityRef::new(1)),
             payload: EventPayload::BufferEdit {
