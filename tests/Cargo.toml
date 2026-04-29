@@ -118,3 +118,7 @@ path = "e2e/buffer_save_dirty.rs"
 [[test]]
 name = "buffer_save_clean_noop"
 path = "e2e/buffer_save_clean_noop.rs"
+
+[[test]]
+name = "buffer_save_inode_refusal"
+path = "e2e/buffer_save_inode_refusal.rs"
