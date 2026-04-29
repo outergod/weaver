@@ -110,3 +110,7 @@ path = "e2e/buffer_edit_sequential.rs"
 [[test]]
 name = "buffer_edit_stale_drop"
 path = "e2e/buffer_edit_stale_drop.rs"
+
+[[test]]
+name = "buffer_save_dirty"
+path = "e2e/buffer_save_dirty.rs"
