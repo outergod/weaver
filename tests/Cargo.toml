@@ -130,3 +130,7 @@ path = "e2e/buffer_save_atomic_invariant.rs"
 [[test]]
 name = "multi_producer_uuidv8"
 path = "e2e/multi_producer_uuidv8.rs"
+
+[[test]]
+name = "eventid_uuid_strict_parsing"
+path = "e2e/eventid_uuid_strict_parsing.rs"
