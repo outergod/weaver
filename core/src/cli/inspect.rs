@@ -4,6 +4,7 @@
 //! Shape of both output forms matches
 //! `specs/001-hello-fact/contracts/cli-surfaces.md`.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 use miette::{IntoDiagnostic, miette};
@@ -14,6 +15,7 @@ use tokio::runtime::Builder;
 use crate::bus::client::{Client, ClientError};
 use crate::cli::args::OutputFormat;
 use crate::cli::config::Config;
+use crate::provenance::ActorIdentity;
 use crate::types::entity_ref::EntityRef;
 use crate::types::event::Event;
 use crate::types::fact::{FactKey, FactValue};
@@ -287,7 +289,7 @@ fn render(
     output: OutputFormat,
 ) -> miette::Result<()> {
     match (response, output) {
-        (Ok(detail), OutputFormat::Human) => print_found_human(key, detail),
+        (Ok(detail), OutputFormat::Human) => print_found_human(key, detail, &HashMap::new()),
         (Ok(detail), OutputFormat::Json) => print_found_json(key, detail)?,
         (Err(e), OutputFormat::Human) => print_not_found_human(key, e),
         (Err(e), OutputFormat::Json) => print_not_found_json(key, e)?,
@@ -298,6 +300,14 @@ fn render(
 /// Slice-004 `--why` walkback rendering. Combines the existing
 /// fact-inspect output with the source-event's `Event` envelope (or
 /// an `event-not-found` marker if the trace lookup failed).
+///
+/// Slice-005 T-A4: when the walked-back event is `Ok`, build a
+/// single-entry `prefix → friendly_name` cache from its
+/// `provenance.source` and use it to render the human-readable
+/// `EventId` annotations (`source_event`, `event.id`, `causal_parent`)
+/// as `EventId(<friendly>/<short-suffix>)`. JSON output is unchanged
+/// — the full UUID hex stays as the documented `--output=json` shape
+/// per `specs/005-buffer-save/contracts/cli-surfaces.md`.
 fn render_walkback(
     key: &FactKey,
     detail: &InspectionDetail,
@@ -306,9 +316,10 @@ fn render_walkback(
 ) -> miette::Result<()> {
     match output {
         OutputFormat::Human => {
-            print_found_human(key, detail);
+            let prefix_cache = build_prefix_cache_from_walkback(event_resp);
+            print_found_human(key, detail, &prefix_cache);
             match event_resp {
-                Ok(event) => print_event_human(event),
+                Ok(event) => print_event_human(event, &prefix_cache),
                 Err(e) => println!("event: error: {}", event_inspection_error_label(e)),
             }
         }
@@ -319,8 +330,65 @@ fn render_walkback(
     Ok(())
 }
 
-fn print_event_human(event: &Event) {
-    println!("event: {}", event.id);
+/// Build a `prefix → friendly_name` cache from a single walked-back
+/// event's `provenance.source`. The walked-back event's `id` carries
+/// the producer's UUIDv8 prefix; the event's provenance gives us the
+/// friendly name. One binding per `--why` invocation; bindings beyond
+/// the walked-back event require additional `EventInspectRequest`
+/// round-trips that slice 005 doesn't pay for (per the slice-005-
+/// session-1 handoff: "Bootstrap miss is acceptable").
+fn build_prefix_cache_from_walkback(
+    event_resp: &Result<Event, EventInspectionError>,
+) -> HashMap<u64, String> {
+    let mut cache = HashMap::new();
+    if let Ok(event) = event_resp {
+        let prefix = event.id.extract_prefix();
+        if prefix != 0 {
+            cache.insert(prefix, friendly_name_for(&event.provenance.source));
+        }
+    }
+    cache
+}
+
+/// Slice-005 T-A4: derive a short friendly name from an
+/// [`ActorIdentity`] for `EventId` annotation rendering. Mirrors the
+/// TUI's T-A3 helper; kept separate to avoid introducing a cross-crate
+/// dependency on tui types from the core CLI.
+fn friendly_name_for(identity: &ActorIdentity) -> String {
+    match identity {
+        ActorIdentity::Behavior { id } => id.as_str().to_string(),
+        ActorIdentity::Core => "core".into(),
+        ActorIdentity::Tui => "tui".into(),
+        ActorIdentity::Service { service_id, .. } => service_id.clone(),
+        ActorIdentity::User => "user".into(),
+        ActorIdentity::Host { host_id, .. } => format!("host {host_id}"),
+        ActorIdentity::Agent { agent_id, .. } => format!("agent {agent_id}"),
+    }
+}
+
+/// Slice-005 T-A4: format an [`EventId`] using the passive cache.
+/// On cache hit: `EventId(<friendly_name>/<short-suffix>)`. On miss
+/// (including the `prefix == 0` non-UUIDv8 case): full UUID hex via
+/// `Display` — keeps the raw id grep-able for non-UI consumers.
+fn format_event_id_human(id: EventId, prefix_cache: &HashMap<u64, String>) -> String {
+    let prefix = id.extract_prefix();
+    if prefix == 0 {
+        return id.to_string();
+    }
+    match prefix_cache.get(&prefix) {
+        Some(name) => {
+            let simple = id.as_uuid().simple().to_string();
+            let short = simple
+                .get(simple.len().saturating_sub(8)..)
+                .unwrap_or(&simple);
+            format!("EventId({name}/{short})")
+        }
+        None => id.to_string(),
+    }
+}
+
+fn print_event_human(event: &Event, prefix_cache: &HashMap<u64, String>) {
+    println!("event: {}", format_event_id_human(event.id, prefix_cache));
     println!("  name:               {}", event.name);
     if let Some(t) = event.target {
         println!("  target:             {t}");
@@ -334,7 +402,10 @@ fn print_event_human(event: &Event) {
     );
     println!("  timestamp_ns:       {}", event.provenance.timestamp_ns);
     if let Some(parent) = event.provenance.causal_parent {
-        println!("  causal_parent:      {parent}");
+        println!(
+            "  causal_parent:      {}",
+            format_event_id_human(parent, prefix_cache)
+        );
     } else {
         println!("  causal_parent:      —");
     }
@@ -399,9 +470,12 @@ fn event_inspection_error_label(e: &EventInspectionError) -> &'static str {
     }
 }
 
-fn print_found_human(key: &FactKey, d: &InspectionDetail) {
+fn print_found_human(key: &FactKey, d: &InspectionDetail, prefix_cache: &HashMap<u64, String>) {
     println!("fact: ({}, {})", key.entity, key.attribute);
-    println!("  source_event:       {}", d.source_event);
+    println!(
+        "  source_event:       {}",
+        format_event_id_human(d.source_event, prefix_cache)
+    );
     println!("  asserting_kind:     {}", d.asserting_kind);
     if let Some(b) = &d.asserting_behavior {
         println!("  asserting_behavior: {b}");
