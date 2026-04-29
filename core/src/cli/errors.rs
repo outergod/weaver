@@ -155,6 +155,23 @@ pub enum WeaverCliError {
         max_bytes: usize,
         context: Option<String>,
     },
+
+    /// WEAVER-SAVE-001 — the target buffer is not opened by any
+    /// `weaver-buffers` instance on the bus. Surfaced when
+    /// `weaver save`'s pre-dispatch inspect-lookup of `buffer/version`
+    /// returns `FactNotFound`. Same situation as `BufferNotOpened`
+    /// (WEAVER-EDIT-001) on a different surface; the code-per-surface
+    /// split lets operators grep traces by code without conflating
+    /// the edit-side and save-side instances. Exit 1.
+    #[error(
+        "buffer not opened: {entity_arg} — no fact (entity:{entity}, attribute:buffer/version) is asserted by any authority. Run `weaver-buffers <PATH>` to open the buffer."
+    )]
+    #[diagnostic(code("WEAVER-SAVE-001"))]
+    BufferNotOpenedSave {
+        entity_arg: String,
+        entity: u64,
+        context: Option<String>,
+    },
 }
 
 impl WeaverCliError {
@@ -169,6 +186,7 @@ impl WeaverCliError {
             WeaverCliError::InvalidRange { .. } => "invalid-range",
             WeaverCliError::MalformedEditJson { .. } => "malformed-edit-json",
             WeaverCliError::EditWireFrameTooLarge { .. } => "edit-wire-frame-too-large",
+            WeaverCliError::BufferNotOpenedSave { .. } => "buffer-not-opened",
         }
     }
 
@@ -184,6 +202,7 @@ impl WeaverCliError {
             WeaverCliError::InvalidRange { .. } => "WEAVER-EDIT-002",
             WeaverCliError::MalformedEditJson { .. } => "WEAVER-EDIT-003",
             WeaverCliError::EditWireFrameTooLarge { .. } => "WEAVER-EDIT-004",
+            WeaverCliError::BufferNotOpenedSave { .. } => "WEAVER-SAVE-001",
         }
     }
 
@@ -196,7 +215,8 @@ impl WeaverCliError {
             | WeaverCliError::BufferNotOpened { context, .. }
             | WeaverCliError::InvalidRange { context, .. }
             | WeaverCliError::MalformedEditJson { context, .. }
-            | WeaverCliError::EditWireFrameTooLarge { context, .. } => context.as_deref(),
+            | WeaverCliError::EditWireFrameTooLarge { context, .. }
+            | WeaverCliError::BufferNotOpenedSave { context, .. } => context.as_deref(),
         }
     }
 
@@ -217,7 +237,8 @@ impl WeaverCliError {
             | WeaverCliError::BufferNotOpened { .. }
             | WeaverCliError::InvalidRange { .. }
             | WeaverCliError::MalformedEditJson { .. }
-            | WeaverCliError::EditWireFrameTooLarge { .. } => exit_code::GENERAL,
+            | WeaverCliError::EditWireFrameTooLarge { .. }
+            | WeaverCliError::BufferNotOpenedSave { .. } => exit_code::GENERAL,
         }
     }
 
@@ -307,6 +328,15 @@ impl WeaverCliError {
             } => WeaverCliError::EditWireFrameTooLarge {
                 actual_bytes: *actual_bytes,
                 max_bytes: *max_bytes,
+                context: context.clone(),
+            },
+            WeaverCliError::BufferNotOpenedSave {
+                entity_arg,
+                entity,
+                context,
+            } => WeaverCliError::BufferNotOpenedSave {
+                entity_arg: entity_arg.clone(),
+                entity: *entity,
                 context: context.clone(),
             },
         }
@@ -402,6 +432,23 @@ mod tests {
         assert!(s.contains("\"code\":\"WEAVER-EDIT-004\""));
         assert!(s.contains("70000"));
         assert!(s.contains("65536"));
+        assert_eq!(err.exit_code(), exit_code::GENERAL);
+    }
+
+    #[test]
+    fn buffer_not_opened_save_envelope_shape() {
+        // Slice 005: WEAVER-SAVE-001 mirrors WEAVER-EDIT-001's "buffer
+        // not opened" situation on the save surface — same category,
+        // distinct code so traces grep cleanly per surface.
+        let err = WeaverCliError::BufferNotOpenedSave {
+            entity_arg: "/tmp/foo.txt".into(),
+            entity: 0xDEAD_BEEF,
+            context: Some("weaver save /tmp/foo.txt".into()),
+        };
+        let s = serde_json::to_string(&err.envelope()).unwrap();
+        assert!(s.contains("\"category\":\"buffer-not-opened\""));
+        assert!(s.contains("\"code\":\"WEAVER-SAVE-001\""));
+        assert!(s.contains("/tmp/foo.txt"));
         assert_eq!(err.exit_code(), exit_code::GENERAL);
     }
 

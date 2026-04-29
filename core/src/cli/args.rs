@@ -98,6 +98,19 @@ pub enum Command {
         #[arg(long)]
         from: PathBuf,
     },
+
+    /// Save an opened buffer's in-memory content to disk.
+    ///
+    /// Fire-and-forget: exits 0 on successful dispatch and does NOT
+    /// wait for the service to apply. See
+    /// `specs/005-buffer-save/contracts/cli-surfaces.md`.
+    Save {
+        /// Entity to save. Two accepted forms (auto-detected): a path
+        /// (canonicalised in-process; entity derived via
+        /// `buffer_entity_ref`) or a stringified `EntityRef` (a bare
+        /// unsigned integer parses as `u64` and passes through verbatim).
+        entity: String,
+    },
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
@@ -210,6 +223,34 @@ mod tests {
         assert!(
             msg.contains("--from"),
             "expected --from in error message, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn parses_save_subcommand_with_path_arg() {
+        let cli = Cli::try_parse_from(["weaver", "save", "/tmp/foo.txt"]).unwrap();
+        match cli.command {
+            Some(Command::Save { entity }) => assert_eq!(entity, "/tmp/foo.txt"),
+            other => panic!("expected Command::Save, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_save_subcommand_with_u64_entity_form() {
+        let cli = Cli::try_parse_from(["weaver", "save", "4611686018427387946"]).unwrap();
+        match cli.command {
+            Some(Command::Save { entity }) => assert_eq!(entity, "4611686018427387946"),
+            other => panic!("expected Command::Save, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rejects_save_subcommand_without_entity() {
+        let err = Cli::try_parse_from(["weaver", "save"]).expect_err("missing positional <ENTITY>");
+        let msg = err.to_string();
+        assert!(
+            msg.to_lowercase().contains("entity") || msg.contains("ENTITY"),
+            "expected ENTITY in error message, got: {msg}",
         );
     }
 
