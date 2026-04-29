@@ -126,3 +126,7 @@ path = "e2e/buffer_save_inode_refusal.rs"
 [[test]]
 name = "buffer_save_atomic_invariant"
 path = "e2e/buffer_save_atomic_invariant.rs"
+
+[[test]]
+name = "multi_producer_uuidv8"
+path = "e2e/multi_producer_uuidv8.rs"
