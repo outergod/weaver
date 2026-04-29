@@ -332,6 +332,11 @@ pub async fn run(
         _ => unreachable!("ActorIdentity::service returns a Service variant"),
     };
     let watcher_entity = watcher_instance_entity_ref(&instance_id);
+    // Slice-005 §28(a) re-derivation: hash the per-process Service
+    // `instance_id` to 58 bits via SipHash; this becomes the high
+    // payload bits of every UUIDv8 EventId this publisher mints. Per
+    // `specs/005-buffer-save/research.md` §5 + §12.
+    let event_prefix = weaver_core::types::ids::hash_to_58(&instance_id);
 
     info!(
         socket = %socket.display(),
@@ -387,22 +392,28 @@ pub async fn run(
     // T030 + T032: per-buffer open + bootstrap in CLI order, fail-fast
     // with partial-retract on any open error.
     let mut registry = BufferRegistry::default();
-    let bootstrap_anchors: Vec<(EntityRef, EventId)> =
-        match open_and_bootstrap_all(&mut writer, &identity, &paths, &mut tracked, &mut registry)
-            .await
-        {
-            Ok(anchors) => anchors,
-            Err(e) => {
-                // Retract any facts the partial-bootstrap published so
-                // subscribers see retract-before-disconnect. Core's
-                // release_connection would eventually cover it, but the
-                // explicit order is a cleaner operator-observation contract
-                // per T032.
-                shutdown_retract(&mut writer, &identity, &mut tracked).await;
-                reader_task.abort();
-                return Err(e);
-            }
-        };
+    let bootstrap_anchors: Vec<(EntityRef, EventId)> = match open_and_bootstrap_all(
+        &mut writer,
+        &identity,
+        event_prefix,
+        &paths,
+        &mut tracked,
+        &mut registry,
+    )
+    .await
+    {
+        Ok(anchors) => anchors,
+        Err(e) => {
+            // Retract any facts the partial-bootstrap published so
+            // subscribers see retract-before-disconnect. Core's
+            // release_connection would eventually cover it, but the
+            // explicit order is a cleaner operator-observation contract
+            // per T032.
+            shutdown_retract(&mut writer, &identity, &mut tracked).await;
+            reader_task.abort();
+            return Err(e);
+        }
+    };
 
     // Bootstrap-write sides returned Ok (wire writes succeeded), but
     // authority-conflict rejections come back asynchronously on
@@ -520,11 +531,9 @@ pub async fn run(
         // every transition this tick emits — per data-model.md,
         // retract/assert of `buffer/observable` and re-assert of
         // `buffer/dirty` correlate to the same poll tick. Slice 005
-        // T-A1 (this commit) wraps the legacy `now_ns()` mint via
-        // `Uuid::from_u128` as a transitional placeholder; T010
-        // replaces with `EventId::mint_v8(hash_to_58(&instance_id),
-        // now_ns())` to install the UUIDv8 producer-prefix scheme.
-        let poll_tick_id = EventId::new(uuid::Uuid::from_u128(now_ns() as u128));
+        // §28(a) re-derivation: UUIDv8 with the Service-instance-id
+        // prefix in the high 58 bits and `now_ns()` in the low 64.
+        let poll_tick_id = EventId::mint_v8(event_prefix, now_ns());
 
         for state in registry.buffers.values_mut() {
             if let Err(e) =
@@ -890,6 +899,7 @@ async fn poll_tick_per_buffer(
 async fn open_and_bootstrap_all(
     writer: &mut BusWriter,
     identity: &ActorIdentity,
+    event_prefix: u64,
     paths: &[PathBuf],
     tracked: &mut HashSet<FactKey>,
     registry: &mut BufferRegistry,
@@ -942,9 +952,8 @@ async fn open_and_bootstrap_all(
         // (events are lossy-class, no retract), so the caller owns
         // the "event emission only once ownership is confirmed"
         // ordering.
-        let bootstrap_tick = EventId::new(uuid::Uuid::from_u128(
-            bootstrap_base.wrapping_add(idx as u64) as u128,
-        ));
+        let bootstrap_tick =
+            EventId::mint_v8(event_prefix, bootstrap_base.wrapping_add(idx as u64));
         let entity = state.entity();
         publish_buffer_bootstrap(writer, identity, &state, tracked, bootstrap_tick).await?;
         registry.insert(state);
