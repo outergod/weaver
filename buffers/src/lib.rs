@@ -18,6 +18,7 @@
 //!   exit-code mapping.
 //! - `version`   — contracted `--version` rendering (human + JSON).
 
+pub(crate) mod atomic_write;
 pub mod cli;
 pub mod model;
 pub mod observer;

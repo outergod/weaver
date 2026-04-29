@@ -14,6 +14,7 @@
 
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
+use std::io;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 
@@ -23,6 +24,8 @@ use uuid::Uuid;
 use weaver_core::types::edit::{Position, TextEdit};
 use weaver_core::types::entity_ref::EntityRef;
 use weaver_core::types::fact::FactValue;
+
+use crate::atomic_write::{WriteStep, atomic_write_with_hooks};
 
 // Slice-004 lifted `buffer_entity_ref` (and the buffer-namespace bit)
 // to `weaver_core` so the `weaver edit` CLI can derive the same
@@ -200,6 +203,100 @@ impl BufferState {
     pub(crate) fn set_last_observable(&mut self, v: bool) {
         self.last_observable = v;
     }
+
+    /// Save the in-memory `content` to `path` atomically, refusing if
+    /// `path/inode` no longer matches what was captured at open time.
+    ///
+    /// Pipeline (per `data-model.md §Validation rules R4 + R5`):
+    ///
+    /// 1. Stat `path`. Any error or non-regular-file → [`SaveOutcome::PathMissing`].
+    ///    Inode delta from the open-time capture → [`SaveOutcome::InodeMismatch`].
+    /// 2. Atomic POSIX write via [`atomic_write_with_hooks`] (tempfile
+    ///    in same dir → write → fsync → rename → fsync(parent)).
+    ///    Open / write / fsync-tempfile failures → [`SaveOutcome::TempfileIo`].
+    ///    Rename / fsync-parent failures → [`SaveOutcome::RenameIo`].
+    /// 3. Success → [`SaveOutcome::Saved`].
+    ///
+    /// Note: this method does NOT consult `self.last_dirty`. The
+    /// clean-save no-op flow (R3) lives in `dispatch_buffer_save`
+    /// BEFORE this method runs. `self.content` is read-only across
+    /// any outcome; the on-disk file is byte-identical to its
+    /// pre-call state on every pre-rename failure (atomic-rename
+    /// invariant SC-504).
+    pub fn save_to_disk(&self, path: &Path) -> SaveOutcome {
+        self.save_to_disk_with_hooks(path, |_| Ok(()))
+    }
+
+    /// Test seam — same as [`Self::save_to_disk`] but accepts an
+    /// injection hook passed through to [`atomic_write_with_hooks`].
+    /// Used by `tests/e2e/buffer_save_atomic_invariant.rs` (SC-504)
+    /// to verify the atomic-rename invariant under simulated I/O
+    /// failure at each [`WriteStep`].
+    pub(crate) fn save_to_disk_with_hooks<F>(&self, path: &Path, before: F) -> SaveOutcome
+    where
+        F: FnMut(WriteStep) -> Result<(), io::Error>,
+    {
+        // R4 — path/inode identity. Any stat error (not just
+        // NotFound) collapses to PathMissing per data-model: an
+        // unstatable target cannot be safely written through.
+        let metadata = match std::fs::metadata(path) {
+            Ok(m) => m,
+            Err(_) => return SaveOutcome::PathMissing,
+        };
+        if !metadata.file_type().is_file() {
+            return SaveOutcome::PathMissing;
+        }
+        let actual_inode = metadata.ino();
+        if actual_inode != self.inode {
+            return SaveOutcome::InodeMismatch {
+                expected: self.inode,
+                actual: actual_inode,
+            };
+        }
+
+        // R5 — atomic disk write. Map (WriteStep, io::Error) onto the
+        // tempfile-vs-rename diagnostic split (research §9): the
+        // open/write/fsync-tempfile bucket is operator-actionable
+        // (disk full, permissions); the rename/fsync-parent bucket is
+        // configuration-actionable (cross-filesystem, read-only mount).
+        match atomic_write_with_hooks(path, &self.content, before) {
+            Ok(()) => SaveOutcome::Saved {
+                path: path.to_path_buf(),
+            },
+            Err((WriteStep::OpenTempfile, error))
+            | Err((WriteStep::WriteContents, error))
+            | Err((WriteStep::FsyncTempfile, error)) => SaveOutcome::TempfileIo { error },
+            Err((WriteStep::RenameToTarget, error)) | Err((WriteStep::FsyncParentDir, error)) => {
+                SaveOutcome::RenameIo { error }
+            }
+        }
+    }
+}
+
+/// Outcome of [`BufferState::save_to_disk`].
+///
+/// A subset of [`crate::publisher::BufferSaveOutcome`] covering only
+/// the disk-side outcomes (R4 + R5 of the validation pipeline). The
+/// dispatcher converts `SaveOutcome` to the richer publisher-level
+/// outcome by adding `entity` + `version` context.
+#[derive(Debug)]
+pub enum SaveOutcome {
+    /// R5 success: target now byte-identical to `self.content`,
+    /// parent directory `fsync`ed.
+    Saved { path: PathBuf },
+    /// R4 refusal: `path` exists and is a regular file but its inode
+    /// no longer matches the buffer's captured open-time inode.
+    /// `WEAVER-SAVE-005`.
+    InodeMismatch { expected: u64, actual: u64 },
+    /// R4 refusal: `path` does not exist on disk, is not a regular
+    /// file, or stat failed for any other reason. `WEAVER-SAVE-006`.
+    PathMissing,
+    /// R5 failure in the tempfile open / write / fsync-tempfile
+    /// steps. `WEAVER-SAVE-003`.
+    TempfileIo { error: io::Error },
+    /// R5 failure in the rename / fsync-parent steps.
+    /// `WEAVER-SAVE-004`.
+    RenameIo { error: io::Error },
 }
 
 /// Pure output of one observation tick — what the publisher needs to
@@ -1169,5 +1266,181 @@ mod tests {
         // Used in OutOfBounds.detail and human-readable diagnostics.
         assert_eq!(format!("{}", BoundarySide::Start), "start");
         assert_eq!(format!("{}", BoundarySide::End), "end");
+    }
+
+    // ───────────────────────────────────────────────────────────────────
+    // Slice-005: BufferState::save_to_disk + SaveOutcome taxonomy (T016).
+    // ───────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn save_to_disk_saved_happy_path() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let target = dir.path().join("file.txt");
+        std::fs::write(&target, b"original").expect("seed");
+        let canonical = std::fs::canonicalize(&target).expect("canonicalize");
+
+        let mut state = BufferState::open(canonical.clone()).expect("open");
+        state
+            .apply_edits(&[edit(pos(0, 0), pos(0, 8), "REWRITTEN")])
+            .expect("rewrite");
+
+        match state.save_to_disk(&canonical) {
+            SaveOutcome::Saved { path } => assert_eq!(path, canonical),
+            other => panic!("expected Saved, got {other:?}"),
+        }
+        assert_eq!(std::fs::read(&canonical).expect("read"), b"REWRITTEN");
+    }
+
+    #[test]
+    fn save_to_disk_inode_mismatch_after_external_replace() {
+        // External atomic-replace (the SC-502 acceptance scenario):
+        // a different file is renamed over the path, so the path
+        // exists but the inode has changed.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let target = dir.path().join("file.txt");
+        std::fs::write(&target, b"original").expect("seed");
+        let canonical = std::fs::canonicalize(&target).expect("canonicalize");
+
+        let state = BufferState::open(canonical.clone()).expect("open");
+        let captured_inode = state.inode();
+
+        let replacement = dir.path().join("replacement.txt");
+        std::fs::write(&replacement, b"different").expect("write replacement");
+        std::fs::rename(&replacement, &canonical).expect("atomic-replace");
+        let new_inode = std::fs::metadata(&canonical).expect("stat").ino();
+        assert_ne!(
+            captured_inode, new_inode,
+            "test precondition: inode changed"
+        );
+
+        match state.save_to_disk(&canonical) {
+            SaveOutcome::InodeMismatch { expected, actual } => {
+                assert_eq!(expected, captured_inode);
+                assert_eq!(actual, new_inode);
+            }
+            other => panic!("expected InodeMismatch, got {other:?}"),
+        }
+        assert_eq!(
+            std::fs::read(&canonical).expect("read"),
+            b"different",
+            "external replacement is preserved; save was refused"
+        );
+    }
+
+    #[test]
+    fn save_to_disk_path_missing_after_external_delete() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let target = dir.path().join("file.txt");
+        std::fs::write(&target, b"original").expect("seed");
+        let canonical = std::fs::canonicalize(&target).expect("canonicalize");
+
+        let state = BufferState::open(canonical.clone()).expect("open");
+        std::fs::remove_file(&canonical).expect("delete");
+
+        assert!(matches!(
+            state.save_to_disk(&canonical),
+            SaveOutcome::PathMissing
+        ));
+    }
+
+    #[test]
+    fn save_to_disk_path_missing_when_target_is_directory() {
+        // Non-regular file at the path is treated as missing for
+        // save purposes (data-model R4 second bullet).
+        let dir = tempfile::tempdir().expect("tempdir");
+        let target = dir.path().join("file.txt");
+        std::fs::write(&target, b"original").expect("seed");
+        let canonical = std::fs::canonicalize(&target).expect("canonicalize");
+        let state = BufferState::open(canonical.clone()).expect("open");
+
+        // Replace the regular file with a directory at the same path.
+        std::fs::remove_file(&canonical).expect("rm file");
+        std::fs::create_dir(&canonical).expect("mkdir");
+
+        assert!(matches!(
+            state.save_to_disk(&canonical),
+            SaveOutcome::PathMissing
+        ));
+    }
+
+    #[test]
+    fn save_to_disk_tempfile_io_via_hook_injection_preserves_target() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let target = dir.path().join("file.txt");
+        std::fs::write(&target, b"original").expect("seed");
+        let canonical = std::fs::canonicalize(&target).expect("canonicalize");
+
+        let mut state = BufferState::open(canonical.clone()).expect("open");
+        state
+            .apply_edits(&[edit(pos(0, 0), pos(0, 8), "MUTATED")])
+            .expect("mutate in-memory");
+
+        let outcome = state.save_to_disk_with_hooks(&canonical, |s| {
+            if s == WriteStep::WriteContents {
+                Err(io::Error::other("simulated ENOSPC"))
+            } else {
+                Ok(())
+            }
+        });
+        match outcome {
+            SaveOutcome::TempfileIo { .. } => {}
+            other => panic!("expected TempfileIo, got {other:?}"),
+        }
+        assert_eq!(
+            std::fs::read(&canonical).expect("read"),
+            b"original",
+            "atomic-rename invariant: pre-rename failure leaves disk byte-identical"
+        );
+    }
+
+    #[test]
+    fn save_to_disk_rename_io_via_hook_injection_preserves_target() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let target = dir.path().join("file.txt");
+        std::fs::write(&target, b"original").expect("seed");
+        let canonical = std::fs::canonicalize(&target).expect("canonicalize");
+
+        let mut state = BufferState::open(canonical.clone()).expect("open");
+        state
+            .apply_edits(&[edit(pos(0, 0), pos(0, 8), "MUTATED")])
+            .expect("mutate in-memory");
+
+        let outcome = state.save_to_disk_with_hooks(&canonical, |s| {
+            if s == WriteStep::RenameToTarget {
+                Err(io::Error::other("simulated EXDEV"))
+            } else {
+                Ok(())
+            }
+        });
+        match outcome {
+            SaveOutcome::RenameIo { .. } => {}
+            other => panic!("expected RenameIo, got {other:?}"),
+        }
+        assert_eq!(
+            std::fs::read(&canonical).expect("read"),
+            b"original",
+            "atomic-rename invariant: pre-rename failure leaves disk byte-identical"
+        );
+    }
+
+    #[test]
+    fn save_to_disk_buffer_state_content_unchanged_after_failure() {
+        // Purity invariant: BufferState::content is read-only across
+        // every SaveOutcome failure branch.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let target = dir.path().join("file.txt");
+        std::fs::write(&target, b"original").expect("seed");
+        let canonical = std::fs::canonicalize(&target).expect("canonicalize");
+
+        let mut state = BufferState::open(canonical.clone()).expect("open");
+        state
+            .apply_edits(&[edit(pos(0, 0), pos(0, 8), "MUTATED")])
+            .expect("mutate");
+        let content_before = state.content().to_vec();
+
+        std::fs::remove_file(&canonical).expect("delete");
+        let _ = state.save_to_disk(&canonical);
+
+        assert_eq!(state.content(), content_before.as_slice());
     }
 }
