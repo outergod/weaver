@@ -70,6 +70,17 @@ struct AppState {
     pending_inspection: Option<(u64, FactKey)>,
     /// Last completed inspection, for rendering beneath the facts.
     last_inspection: Option<InspectionView>,
+    /// Slice-005 §28(a) re-derivation: passive cache mapping each
+    /// observed UUIDv8 producer-prefix (high 58 bits of the custom
+    /// payload, recovered via [`EventId::extract_prefix`]) to a
+    /// human-readable producer name. Populated lazily from
+    /// `FactAssert.provenance.source` on every Service-authored fact;
+    /// the TUI doesn't subscribe to events in slice 005, so prefixes
+    /// of User-emitted causal-parent events fall through to raw-UUID
+    /// rendering until/unless their producer also asserts a fact (per
+    /// the handoff: "Bootstrap miss is acceptable"). Per slice-005
+    /// task T-A3 + `specs/005-buffer-save/research.md` §5.
+    prefix_cache: HashMap<u64, String>,
 }
 
 impl AppState {
@@ -80,6 +91,7 @@ impl AppState {
             stale: false,
             pending_inspection: None,
             last_inspection: None,
+            prefix_cache: HashMap::new(),
         }
     }
 
@@ -90,6 +102,23 @@ impl AppState {
     fn apply(&mut self, msg: BusMessage) {
         match msg {
             BusMessage::FactAssert(fact) => {
+                // Slice-005 T-A3: populate the prefix cache from the
+                // asserter's identity. Service producers mint UUIDv8s
+                // with `hash_to_58(&instance_id)` as the prefix, so
+                // every Service-authored fact teaches us the binding
+                // for that producer's events. Non-Service asserters
+                // (Behavior, Core, Tui) don't mint events directly so
+                // we don't populate them here.
+                if let ActorIdentity::Service {
+                    service_id,
+                    instance_id,
+                } = &fact.provenance.source
+                {
+                    let prefix = weaver_core::types::ids::hash_to_58(instance_id);
+                    self.prefix_cache
+                        .entry(prefix)
+                        .or_insert_with(|| service_id.clone());
+                }
                 self.facts.insert(
                     fact.key.clone(),
                     FactDisplay {
@@ -393,7 +422,12 @@ fn draw<W: Write>(w: &mut W, state: &AppState) -> std::io::Result<()> {
                 &mut row,
                 format!(
                     "│     {}",
-                    annotation(&fd.fact, fd.asserted_at_wall_ns, state.stale)
+                    annotation(
+                        &fd.fact,
+                        fd.asserted_at_wall_ns,
+                        state.stale,
+                        &state.prefix_cache
+                    )
                 ),
             )?;
         }
@@ -427,7 +461,10 @@ fn draw<W: Write>(w: &mut W, state: &AppState) -> std::io::Result<()> {
                 emit(
                     w,
                     &mut row,
-                    format!("│     {}", annotation(fact, asserted_at, state.stale)),
+                    format!(
+                        "│     {}",
+                        annotation(fact, asserted_at, state.stale, &state.prefix_cache)
+                    ),
                 )?;
             }
         }
@@ -465,7 +502,10 @@ fn draw<W: Write>(w: &mut W, state: &AppState) -> std::io::Result<()> {
                 emit(
                     w,
                     &mut row,
-                    format!("│     {}", annotation(fact, asserted_at, state.stale)),
+                    format!(
+                        "│     {}",
+                        annotation(fact, asserted_at, state.stale, &state.prefix_cache)
+                    ),
                 )?;
             }
         }
@@ -849,7 +889,12 @@ fn format_value(v: &FactValue) -> String {
     }
 }
 
-fn annotation(fact: &Fact, asserted_at_wall_ns: u64, stale: bool) -> String {
+fn annotation(
+    fact: &Fact,
+    asserted_at_wall_ns: u64,
+    stale: bool,
+    prefix_cache: &HashMap<u64, String>,
+) -> String {
     let behavior = match &fact.provenance.source {
         ActorIdentity::Behavior { id } => id.as_str().to_string(),
         ActorIdentity::Core => "core".into(),
@@ -869,11 +914,35 @@ fn annotation(fact: &Fact, asserted_at_wall_ns: u64, stale: bool) -> String {
         ActorIdentity::Agent { agent_id, .. } => format!("agent {agent_id}"),
     };
     let event = match fact.provenance.causal_parent {
-        Some(EventId { .. }) => format!("event {}", fact.provenance.causal_parent.unwrap()),
+        Some(id) => format_event_id(id, prefix_cache),
         None => "no causal parent".into(),
     };
     let age = age_label(asserted_at_wall_ns, stale);
     format!("by {behavior}, {event}, {age}")
+}
+
+/// Render a [`EventId`] for the TUI annotation line. Slice-005 T-A3:
+/// look up the UUIDv8 producer-prefix in the passive cache; if known,
+/// render `event EventId(<friendly_name>/<short-suffix>)` where the
+/// short-suffix is the last 8 hex characters of the simple form. If
+/// the prefix is 0 (non-UUIDv8) or has no cache binding yet, fall back
+/// to `Display`'s full-UUID form (`event EventId(<full-hex>)`) so the
+/// raw id remains grep-able.
+fn format_event_id(id: EventId, prefix_cache: &HashMap<u64, String>) -> String {
+    let prefix = id.extract_prefix();
+    if prefix == 0 {
+        return format!("event {id}");
+    }
+    match prefix_cache.get(&prefix) {
+        Some(name) => {
+            let simple = id.as_uuid().simple().to_string();
+            let short = simple
+                .get(simple.len().saturating_sub(8)..)
+                .unwrap_or(&simple);
+            format!("event EventId({name}/{short})")
+        }
+        None => format!("event {id}"),
+    }
 }
 
 fn age_label(asserted_at_wall_ns: u64, stale: bool) -> String {
