@@ -22,7 +22,12 @@ use crate::model::{BufferState, SaveOutcome};
 /// syscall; returning `Err` short-circuits the pipeline with
 /// best-effort tempfile cleanup. See `data-model.md §SaveOutcome` for
 /// the failure-step → outcome mapping.
-pub fn save_to_disk_with_hooks<F>(state: &BufferState, path: &Path, before: F) -> SaveOutcome
+///
+/// Takes `&mut BufferState` because a successful save refreshes
+/// `self.inode` to the post-rename value (Codex P1 follow-up on
+/// PR #12 — without this, edit → save → edit → save would reject
+/// the second save with InodeMismatch).
+pub fn save_to_disk_with_hooks<F>(state: &mut BufferState, path: &Path, before: F) -> SaveOutcome
 where
     F: FnMut(WriteStep) -> Result<(), io::Error>,
 {

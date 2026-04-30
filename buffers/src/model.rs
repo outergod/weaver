@@ -233,7 +233,7 @@ impl BufferState {
     /// any outcome; the on-disk file is byte-identical to its
     /// pre-call state on every pre-rename failure (atomic-rename
     /// invariant SC-504).
-    pub fn save_to_disk(&self, path: &Path) -> SaveOutcome {
+    pub fn save_to_disk(&mut self, path: &Path) -> SaveOutcome {
         self.save_to_disk_with_hooks(path, |_| Ok(()))
     }
 
@@ -242,7 +242,14 @@ impl BufferState {
     /// Used by `tests/e2e/buffer_save_atomic_invariant.rs` (SC-504)
     /// to verify the atomic-rename invariant under simulated I/O
     /// failure at each [`WriteStep`].
-    pub(crate) fn save_to_disk_with_hooks<F>(&self, path: &Path, mut before: F) -> SaveOutcome
+    ///
+    /// Takes `&mut self` because a successful save replaces the
+    /// target's inode (rename(2) installs the tempfile's inode at
+    /// the target path); `self.inode` must be refreshed to the new
+    /// inode so the next save's R4 pre-check sees the buffer's
+    /// current ownership rather than rejecting with `InodeMismatch`.
+    /// Codex P1 follow-up review on PR #12.
+    pub(crate) fn save_to_disk_with_hooks<F>(&mut self, path: &Path, mut before: F) -> SaveOutcome
     where
         F: FnMut(WriteStep) -> Result<(), io::Error>,
     {
@@ -333,9 +340,26 @@ impl BufferState {
         };
 
         match atomic_write_with_hooks(path, &self.content, combined) {
-            Ok(()) => SaveOutcome::Saved {
-                path: path.to_path_buf(),
-            },
+            Ok(()) => {
+                // rename(2) installed the tempfile's inode at the
+                // target path; the previously-captured open-time
+                // inode is now stale. Refresh self.inode so the
+                // next save's R4 pre-check passes (without this,
+                // `edit → save → edit → save` would reject the
+                // second save with InodeMismatch even with no
+                // external mutation). Codex P1 follow-up on PR #12.
+                if let Ok(m) = std::fs::metadata(path) {
+                    self.inode = m.ino();
+                }
+                // If the post-rename stat fails, self.inode stays
+                // stale; the subsequent dispatcher path would emit
+                // WEAVER-SAVE-006 (PathMissing) on the next save,
+                // operator-actionable. The Saved outcome itself is
+                // unaffected — the rename has already succeeded.
+                SaveOutcome::Saved {
+                    path: path.to_path_buf(),
+                }
+            }
             // Race detected at rename-time pre-check: surface as the
             // same outcome the R4 pre-check would have returned, so
             // operator-visible diagnostics (WEAVER-SAVE-005 / -006)
@@ -1378,6 +1402,65 @@ mod tests {
     }
 
     #[test]
+    fn save_to_disk_refreshes_inode_after_successful_rename() {
+        // Codex P1 follow-up (PR #12): rename(2) installs the
+        // tempfile's inode at the target path, so the open-time
+        // captured inode is stale post-Saved. Without refreshing
+        // self.inode, `edit → save → edit → save` would fail the
+        // second save's R4 check with InodeMismatch even though no
+        // external mutation occurred.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let target = dir.path().join("file.txt");
+        std::fs::write(&target, b"v0").expect("seed");
+        let canonical = std::fs::canonicalize(&target).expect("canonicalize");
+
+        let mut state = BufferState::open(canonical.clone()).expect("open");
+        let inode_v0 = state.inode();
+        let disk_inode_v0 = std::fs::metadata(&canonical).expect("stat").ino();
+        assert_eq!(inode_v0, disk_inode_v0, "open-time invariant");
+
+        // First edit → save cycle.
+        state
+            .apply_edits(&[edit(pos(0, 0), pos(0, 2), "FIRST")])
+            .expect("first edit");
+        assert!(matches!(
+            state.save_to_disk(&canonical),
+            SaveOutcome::Saved { .. }
+        ));
+
+        // Post-save invariants:
+        // - disk's inode is now the tempfile's (new) inode.
+        // - state.inode() must reflect the new on-disk inode (the fix).
+        let inode_after_save = std::fs::metadata(&canonical).expect("stat").ino();
+        assert_ne!(
+            inode_after_save, inode_v0,
+            "rename(2) must have installed a new inode at the path",
+        );
+        assert_eq!(
+            state.inode(),
+            inode_after_save,
+            "self.inode must be refreshed to the post-rename inode \
+             (otherwise next save's R4 check would reject as InodeMismatch)",
+        );
+
+        // Second edit → save cycle. Without the inode refresh this
+        // would return SaveOutcome::InodeMismatch instead of Saved.
+        state
+            .apply_edits(&[edit(pos(0, 0), pos(0, 5), "SECOND")])
+            .expect("second edit");
+        match state.save_to_disk(&canonical) {
+            SaveOutcome::Saved { path } => assert_eq!(path, canonical),
+            other => panic!(
+                "edit → save → edit → save round-trip must succeed; second save got {other:?}",
+            ),
+        }
+        assert_eq!(
+            std::fs::read(&canonical).expect("read post-second-save"),
+            b"SECOND"
+        );
+    }
+
+    #[test]
     fn save_to_disk_inode_mismatch_after_external_replace() {
         // External atomic-replace (the SC-502 acceptance scenario):
         // a different file is renamed over the path, so the path
@@ -1387,7 +1470,7 @@ mod tests {
         std::fs::write(&target, b"original").expect("seed");
         let canonical = std::fs::canonicalize(&target).expect("canonicalize");
 
-        let state = BufferState::open(canonical.clone()).expect("open");
+        let mut state = BufferState::open(canonical.clone()).expect("open");
         let captured_inode = state.inode();
 
         let replacement = dir.path().join("replacement.txt");
@@ -1420,7 +1503,7 @@ mod tests {
         std::fs::write(&target, b"original").expect("seed");
         let canonical = std::fs::canonicalize(&target).expect("canonicalize");
 
-        let state = BufferState::open(canonical.clone()).expect("open");
+        let mut state = BufferState::open(canonical.clone()).expect("open");
         std::fs::remove_file(&canonical).expect("delete");
 
         assert!(matches!(
@@ -1437,7 +1520,7 @@ mod tests {
         let target = dir.path().join("file.txt");
         std::fs::write(&target, b"original").expect("seed");
         let canonical = std::fs::canonicalize(&target).expect("canonicalize");
-        let state = BufferState::open(canonical.clone()).expect("open");
+        let mut state = BufferState::open(canonical.clone()).expect("open");
 
         // Replace the regular file with a directory at the same path.
         std::fs::remove_file(&canonical).expect("rm file");

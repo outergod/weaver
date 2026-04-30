@@ -374,7 +374,7 @@ where
     }
     let state = registry
         .buffers
-        .get(&entity)
+        .get_mut(&entity)
         .expect("is_owned implies buffers contains key");
     let path = state.path().to_path_buf();
     if !state.last_dirty() {

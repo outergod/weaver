@@ -85,7 +85,7 @@ fn rename_step_failure_preserves_original_and_cleans_tempfile() {
     test_support::set_buffer_content(&mut state, b"NEW content 2".to_vec());
 
     let inject_at = WriteStep::RenameToTarget;
-    let outcome = test_support::save_to_disk_with_hooks(&state, &canonical, |step| {
+    let outcome = test_support::save_to_disk_with_hooks(&mut state, &canonical, |step| {
         if step == inject_at {
             Err(io::Error::other("ENOSPC (injected)"))
         } else {
@@ -137,7 +137,7 @@ fn failure_at_every_writestep_outcome_and_atomicity() {
         let new_bytes = format!("would-write-this-on-{label}").into_bytes();
         test_support::set_buffer_content(&mut state, new_bytes.clone());
 
-        let outcome = test_support::save_to_disk_with_hooks(&state, &canonical, |s| {
+        let outcome = test_support::save_to_disk_with_hooks(&mut state, &canonical, |s| {
             if s == step {
                 Err(io::Error::other("ENOSPC (injected)"))
             } else {
