@@ -298,6 +298,21 @@ impl BufferState {
             if step == WriteStep::RenameToTarget {
                 match std::fs::metadata(path) {
                     Ok(m) if m.is_file() && m.ino() == expected_inode => Ok(()),
+                    Ok(m) if !m.is_file() => {
+                        // Race swapped the path to a directory or
+                        // special file. R4 pre-check semantics
+                        // collapse non-regular-file to PathMissing
+                        // (data-model §R4 second bullet); the rename-
+                        // time recheck must do the same so operators
+                        // see WEAVER-SAVE-006 ("path missing") rather
+                        // than WEAVER-SAVE-005 ("inode mismatch") for
+                        // a path that is no longer a writeable file.
+                        // Codex P2 follow-up review on PR #12.
+                        race_path_missing.set(true);
+                        Err(io::Error::other(
+                            "path swapped to non-regular-file during save",
+                        ))
+                    }
                     Ok(m) => {
                         let actual = m.ino();
                         race_actual.set(Some(actual));
@@ -1550,6 +1565,51 @@ mod tests {
             std::fs::read(&canonical).expect("read post-save"),
             b"externally-written",
             "no-clobber invariant: externally-written content survives the race",
+        );
+    }
+
+    #[test]
+    fn save_to_disk_path_swapped_to_directory_during_save_classified_as_path_missing() {
+        // Codex P2 follow-up (PR #12): if the path is swapped to a
+        // non-regular file (directory, special file) between R4 and
+        // rename, the rename-time recheck must classify as
+        // PathMissing — same as the R4 pre-check semantics — rather
+        // than as InodeMismatch. Operators see WEAVER-SAVE-006
+        // (correct remediation: re-create the regular file) rather
+        // than WEAVER-SAVE-005 (which would imply a regular-file
+        // inode race).
+        let dir = tempfile::tempdir().expect("tempdir");
+        let target = dir.path().join("file.txt");
+        std::fs::write(&target, b"original").expect("seed");
+        let canonical = std::fs::canonicalize(&target).expect("canonicalize");
+
+        let mut state = BufferState::open(canonical.clone()).expect("open");
+        state
+            .apply_edits(&[edit(pos(0, 0), pos(0, 8), "BUFFER")])
+            .expect("mutate");
+
+        let canonical_for_hook = canonical.clone();
+        let raced = std::cell::Cell::new(false);
+        let outcome = state.save_to_disk_with_hooks(&canonical, |s| {
+            if s == WriteStep::WriteContents && !raced.get() {
+                // Replace the regular file with a directory at the
+                // same path: rm + mkdir.
+                std::fs::remove_file(&canonical_for_hook).expect("rm regular file");
+                std::fs::create_dir(&canonical_for_hook).expect("mkdir at swapped path");
+                raced.set(true);
+            }
+            Ok(())
+        });
+
+        assert!(
+            matches!(outcome, SaveOutcome::PathMissing),
+            "non-regular-file race must surface as PathMissing (matches R4 pre-check); got {outcome:?}",
+        );
+        // The directory we created must remain — the refused save
+        // does not touch the path.
+        assert!(
+            canonical.is_dir(),
+            "swapped-in directory must survive (refused save does not touch path)",
         );
     }
 
