@@ -29,7 +29,7 @@ async fn asserted_fact_is_inspectable_with_full_provenance() {
         FactValue::Bool(true),
     )));
 
-    let event_id = EventId::new(42);
+    let event_id = EventId::for_testing(42);
     dispatcher
         .process_event(Event {
             id: event_id,

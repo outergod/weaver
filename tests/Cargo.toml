@@ -110,3 +110,27 @@ path = "e2e/buffer_edit_sequential.rs"
 [[test]]
 name = "buffer_edit_stale_drop"
 path = "e2e/buffer_edit_stale_drop.rs"
+
+[[test]]
+name = "buffer_save_dirty"
+path = "e2e/buffer_save_dirty.rs"
+
+[[test]]
+name = "buffer_save_clean_noop"
+path = "e2e/buffer_save_clean_noop.rs"
+
+[[test]]
+name = "buffer_save_inode_refusal"
+path = "e2e/buffer_save_inode_refusal.rs"
+
+[[test]]
+name = "buffer_save_atomic_invariant"
+path = "e2e/buffer_save_atomic_invariant.rs"
+
+[[test]]
+name = "multi_producer_uuidv8"
+path = "e2e/multi_producer_uuidv8.rs"
+
+[[test]]
+name = "eventid_uuid_strict_parsing"
+path = "e2e/eventid_uuid_strict_parsing.rs"

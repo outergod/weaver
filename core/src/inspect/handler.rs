@@ -137,6 +137,6 @@ fn resolve_live_assert(
     Ok((
         entry.timestamp_ns,
         trace_sequence,
-        source_event_opt.unwrap_or(EventId::ZERO),
+        source_event_opt.unwrap_or(EventId::nil()),
     ))
 }

@@ -14,6 +14,8 @@
 
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
+use std::io;
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 
 use sha2::{Digest, Sha256};
@@ -22,6 +24,8 @@ use uuid::Uuid;
 use weaver_core::types::edit::{Position, TextEdit};
 use weaver_core::types::entity_ref::EntityRef;
 use weaver_core::types::fact::FactValue;
+
+use crate::atomic_write::{WriteStep, atomic_write_with_hooks};
 
 // Slice-004 lifted `buffer_entity_ref` (and the buffer-namespace bit)
 // to `weaver_core` so the `weaver edit` CLI can derive the same
@@ -58,6 +62,7 @@ pub fn watcher_instance_entity_ref(instance: &Uuid) -> EntityRef {
 pub struct BufferState {
     path: PathBuf,
     entity: EntityRef,
+    inode: u64,
     content: Vec<u8>,
     memory_digest: [u8; 32],
     last_dirty: bool,
@@ -69,6 +74,7 @@ impl std::fmt::Debug for BufferState {
         f.debug_struct("BufferState")
             .field("path", &self.path)
             .field("entity", &self.entity)
+            .field("inode", &self.inode)
             .field("byte_size", &self.byte_size())
             .field("memory_digest", &hex_digest(&self.memory_digest))
             .field("last_dirty", &self.last_dirty)
@@ -116,6 +122,11 @@ impl BufferState {
                 kind: StartupKind::NotRegularFile,
             });
         }
+        // Capture inode at open time. Used by the slice-005 save path
+        // to refuse the write when the path/inode pair has changed
+        // externally between open and save (atomic-replace, rename,
+        // delete-then-create with a new inode); see WEAVER-SAVE-005.
+        let inode = metadata.ino();
         let content = match std::fs::read(&path) {
             Ok(c) => c,
             Err(e) if e.kind() == std::io::ErrorKind::OutOfMemory => {
@@ -138,6 +149,7 @@ impl BufferState {
         Ok(Self {
             path,
             entity,
+            inode,
             content,
             memory_digest,
             last_dirty: false,
@@ -151,6 +163,12 @@ impl BufferState {
 
     pub fn entity(&self) -> EntityRef {
         self.entity
+    }
+
+    /// Inode captured at [`Self::open`] time. Pre-rename inode equality
+    /// gates `WEAVER-SAVE-005` refusal in slice 005.
+    pub fn inode(&self) -> u64 {
+        self.inode
     }
 
     pub fn content(&self) -> &[u8] {
@@ -185,6 +203,210 @@ impl BufferState {
     pub(crate) fn set_last_observable(&mut self, v: bool) {
         self.last_observable = v;
     }
+
+    /// Test-only: overwrite the in-memory content. Reachable across
+    /// crates via [`crate::test_support::set_buffer_content`]. Used by
+    /// `tests/e2e/buffer_save_atomic_invariant.rs` (slice 005 T025)
+    /// to set up "edit applied" pre-save states without going through
+    /// `apply_edits` (which would require constructing TextEdits with
+    /// position arithmetic against the seed content).
+    pub(crate) fn set_content_for_test(&mut self, content: Vec<u8>) {
+        self.content = content;
+    }
+
+    /// Save the in-memory `content` to `path` atomically, refusing if
+    /// `path/inode` no longer matches what was captured at open time.
+    ///
+    /// Pipeline (per `data-model.md §Validation rules R4 + R5`):
+    ///
+    /// 1. Stat `path`. Any error or non-regular-file → [`SaveOutcome::PathMissing`].
+    ///    Inode delta from the open-time capture → [`SaveOutcome::InodeMismatch`].
+    /// 2. Atomic POSIX write via [`atomic_write_with_hooks`] (tempfile
+    ///    in same dir → write → fsync → rename → fsync(parent)).
+    ///    Open / write / fsync-tempfile failures → [`SaveOutcome::TempfileIo`].
+    ///    Rename / fsync-parent failures → [`SaveOutcome::RenameIo`].
+    /// 3. Success → [`SaveOutcome::Saved`].
+    ///
+    /// Note: this method does NOT consult `self.last_dirty`. The
+    /// clean-save no-op flow (R3) lives in `dispatch_buffer_save`
+    /// BEFORE this method runs. `self.content` is read-only across
+    /// any outcome; the on-disk file is byte-identical to its
+    /// pre-call state on every pre-rename failure (atomic-rename
+    /// invariant SC-504).
+    pub fn save_to_disk(&mut self, path: &Path) -> SaveOutcome {
+        self.save_to_disk_with_hooks(path, |_| Ok(()))
+    }
+
+    /// Test seam — same as [`Self::save_to_disk`] but accepts an
+    /// injection hook passed through to [`atomic_write_with_hooks`].
+    /// Used by `tests/e2e/buffer_save_atomic_invariant.rs` (SC-504)
+    /// to verify the atomic-rename invariant under simulated I/O
+    /// failure at each [`WriteStep`].
+    ///
+    /// Takes `&mut self` because a successful save replaces the
+    /// target's inode (rename(2) installs the tempfile's inode at
+    /// the target path); `self.inode` must be refreshed to the new
+    /// inode so the next save's R4 pre-check sees the buffer's
+    /// current ownership rather than rejecting with `InodeMismatch`.
+    /// Codex P1 follow-up review on PR #12.
+    pub(crate) fn save_to_disk_with_hooks<F>(&mut self, path: &Path, mut before: F) -> SaveOutcome
+    where
+        F: FnMut(WriteStep) -> Result<(), io::Error>,
+    {
+        // R4 — path/inode identity. Any stat error (not just
+        // NotFound) collapses to PathMissing per data-model: an
+        // unstatable target cannot be safely written through.
+        let metadata = match std::fs::metadata(path) {
+            Ok(m) => m,
+            Err(_) => return SaveOutcome::PathMissing,
+        };
+        if !metadata.file_type().is_file() {
+            return SaveOutcome::PathMissing;
+        }
+        let actual_inode = metadata.ino();
+        if actual_inode != self.inode {
+            return SaveOutcome::InodeMismatch {
+                expected: self.inode,
+                actual: actual_inode,
+            };
+        }
+
+        // R5 — atomic disk write with a pre-rename inode re-check.
+        //
+        // The R4 stat above narrows the operator-visible TOCTOU
+        // window (between BufferOpen and dispatch); but a concurrent
+        // atomic-replace happening DURING save_to_disk (after the R4
+        // check, before `rename(2)`) would still let our rename
+        // clobber the externally-written file. Codex P2 review on
+        // PR #12.
+        //
+        // Mitigation: wrap the caller-supplied hook so that at
+        // `WriteStep::RenameToTarget` we re-stat the path and
+        // refuse if the inode has shifted (or the path has
+        // disappeared). The remaining race window is the ~1µs gap
+        // between `fstat()` and `rename(2)` — POSIX has no primitive
+        // that closes the window completely (`renameat2(NOREPLACE)`
+        // is wrong-direction + Linux-only; an `O_TMPFILE` + `linkat`
+        // strategy could but trades against operator-recoverability
+        // of a partially-written tempfile). Closing that residual
+        // window is FR-026 / slice-006 territory (concurrent-mutation
+        // guard).
+        //
+        // Tests pass through `before` first, so a test injecting
+        // `Err` at `RenameToTarget` short-circuits before the
+        // production check fires — the existing T025 fault-injection
+        // matrix is unaffected.
+        let expected_inode = self.inode;
+        let race_actual: std::cell::Cell<Option<u64>> = std::cell::Cell::new(None);
+        let race_path_missing = std::cell::Cell::new(false);
+
+        let combined = |step: WriteStep| -> Result<(), io::Error> {
+            before(step)?;
+            if step == WriteStep::RenameToTarget {
+                match std::fs::metadata(path) {
+                    Ok(m) if m.is_file() && m.ino() == expected_inode => Ok(()),
+                    Ok(m) if !m.is_file() => {
+                        // Race swapped the path to a directory or
+                        // special file. R4 pre-check semantics
+                        // collapse non-regular-file to PathMissing
+                        // (data-model §R4 second bullet); the rename-
+                        // time recheck must do the same so operators
+                        // see WEAVER-SAVE-006 ("path missing") rather
+                        // than WEAVER-SAVE-005 ("inode mismatch") for
+                        // a path that is no longer a writeable file.
+                        // Codex P2 follow-up review on PR #12.
+                        race_path_missing.set(true);
+                        Err(io::Error::other(
+                            "path swapped to non-regular-file during save",
+                        ))
+                    }
+                    Ok(m) => {
+                        let actual = m.ino();
+                        race_actual.set(Some(actual));
+                        Err(io::Error::other(format!(
+                            "inode changed during save: expected={expected_inode} actual={actual}"
+                        )))
+                    }
+                    Err(_) => {
+                        race_path_missing.set(true);
+                        Err(io::Error::other(
+                            "path disappeared during save (between R4 check and rename)",
+                        ))
+                    }
+                }
+            } else {
+                Ok(())
+            }
+        };
+
+        match atomic_write_with_hooks(path, &self.content, combined) {
+            Ok(()) => {
+                // rename(2) installed the tempfile's inode at the
+                // target path; the previously-captured open-time
+                // inode is now stale. Refresh self.inode so the
+                // next save's R4 pre-check passes (without this,
+                // `edit → save → edit → save` would reject the
+                // second save with InodeMismatch even with no
+                // external mutation). Codex P1 follow-up on PR #12.
+                if let Ok(m) = std::fs::metadata(path) {
+                    self.inode = m.ino();
+                }
+                // If the post-rename stat fails, self.inode stays
+                // stale; the subsequent dispatcher path would emit
+                // WEAVER-SAVE-006 (PathMissing) on the next save,
+                // operator-actionable. The Saved outcome itself is
+                // unaffected — the rename has already succeeded.
+                SaveOutcome::Saved {
+                    path: path.to_path_buf(),
+                }
+            }
+            // Race detected at rename-time pre-check: surface as the
+            // same outcome the R4 pre-check would have returned, so
+            // operator-visible diagnostics (WEAVER-SAVE-005 / -006)
+            // stay consistent regardless of when the race was caught.
+            Err((WriteStep::RenameToTarget, _)) if race_path_missing.get() => {
+                SaveOutcome::PathMissing
+            }
+            Err((WriteStep::RenameToTarget, _)) if race_actual.get().is_some() => {
+                SaveOutcome::InodeMismatch {
+                    expected: expected_inode,
+                    actual: race_actual.get().expect("checked is_some above"),
+                }
+            }
+            Err((WriteStep::OpenTempfile, error))
+            | Err((WriteStep::WriteContents, error))
+            | Err((WriteStep::FsyncTempfile, error)) => SaveOutcome::TempfileIo { error },
+            Err((WriteStep::RenameToTarget, error)) | Err((WriteStep::FsyncParentDir, error)) => {
+                SaveOutcome::RenameIo { error }
+            }
+        }
+    }
+}
+
+/// Outcome of [`BufferState::save_to_disk`].
+///
+/// A subset of [`crate::publisher::BufferSaveOutcome`] covering only
+/// the disk-side outcomes (R4 + R5 of the validation pipeline). The
+/// dispatcher converts `SaveOutcome` to the richer publisher-level
+/// outcome by adding `entity` + `version` context.
+#[derive(Debug)]
+pub enum SaveOutcome {
+    /// R5 success: target now byte-identical to `self.content`,
+    /// parent directory `fsync`ed.
+    Saved { path: PathBuf },
+    /// R4 refusal: `path` exists and is a regular file but its inode
+    /// no longer matches the buffer's captured open-time inode.
+    /// `WEAVER-SAVE-005`.
+    InodeMismatch { expected: u64, actual: u64 },
+    /// R4 refusal: `path` does not exist on disk, is not a regular
+    /// file, or stat failed for any other reason. `WEAVER-SAVE-006`.
+    PathMissing,
+    /// R5 failure in the tempfile open / write / fsync-tempfile
+    /// steps. `WEAVER-SAVE-003`.
+    TempfileIo { error: io::Error },
+    /// R5 failure in the rename / fsync-parent steps.
+    /// `WEAVER-SAVE-004`.
+    RenameIo { error: io::Error },
 }
 
 /// Pure output of one observation tick — what the publisher needs to
@@ -720,6 +942,47 @@ mod tests {
     }
 
     #[test]
+    fn buffer_state_open_captures_inode_matching_stat() {
+        // Slice 005: BufferState::open captures the inode at open time
+        // via std::os::unix::fs::MetadataExt::ino(). The captured value
+        // must equal an independent stat(2) of the same path.
+        let mut f = NamedTempFile::new().expect("tempfile");
+        f.write_all(b"x").expect("write");
+        let canonical = std::fs::canonicalize(f.path()).expect("canonicalize");
+
+        let stat_inode = std::fs::metadata(&canonical).expect("stat").ino();
+        let state = BufferState::open(canonical).expect("open");
+
+        assert_eq!(state.inode(), stat_inode);
+        assert_ne!(state.inode(), 0, "inode must be non-zero on a real file");
+    }
+
+    #[test]
+    fn buffer_state_open_through_symlink_captures_target_inode() {
+        // POSIX `metadata` follows symlinks (vs `symlink_metadata`
+        // which does not). Opening a symlink path must capture the
+        // *target's* inode — atomic-replace detection relies on this.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let target = dir.path().join("target.txt");
+        std::fs::write(&target, b"target content").expect("write target");
+        let target_canonical = std::fs::canonicalize(&target).expect("canonicalize target");
+
+        let link = dir.path().join("link.txt");
+        std::os::unix::fs::symlink(&target_canonical, &link).expect("symlink");
+
+        let target_inode = std::fs::metadata(&target_canonical)
+            .expect("stat target")
+            .ino();
+        // Open via the symlink's path. `BufferState::open` requires a
+        // canonical path; canonicalize resolves the symlink, so the
+        // captured inode is the target's regardless. Pin the property
+        // explicitly.
+        let opened_canonical = std::fs::canonicalize(&link).expect("canonicalize link");
+        let state = BufferState::open(opened_canonical).expect("open through link");
+        assert_eq!(state.inode(), target_inode);
+    }
+
+    #[test]
     fn buffer_state_open_missing_returns_startup_failure_not_openable() {
         let missing = path("/definitely/not/a/real/path/weaver-test-absent");
         let err = BufferState::open(missing.clone()).expect_err("missing path must fail");
@@ -1113,5 +1376,381 @@ mod tests {
         // Used in OutOfBounds.detail and human-readable diagnostics.
         assert_eq!(format!("{}", BoundarySide::Start), "start");
         assert_eq!(format!("{}", BoundarySide::End), "end");
+    }
+
+    // ───────────────────────────────────────────────────────────────────
+    // Slice-005: BufferState::save_to_disk + SaveOutcome taxonomy (T016).
+    // ───────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn save_to_disk_saved_happy_path() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let target = dir.path().join("file.txt");
+        std::fs::write(&target, b"original").expect("seed");
+        let canonical = std::fs::canonicalize(&target).expect("canonicalize");
+
+        let mut state = BufferState::open(canonical.clone()).expect("open");
+        state
+            .apply_edits(&[edit(pos(0, 0), pos(0, 8), "REWRITTEN")])
+            .expect("rewrite");
+
+        match state.save_to_disk(&canonical) {
+            SaveOutcome::Saved { path } => assert_eq!(path, canonical),
+            other => panic!("expected Saved, got {other:?}"),
+        }
+        assert_eq!(std::fs::read(&canonical).expect("read"), b"REWRITTEN");
+    }
+
+    #[test]
+    fn save_to_disk_refreshes_inode_after_successful_rename() {
+        // Codex P1 follow-up (PR #12): rename(2) installs the
+        // tempfile's inode at the target path, so the open-time
+        // captured inode is stale post-Saved. Without refreshing
+        // self.inode, `edit → save → edit → save` would fail the
+        // second save's R4 check with InodeMismatch even though no
+        // external mutation occurred.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let target = dir.path().join("file.txt");
+        std::fs::write(&target, b"v0").expect("seed");
+        let canonical = std::fs::canonicalize(&target).expect("canonicalize");
+
+        let mut state = BufferState::open(canonical.clone()).expect("open");
+        let inode_v0 = state.inode();
+        let disk_inode_v0 = std::fs::metadata(&canonical).expect("stat").ino();
+        assert_eq!(inode_v0, disk_inode_v0, "open-time invariant");
+
+        // First edit → save cycle.
+        state
+            .apply_edits(&[edit(pos(0, 0), pos(0, 2), "FIRST")])
+            .expect("first edit");
+        assert!(matches!(
+            state.save_to_disk(&canonical),
+            SaveOutcome::Saved { .. }
+        ));
+
+        // Post-save invariants:
+        // - disk's inode is now the tempfile's (new) inode.
+        // - state.inode() must reflect the new on-disk inode (the fix).
+        let inode_after_save = std::fs::metadata(&canonical).expect("stat").ino();
+        assert_ne!(
+            inode_after_save, inode_v0,
+            "rename(2) must have installed a new inode at the path",
+        );
+        assert_eq!(
+            state.inode(),
+            inode_after_save,
+            "self.inode must be refreshed to the post-rename inode \
+             (otherwise next save's R4 check would reject as InodeMismatch)",
+        );
+
+        // Second edit → save cycle. Without the inode refresh this
+        // would return SaveOutcome::InodeMismatch instead of Saved.
+        state
+            .apply_edits(&[edit(pos(0, 0), pos(0, 5), "SECOND")])
+            .expect("second edit");
+        match state.save_to_disk(&canonical) {
+            SaveOutcome::Saved { path } => assert_eq!(path, canonical),
+            other => panic!(
+                "edit → save → edit → save round-trip must succeed; second save got {other:?}",
+            ),
+        }
+        assert_eq!(
+            std::fs::read(&canonical).expect("read post-second-save"),
+            b"SECOND"
+        );
+    }
+
+    #[test]
+    fn save_to_disk_inode_mismatch_after_external_replace() {
+        // External atomic-replace (the SC-502 acceptance scenario):
+        // a different file is renamed over the path, so the path
+        // exists but the inode has changed.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let target = dir.path().join("file.txt");
+        std::fs::write(&target, b"original").expect("seed");
+        let canonical = std::fs::canonicalize(&target).expect("canonicalize");
+
+        let mut state = BufferState::open(canonical.clone()).expect("open");
+        let captured_inode = state.inode();
+
+        let replacement = dir.path().join("replacement.txt");
+        std::fs::write(&replacement, b"different").expect("write replacement");
+        std::fs::rename(&replacement, &canonical).expect("atomic-replace");
+        let new_inode = std::fs::metadata(&canonical).expect("stat").ino();
+        assert_ne!(
+            captured_inode, new_inode,
+            "test precondition: inode changed"
+        );
+
+        match state.save_to_disk(&canonical) {
+            SaveOutcome::InodeMismatch { expected, actual } => {
+                assert_eq!(expected, captured_inode);
+                assert_eq!(actual, new_inode);
+            }
+            other => panic!("expected InodeMismatch, got {other:?}"),
+        }
+        assert_eq!(
+            std::fs::read(&canonical).expect("read"),
+            b"different",
+            "external replacement is preserved; save was refused"
+        );
+    }
+
+    #[test]
+    fn save_to_disk_path_missing_after_external_delete() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let target = dir.path().join("file.txt");
+        std::fs::write(&target, b"original").expect("seed");
+        let canonical = std::fs::canonicalize(&target).expect("canonicalize");
+
+        let mut state = BufferState::open(canonical.clone()).expect("open");
+        std::fs::remove_file(&canonical).expect("delete");
+
+        assert!(matches!(
+            state.save_to_disk(&canonical),
+            SaveOutcome::PathMissing
+        ));
+    }
+
+    #[test]
+    fn save_to_disk_path_missing_when_target_is_directory() {
+        // Non-regular file at the path is treated as missing for
+        // save purposes (data-model R4 second bullet).
+        let dir = tempfile::tempdir().expect("tempdir");
+        let target = dir.path().join("file.txt");
+        std::fs::write(&target, b"original").expect("seed");
+        let canonical = std::fs::canonicalize(&target).expect("canonicalize");
+        let mut state = BufferState::open(canonical.clone()).expect("open");
+
+        // Replace the regular file with a directory at the same path.
+        std::fs::remove_file(&canonical).expect("rm file");
+        std::fs::create_dir(&canonical).expect("mkdir");
+
+        assert!(matches!(
+            state.save_to_disk(&canonical),
+            SaveOutcome::PathMissing
+        ));
+    }
+
+    #[test]
+    fn save_to_disk_tempfile_io_via_hook_injection_preserves_target() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let target = dir.path().join("file.txt");
+        std::fs::write(&target, b"original").expect("seed");
+        let canonical = std::fs::canonicalize(&target).expect("canonicalize");
+
+        let mut state = BufferState::open(canonical.clone()).expect("open");
+        state
+            .apply_edits(&[edit(pos(0, 0), pos(0, 8), "MUTATED")])
+            .expect("mutate in-memory");
+
+        let outcome = state.save_to_disk_with_hooks(&canonical, |s| {
+            if s == WriteStep::WriteContents {
+                Err(io::Error::other("simulated ENOSPC"))
+            } else {
+                Ok(())
+            }
+        });
+        match outcome {
+            SaveOutcome::TempfileIo { .. } => {}
+            other => panic!("expected TempfileIo, got {other:?}"),
+        }
+        assert_eq!(
+            std::fs::read(&canonical).expect("read"),
+            b"original",
+            "atomic-rename invariant: pre-rename failure leaves disk byte-identical"
+        );
+    }
+
+    #[test]
+    fn save_to_disk_rename_io_via_hook_injection_preserves_target() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let target = dir.path().join("file.txt");
+        std::fs::write(&target, b"original").expect("seed");
+        let canonical = std::fs::canonicalize(&target).expect("canonicalize");
+
+        let mut state = BufferState::open(canonical.clone()).expect("open");
+        state
+            .apply_edits(&[edit(pos(0, 0), pos(0, 8), "MUTATED")])
+            .expect("mutate in-memory");
+
+        let outcome = state.save_to_disk_with_hooks(&canonical, |s| {
+            if s == WriteStep::RenameToTarget {
+                Err(io::Error::other("simulated EXDEV"))
+            } else {
+                Ok(())
+            }
+        });
+        match outcome {
+            SaveOutcome::RenameIo { .. } => {}
+            other => panic!("expected RenameIo, got {other:?}"),
+        }
+        assert_eq!(
+            std::fs::read(&canonical).expect("read"),
+            b"original",
+            "atomic-rename invariant: pre-rename failure leaves disk byte-identical"
+        );
+    }
+
+    #[test]
+    fn save_to_disk_inode_race_during_save_caught_at_rename_time() {
+        // Codex P2 (PR #12): a concurrent atomic-replace that lands
+        // BETWEEN the R4 pre-check and the rename(2) syscall must
+        // NOT clobber the externally-written file. The pre-rename
+        // inode re-check inside save_to_disk_with_hooks closes the
+        // dispatch-window race down to the ~1µs gap between fstat()
+        // and rename(2).
+        //
+        // Simulation: the test's user-supplied hook performs the
+        // atomic-replace at the WriteContents step (after R4 passed,
+        // before the production check at RenameToTarget runs). The
+        // production check then re-stats and detects the inode
+        // shift, returning InodeMismatch — the same outcome the R4
+        // pre-check would have returned, so operator-visible
+        // diagnostics (WEAVER-SAVE-005) stay consistent.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let target = dir.path().join("file.txt");
+        std::fs::write(&target, b"original").expect("seed");
+        let canonical = std::fs::canonicalize(&target).expect("canonicalize");
+
+        let mut state = BufferState::open(canonical.clone()).expect("open");
+        let captured_inode = state.inode();
+        state
+            .apply_edits(&[edit(pos(0, 0), pos(0, 8), "BUFFER")])
+            .expect("mutate");
+
+        let canonical_for_hook = canonical.clone();
+        let dir_path = dir.path().to_path_buf();
+        let raced = std::cell::Cell::new(false);
+        let outcome = state.save_to_disk_with_hooks(&canonical, |s| {
+            // Atomic-replace at the WriteContents step — by this
+            // point R4 has already passed but the rename has not
+            // happened. The next step (FsyncTempfile) and then the
+            // production pre-rename inode check at RenameToTarget
+            // will see the swapped inode.
+            if s == WriteStep::WriteContents && !raced.get() {
+                let replacement = dir_path.join("racy.txt");
+                std::fs::write(&replacement, b"externally-written").expect("write replacement");
+                std::fs::rename(&replacement, &canonical_for_hook).expect("atomic-replace");
+                raced.set(true);
+            }
+            Ok(())
+        });
+
+        match outcome {
+            SaveOutcome::InodeMismatch { expected, actual } => {
+                assert_eq!(expected, captured_inode, "expected inode = open-time");
+                assert_ne!(actual, captured_inode, "actual inode = post-replace");
+            }
+            other => panic!("expected InodeMismatch from rename-time race; got {other:?}",),
+        }
+        assert_eq!(
+            std::fs::read(&canonical).expect("read post-save"),
+            b"externally-written",
+            "no-clobber invariant: externally-written content survives the race",
+        );
+    }
+
+    #[test]
+    fn save_to_disk_path_swapped_to_directory_during_save_classified_as_path_missing() {
+        // Codex P2 follow-up (PR #12): if the path is swapped to a
+        // non-regular file (directory, special file) between R4 and
+        // rename, the rename-time recheck must classify as
+        // PathMissing — same as the R4 pre-check semantics — rather
+        // than as InodeMismatch. Operators see WEAVER-SAVE-006
+        // (correct remediation: re-create the regular file) rather
+        // than WEAVER-SAVE-005 (which would imply a regular-file
+        // inode race).
+        let dir = tempfile::tempdir().expect("tempdir");
+        let target = dir.path().join("file.txt");
+        std::fs::write(&target, b"original").expect("seed");
+        let canonical = std::fs::canonicalize(&target).expect("canonicalize");
+
+        let mut state = BufferState::open(canonical.clone()).expect("open");
+        state
+            .apply_edits(&[edit(pos(0, 0), pos(0, 8), "BUFFER")])
+            .expect("mutate");
+
+        let canonical_for_hook = canonical.clone();
+        let raced = std::cell::Cell::new(false);
+        let outcome = state.save_to_disk_with_hooks(&canonical, |s| {
+            if s == WriteStep::WriteContents && !raced.get() {
+                // Replace the regular file with a directory at the
+                // same path: rm + mkdir.
+                std::fs::remove_file(&canonical_for_hook).expect("rm regular file");
+                std::fs::create_dir(&canonical_for_hook).expect("mkdir at swapped path");
+                raced.set(true);
+            }
+            Ok(())
+        });
+
+        assert!(
+            matches!(outcome, SaveOutcome::PathMissing),
+            "non-regular-file race must surface as PathMissing (matches R4 pre-check); got {outcome:?}",
+        );
+        // The directory we created must remain — the refused save
+        // does not touch the path.
+        assert!(
+            canonical.is_dir(),
+            "swapped-in directory must survive (refused save does not touch path)",
+        );
+    }
+
+    #[test]
+    fn save_to_disk_path_disappears_during_save_caught_at_rename_time() {
+        // Codex P2 (PR #12), companion to the inode-race case: if
+        // the path disappears between R4 and rename, the production
+        // pre-rename check returns PathMissing rather than letting
+        // the rename create a new file at a path the operator has
+        // explicitly removed.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let target = dir.path().join("file.txt");
+        std::fs::write(&target, b"original").expect("seed");
+        let canonical = std::fs::canonicalize(&target).expect("canonicalize");
+
+        let mut state = BufferState::open(canonical.clone()).expect("open");
+        state
+            .apply_edits(&[edit(pos(0, 0), pos(0, 8), "BUFFER")])
+            .expect("mutate");
+
+        let canonical_for_hook = canonical.clone();
+        let raced = std::cell::Cell::new(false);
+        let outcome = state.save_to_disk_with_hooks(&canonical, |s| {
+            if s == WriteStep::WriteContents && !raced.get() {
+                std::fs::remove_file(&canonical_for_hook).expect("rm during save");
+                raced.set(true);
+            }
+            Ok(())
+        });
+
+        assert!(
+            matches!(outcome, SaveOutcome::PathMissing),
+            "rename-time path-disappear race must surface as PathMissing; got {outcome:?}",
+        );
+        assert!(
+            !canonical.exists(),
+            "no-recreation invariant: the refused save did not re-create the path",
+        );
+    }
+
+    #[test]
+    fn save_to_disk_buffer_state_content_unchanged_after_failure() {
+        // Purity invariant: BufferState::content is read-only across
+        // every SaveOutcome failure branch.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let target = dir.path().join("file.txt");
+        std::fs::write(&target, b"original").expect("seed");
+        let canonical = std::fs::canonicalize(&target).expect("canonicalize");
+
+        let mut state = BufferState::open(canonical.clone()).expect("open");
+        state
+            .apply_edits(&[edit(pos(0, 0), pos(0, 8), "MUTATED")])
+            .expect("mutate");
+        let content_before = state.content().to_vec();
+
+        std::fs::remove_file(&canonical).expect("delete");
+        let _ = state.save_to_disk(&canonical);
+
+        assert_eq!(state.content(), content_before.as_slice());
     }
 }

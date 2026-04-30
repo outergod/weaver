@@ -155,17 +155,21 @@ async fn inspect_why_walks_back_to_user_emitted_buffer_edit() {
         Some("weaver-buffers"),
         "asserting_service must be weaver-buffers",
     );
+    // Slice 005 §28(a) re-derivation: EventId is a UUIDv8 producer-
+    // minted with a hashed-producer-instance-id prefix; JSON renders
+    // both `source_event` and `event.id` as UUID hex strings (not the
+    // pre-slice-005 u64 numbers).
     let source_event = inspection
         .get("source_event")
-        .and_then(|n| n.as_u64())
-        .expect("source_event present and u64");
+        .and_then(|n| n.as_str())
+        .expect("source_event present and UUID string");
 
     // ----- event block (the walkback target) -----
     let event = v.get("event").expect("event block present");
     let event_id = event
         .get("id")
-        .and_then(|n| n.as_u64())
-        .expect("event.id present");
+        .and_then(|n| n.as_str())
+        .expect("event.id present and UUID string");
     assert_eq!(
         event_id, source_event,
         "INVARIANT: event.id must equal fact_inspection.source_event",

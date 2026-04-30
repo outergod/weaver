@@ -31,7 +31,7 @@ async fn service_overwrite_of_behavior_fact_reports_service_attribution() {
         FactValue::Bool(true),
     )));
 
-    let event_id = EventId::new(42);
+    let event_id = EventId::for_testing(42);
     dispatcher
         .process_event(Event {
             id: event_id,

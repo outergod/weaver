@@ -104,7 +104,7 @@ impl TraceStore {
     /// producer's later event when IDs collide. `weaver inspect --why`
     /// is the user-visible consumer; the listener layer
     /// (`core/src/bus/listener.rs::lookup_event_for_inspect`) carries
-    /// the `EventId::ZERO`-sentinel guard. Cross-producer wall-clock-ns
+    /// the `EventId::nil()`-sentinel guard. Cross-producer wall-clock-ns
     /// collision residue is tracked at `docs/07-open-questions.md §28`.
     pub fn find_event(&self, id: EventId) -> Option<TraceSequence> {
         self.by_event.get(&id).copied()
@@ -170,7 +170,7 @@ mod tests {
     fn append_and_lookup_event() {
         let mut store = TraceStore::new();
         let event = Event {
-            id: EventId::new(42),
+            id: EventId::for_testing(42),
             name: "buffer/open".into(),
             target: Some(EntityRef::new(1)),
             payload: EventPayload::BufferOpen {
@@ -193,7 +193,7 @@ mod tests {
     fn fact_inspection_records_asserting_behavior() {
         let mut store = TraceStore::new();
         let behavior = BehaviorId::new("core/dirty-tracking");
-        let event_id = EventId::new(42);
+        let event_id = EventId::for_testing(42);
         let fact_key = FactKey::new(EntityRef::new(1), "buffer/dirty");
 
         // Event
@@ -245,7 +245,7 @@ mod tests {
     fn retraction_clears_fact_inspection() {
         let mut store = TraceStore::new();
         let behavior = BehaviorId::new("core/dirty-tracking");
-        let event_id = EventId::new(42);
+        let event_id = EventId::for_testing(42);
         let fact_key = FactKey::new(EntityRef::new(1), "buffer/dirty");
 
         let fact = Fact {

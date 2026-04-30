@@ -21,20 +21,26 @@ use serde::{Deserialize, Serialize};
 ///   [`EventPayload`] drops `BufferEdited` / `BufferCleaned` in favor
 ///   of `BufferOpen { path }`; `FactValue` gains a `U64` variant. See
 ///   `specs/003-buffer-service/contracts/bus-messages.md`.
-/// - `0x04` / `0.4.0` — **current**, slice 004. Breaking wire change:
+/// - `0x04` / `0.4.0` — slice 004. Breaking wire change:
 ///   [`crate::types::event::EventPayload`] gains a `BufferEdit { entity,
 ///   version, edits }` variant carrying the new
 ///   [`crate::types::edit::TextEdit`] / [`crate::types::edit::Range`] /
 ///   [`crate::types::edit::Position`] struct types. See
 ///   `specs/004-buffer-edit/contracts/bus-messages.md`.
+/// - `0x05` / `0.5.0` — **current**, slice 005. Breaking wire change:
+///   adds the `buffer-save` event variant; producers serialise an
+///   ID-stripped event envelope, with the bus listener allocating a
+///   fresh [`crate::types::ids::EventId`] on accept (closes the
+///   wall-clock-ns collision class — see `docs/07-open-questions.md`
+///   §28). See `specs/005-buffer-save/contracts/bus-messages.md`.
 ///
 /// Public surface per L2 P7. Increments follow the policy in
 /// `specs/003-buffer-service/contracts/bus-messages.md` §Versioning.
-pub const BUS_PROTOCOL_VERSION: u8 = 0x04;
+pub const BUS_PROTOCOL_VERSION: u8 = 0x05;
 
 /// Semver-style string representation of [`BUS_PROTOCOL_VERSION`].
 /// Used in CLI output (e.g., `weaver --version`).
-pub const BUS_PROTOCOL_VERSION_STR: &str = "0.4.0";
+pub const BUS_PROTOCOL_VERSION_STR: &str = "0.5.0";
 
 /// The top-level enum of bus messages.
 ///
@@ -165,13 +171,24 @@ pub enum EventSubscribePattern {
     /// entity; subscribers that only care about specific targets MUST
     /// filter at receipt time.
     PayloadType(String),
+    /// Match events whose payload type tag is in the provided list —
+    /// equivalent to a logical OR of multiple `PayloadType`
+    /// subscriptions on a single connection. Required because the
+    /// listener implements last-wins per-connection: two consecutive
+    /// `SubscribeEvents` calls would drop the first subscription.
+    /// Slice 005 introduces this variant so `weaver-buffers` can
+    /// receive both `buffer-edit` and `buffer-save` events through
+    /// one subscription handle.
+    PayloadTypes(Vec<String>),
 }
 
 impl EventSubscribePattern {
     /// Return `true` when the event matches this subscription.
     pub fn matches(&self, event: &crate::types::event::Event) -> bool {
+        let tag = event.payload.type_tag();
         match self {
-            Self::PayloadType(tag) => event.payload.type_tag() == tag.as_str(),
+            Self::PayloadType(t) => t.as_str() == tag,
+            Self::PayloadTypes(ts) => ts.iter().any(|t| t.as_str() == tag),
         }
     }
 }
@@ -444,7 +461,7 @@ mod tests {
             provenance: Provenance::new(
                 ActorIdentity::behavior(BehaviorId::new("core/dirty-tracking")),
                 1000,
-                Some(EventId::new(42)),
+                Some(EventId::for_testing(42)),
             )
             .unwrap(),
         }
@@ -452,7 +469,7 @@ mod tests {
 
     fn sample_event() -> Event {
         Event {
-            id: EventId::new(42),
+            id: EventId::for_testing(42),
             name: "buffer/open".into(),
             target: Some(EntityRef::new(1)),
             payload: EventPayload::BufferOpen {
@@ -484,7 +501,7 @@ mod tests {
             BusMessage::InspectResponse {
                 request_id: 7,
                 result: Ok(InspectionDetail::behavior(
-                    EventId::new(42),
+                    EventId::for_testing(42),
                     BehaviorId::new("core/dirty-tracking"),
                     1000,
                     17,
@@ -509,7 +526,7 @@ mod tests {
             },
             BusMessage::EventInspectRequest {
                 request_id: 9,
-                event_id: EventId::new(0xCAFE),
+                event_id: EventId::for_testing(0xCAFE),
             },
             BusMessage::EventInspectResponse {
                 request_id: 9,
@@ -554,8 +571,14 @@ mod tests {
     /// orthogonal to the value field's presence.
     #[test]
     fn inspection_detail_decodes_legacy_behavior_shape() {
+        // Slice 005 §28(a) re-derivation: `source_event` is now a
+        // UUIDv8 hex string on the wire (was u64 in slice 004). The
+        // "legacy" framing here refers to the pre-T064 absence of
+        // `asserting_kind` discrimination, NOT to the slice-004
+        // EventId u64 wire shape — which the protocol-mismatch
+        // handshake rejects under bump 0x04 → 0x05.
         let legacy = r#"{
-            "source_event": 42,
+            "source_event": "00000000-0000-0000-0000-00000000002a",
             "asserting_behavior": "core/dirty-tracking",
             "asserted_at_ns": 1000,
             "trace_sequence": 7,
@@ -567,7 +590,7 @@ mod tests {
             d.asserting_behavior,
             Some(BehaviorId::new("core/dirty-tracking"))
         );
-        assert_eq!(d.source_event, EventId::new(42));
+        assert_eq!(d.source_event, EventId::for_testing(42));
         assert_eq!(d.value, FactValue::Bool(true));
     }
 
@@ -578,7 +601,7 @@ mod tests {
     #[test]
     fn inspection_detail_decodes_legacy_service_shape() {
         let legacy = r#"{
-            "source_event": 117,
+            "source_event": "00000000-0000-0000-0000-000000000075",
             "asserting_service": "git-watcher",
             "asserting_instance": "2e1a4f8b-4d13-4b0e-b4e3-6a6b00b35c90",
             "asserted_at_ns": 1000,
@@ -600,7 +623,7 @@ mod tests {
     #[test]
     fn inspection_detail_decodes_legacy_opaque_shape() {
         let legacy = r#"{
-            "source_event": 9,
+            "source_event": "00000000-0000-0000-0000-000000000009",
             "asserted_at_ns": 1000,
             "trace_sequence": 7,
             "value": {"type": "u64", "value": 42}
@@ -644,7 +667,7 @@ mod tests {
 
         fn fixture(payload: EventPayload) -> Event {
             Event {
-                id: EventId::new(0),
+                id: EventId::for_testing(0),
                 name: "test".into(),
                 target: None,
                 payload,
@@ -678,6 +701,59 @@ mod tests {
         let unknown = EventSubscribePattern::PayloadType("nonexistent-variant".into());
         assert!(!unknown.matches(&buffer_edit));
         assert!(!unknown.matches(&buffer_open));
+
+        // Slice 005: PayloadTypes(Vec<String>) — multi-tag matcher.
+        let buffer_save = fixture(EventPayload::BufferSave {
+            entity: crate::types::entity_ref::EntityRef::new(1),
+            version: 0,
+        });
+        let edit_or_save =
+            EventSubscribePattern::PayloadTypes(vec!["buffer-edit".into(), "buffer-save".into()]);
+        assert!(
+            edit_or_save.matches(&buffer_edit),
+            "PayloadTypes(edit,save) matches edit"
+        );
+        assert!(
+            edit_or_save.matches(&buffer_save),
+            "PayloadTypes(edit,save) matches save"
+        );
+        assert!(
+            !edit_or_save.matches(&buffer_open),
+            "PayloadTypes(edit,save) does NOT match open"
+        );
+
+        let empty_set = EventSubscribePattern::PayloadTypes(vec![]);
+        assert!(
+            !empty_set.matches(&buffer_edit),
+            "PayloadTypes([]) is the structural never-matches"
+        );
+    }
+
+    #[test]
+    fn event_subscribe_pattern_payload_types_json_wire_shape() {
+        // Wire shape under the kebab-case adjacent-tagging convention:
+        // `{"type":"payload-types","pattern":["buffer-edit","buffer-save"]}`.
+        // Pinned so a future serde-derive change can't silently drift
+        // the variant tag or the field name on this surface.
+        let p =
+            EventSubscribePattern::PayloadTypes(vec!["buffer-edit".into(), "buffer-save".into()]);
+        let s = serde_json::to_string(&p).expect("serialize");
+        assert_eq!(
+            s,
+            r#"{"type":"payload-types","pattern":["buffer-edit","buffer-save"]}"#,
+        );
+        let back: EventSubscribePattern = serde_json::from_str(&s).expect("deserialize");
+        assert_eq!(p, back);
+    }
+
+    #[test]
+    fn event_subscribe_pattern_payload_types_cbor_round_trip() {
+        let p =
+            EventSubscribePattern::PayloadTypes(vec!["buffer-edit".into(), "buffer-save".into()]);
+        let mut buf = Vec::new();
+        ciborium::into_writer(&p, &mut buf).expect("encode");
+        let back: EventSubscribePattern = ciborium::from_reader(buf.as_slice()).expect("decode");
+        assert_eq!(p, back);
     }
 
     #[test]
@@ -714,7 +790,7 @@ mod tests {
     fn event_inspect_request_json_wire_shape() {
         let msg = BusMessage::EventInspectRequest {
             request_id: 42,
-            event_id: EventId::new(7),
+            event_id: EventId::for_testing(7),
         };
         let s = serde_json::to_string(&msg).expect("serialize");
         // Adjacent tag "event-inspect-request"; payload carries
@@ -724,7 +800,14 @@ mod tests {
             "expected adjacent tag: {s}"
         );
         assert!(s.contains("\"request_id\":42"), "expected request_id: {s}");
-        assert!(s.contains("\"event_id\":7"), "expected event_id: {s}");
+        // Slice 005 §28(a) re-derivation: EventId is now a UUIDv8 hex
+        // string on the wire (was u64 in slice 004). The fixture EventId
+        // is built via `for_testing(7)` which wraps `Uuid::from_u128(7)`;
+        // its hex form is the all-zero UUID with the low 8 bits set to 7.
+        assert!(
+            s.contains("\"event_id\":\"00000000-0000-0000-0000-000000000007\""),
+            "expected event_id: {s}"
+        );
         let back: BusMessage = serde_json::from_str(&s).expect("deserialize");
         assert_eq!(msg, back);
     }
@@ -778,7 +861,7 @@ mod tests {
         // response-side headroom check.
         let make_event = |new_text_len: usize| -> Event {
             Event {
-                id: EventId::new(0),
+                id: EventId::for_testing(0),
                 name: "buffer/edit".into(),
                 target: Some(EntityRef::new(1)),
                 payload: EventPayload::BufferEdit {

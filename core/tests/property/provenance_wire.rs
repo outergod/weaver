@@ -65,7 +65,7 @@ fn arb_provenance() -> impl Strategy<Value = Provenance> {
         proptest::option::of(0u64..u64::MAX),
     )
         .prop_map(|(source, ts, parent)| {
-            Provenance::new(source, ts, parent.map(EventId::new))
+            Provenance::new(source, ts, parent.map(|x| EventId::for_testing(x as u128)))
                 .expect("arb_provenance must produce a valid construction")
         })
 }
@@ -92,7 +92,7 @@ fn arb_event() -> impl Strategy<Value = Event> {
         arb_provenance(),
     )
         .prop_map(|(id, target, path, provenance)| Event {
-            id: EventId::new(id),
+            id: EventId::for_testing(id as u128),
             name: "buffer/open".into(),
             target: Some(EntityRef::new(target)),
             payload: EventPayload::BufferOpen { path },

@@ -29,7 +29,21 @@ use crate::types::entity_ref::EntityRef;
 use crate::types::event::{Event, EventPayload};
 use crate::types::fact::{FactKey, FactValue};
 use crate::types::ids::EventId;
+use crate::types::ids::hash_to_58;
 use crate::types::message::{BusMessage, InspectionError};
+
+/// Per-process User-identity UUIDv8 prefix for `weaver edit` /
+/// `weaver edit-json` event minting. Initialised lazily on first emit
+/// from a fresh `Uuid::new_v4()` hashed to 58 bits via SipHash (per
+/// slice-005 §28(a) re-derivation; see `specs/005-buffer-save/research.md`
+/// §5 + §12). Producer-restart yields a fresh prefix — acceptable
+/// because in-memory traces don't survive listener restart anyway.
+fn user_event_prefix() -> u64 {
+    use std::sync::OnceLock;
+    use uuid::Uuid;
+    static PREFIX: OnceLock<u64> = OnceLock::new();
+    *PREFIX.get_or_init(|| hash_to_58(&Uuid::new_v4()))
+}
 
 /// Failure modes for [`parse_range`]. Each variant carries the offending
 /// input so the caller can render WEAVER-EDIT-002 with a precise
@@ -226,6 +240,18 @@ pub fn handle_edit_json(
         }
     };
 
+    // Note: an empty `[]` here intentionally does NOT short-circuit
+    // — `edits` may be the empty Vec, which still proceeds through
+    // the dispatch path and produces a wire-level empty `BufferEdit`
+    // that the service applies as a no-op. Asymmetric vs. the
+    // positional grammar (`weaver edit <path> 0:0-0:0 ""`), which
+    // produces a one-empty-edit batch that fails `apply_edits`'s
+    // nothing-edit validation. The wire-level empty-batch is
+    // reserved as a future-tool handshake-probe affordance per
+    // slice-004 spec §220 and FR-025; CLI-side short-circuit would
+    // remove that affordance. See also slice-004 session-3 handoff
+    // and T029 cross-pointer.
+
     // Step 3: canonicalise path.
     let canonical = match std::fs::canonicalize(&path) {
         Ok(c) => c,
@@ -383,14 +409,19 @@ async fn prepare_dispatch(
     };
 
     // Provenance carries ActorIdentity::User per research §6 — first
-    // production use of the variant reserved at slice 002. EventId
-    // is synthesised from wall-clock ns; uniqueness within a single
-    // CLI invocation suffices (the trace dedupes via stable ordering).
+    // production use of the variant reserved at slice 002. EventId is
+    // a UUIDv8 producer-minted by the CLI emitter (slice-005 §28(a)
+    // re-derivation): the high 58 bits of the custom payload encode
+    // the per-process User-prefix (a `OnceLock<u64>` initialised at
+    // first emit via `hash_to_58(&Uuid::new_v4())`); the low 64 bits
+    // encode `now_ns()`. Cross-producer collision is structurally
+    // impossible — distinct producers occupy disjoint 58-bit-prefix
+    // namespaces.
     let now = now_ns();
     let provenance = Provenance::new(ActorIdentity::User, now, None)
         .expect("ActorIdentity::User has no fields to validate");
     let event = Event {
-        id: EventId::new(now),
+        id: EventId::mint_v8(user_event_prefix(), now),
         name: "buffer/edit".into(),
         target: Some(entity),
         payload: EventPayload::BufferEdit {
@@ -715,7 +746,7 @@ mod tests {
         // even after subtracting wrapper overhead.
         let new_text = "x".repeat(MAX_EVENT_INGEST_FRAME + 1024);
         let event = Event {
-            id: EventId::new(0),
+            id: EventId::for_testing(0),
             name: "buffer/edit".into(),
             target: Some(EntityRef::new(1)),
             payload: EventPayload::BufferEdit {

@@ -582,7 +582,7 @@ mod tests {
     async fn process_event_with_no_behaviors_appends_to_trace() {
         let d = Dispatcher::new();
         let event = Event {
-            id: EventId::new(1),
+            id: EventId::for_testing(1),
             name: "buffer/open".into(),
             target: Some(EntityRef::new(1)),
             payload: EventPayload::BufferOpen {

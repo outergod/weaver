@@ -41,7 +41,7 @@ impl Behavior for FixtureErrorBehavior {
 
 fn sample_event(id: u64, entity: EntityRef) -> Event {
     Event {
-        id: EventId::new(id),
+        id: EventId::for_testing(id as u128),
         name: "buffer/open".into(),
         target: Some(entity),
         payload: EventPayload::BufferOpen {

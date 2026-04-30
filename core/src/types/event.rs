@@ -38,6 +38,14 @@ pub struct Event {
 /// `specs/004-buffer-edit/contracts/bus-messages.md` and
 /// `specs/004-buffer-edit/data-model.md` for the wire/validation
 /// contract.
+///
+/// Slice 005 adds `BufferSave { entity, version }`: a non-mutating
+/// disk write-back request against an opened buffer. The
+/// `weaver-buffers` service performs an atomic POSIX write
+/// (tempfile + fsync + rename) gated by a pre-rename inode check; on
+/// success it re-emits `buffer/dirty = false`. Save does not bump
+/// `buffer/version`. See `specs/005-buffer-save/contracts/bus-messages.md`
+/// and `specs/005-buffer-save/data-model.md`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "payload", rename_all = "kebab-case")]
 pub enum EventPayload {
@@ -58,6 +66,19 @@ pub enum EventPayload {
         version: u64,
         edits: Vec<TextEdit>,
     },
+    /// A disk write-back request against an opened buffer.
+    ///
+    /// `entity` is the canonical buffer entity (matches `buffer/path`);
+    /// `version` is the emitter's snapshot of `buffer/version` (the
+    /// service accepts iff it matches the current value). Save is
+    /// non-mutating w.r.t. content and version; on a dirty buffer the
+    /// service performs an atomic disk write and re-emits
+    /// `buffer/dirty = false` with `causal_parent = Some(event.id)`.
+    /// On a clean buffer the service runs the no-op flow (idempotent
+    /// `buffer/dirty = false` re-emission + `WEAVER-SAVE-007` info
+    /// diagnostic; no disk I/O). See `specs/005-buffer-save/spec.md`
+    /// FR-001..FR-007 and FR-017a.
+    BufferSave { entity: EntityRef, version: u64 },
 }
 
 impl EventPayload {
@@ -76,6 +97,7 @@ impl EventPayload {
         match self {
             Self::BufferOpen { .. } => "buffer-open",
             Self::BufferEdit { .. } => "buffer-edit",
+            Self::BufferSave { .. } => "buffer-save",
         }
     }
 }
@@ -90,7 +112,7 @@ mod tests {
 
     fn sample_event(id: u64) -> Event {
         Event {
-            id: EventId::new(id),
+            id: EventId::for_testing(id as u128),
             name: "buffer/open".into(),
             target: Some(EntityRef::new(1)),
             payload: EventPayload::BufferOpen {
@@ -115,7 +137,7 @@ mod tests {
             new_text: "hello ".into(),
         };
         Event {
-            id: EventId::new(id),
+            id: EventId::for_testing(id as u128),
             name: "buffer/edit".into(),
             target: Some(EntityRef::new(42)),
             payload: EventPayload::BufferEdit {
@@ -239,7 +261,7 @@ mod tests {
     fn gen_buffer_edit_event() -> impl Strategy<Value = Event> {
         (0u64..1_000_000, gen_buffer_edit_payload(), 0u64..u64::MAX).prop_map(
             |(id, payload, ts)| Event {
-                id: EventId::new(id),
+                id: EventId::for_testing(id as u128),
                 name: "buffer/edit".into(),
                 target: Some(EntityRef::new(0xDEAD_BEEF)),
                 payload,
@@ -265,6 +287,27 @@ mod tests {
         }
     }
 
+    #[test]
+    fn buffer_save_wire_shape() {
+        // Slice 005: assert the adjacent-tagged JSON shape for the
+        // new BufferSave EventPayload variant — `type` discriminator
+        // is kebab-case `buffer-save`, payload carries `entity` and
+        // `version`.
+        let payload = EventPayload::BufferSave {
+            entity: EntityRef::new(42),
+            version: 7,
+        };
+        let s = serde_json::to_string(&payload).unwrap();
+        assert!(
+            s.contains("\"type\":\"buffer-save\""),
+            "expected adjacent tag `buffer-save`: {s}"
+        );
+        assert!(s.contains("\"entity\":42"), "expected entity field: {s}");
+        assert!(s.contains("\"version\":7"), "expected version field: {s}");
+        let back: EventPayload = serde_json::from_str(&s).unwrap();
+        assert_eq!(payload, back);
+    }
+
     /// Pin EventPayload::type_tag() against the serde-emitted "type"
     /// discriminator so the two cannot drift. EventSubscribePattern
     /// matching depends on this being byte-identical with the wire
@@ -279,6 +322,10 @@ mod tests {
                 entity: EntityRef::new(1),
                 version: 0,
                 edits: vec![],
+            },
+            EventPayload::BufferSave {
+                entity: EntityRef::new(1),
+                version: 0,
             },
         ] {
             let v: serde_json::Value = serde_json::to_value(&payload).unwrap();

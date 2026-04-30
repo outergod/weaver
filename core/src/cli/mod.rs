@@ -9,6 +9,7 @@ pub mod edit;
 pub mod errors;
 pub mod inspect;
 pub mod output;
+pub mod save;
 pub mod status;
 pub mod tracing_setup;
 pub mod version;
@@ -38,6 +39,7 @@ pub fn run() -> miette::Result<()> {
         Some(Command::EditJson { path, from }) => {
             edit::handle_edit_json(path, from, output, socket)
         }
+        Some(Command::Save { entity }) => save::handle_save(entity, output, socket),
         None => {
             print_help();
             Ok(())

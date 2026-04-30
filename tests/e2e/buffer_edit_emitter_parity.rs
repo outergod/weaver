@@ -258,7 +258,7 @@ async fn run_fake_core(listener: UnixListener) -> Event {
     // 4. Send InspectResponse with version=0 (a valid `FactValue::U64`
     //    suffices — both emitters use this version verbatim).
     let detail = InspectionDetail::service(
-        EventId::new(1),
+        EventId::for_testing(1),
         "weaver-buffers".into(),
         uuid::Uuid::new_v4(),
         0,

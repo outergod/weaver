@@ -91,6 +91,11 @@ pub async fn run(
         ActorIdentity::Service { instance_id, .. } => *instance_id,
         _ => unreachable!("ActorIdentity::service returns a Service variant"),
     };
+    // Slice-005 §28(a) re-derivation: hash the per-process Service
+    // `instance_id` to 58 bits via SipHash; this becomes the high
+    // payload bits of every UUIDv8 EventId this publisher mints. Per
+    // `specs/005-buffer-save/research.md` §5 + §12.
+    let event_prefix = weaver_core::types::ids::hash_to_58(&instance_id);
 
     info!(
         repository = %observer.path().display(),
@@ -318,8 +323,11 @@ pub async fn run(
         if let Some(prev) = &last {
             if prev != &obs {
                 // Synthesize a poll-tick event id so transition
-                // retract+assert share a causal parent.
-                let poll_tick_id = EventId::new(now_ns());
+                // retract+assert share a causal parent. Slice-005
+                // §28(a) re-derivation: UUIDv8 with the Service-
+                // instance-id prefix in the high 58 bits + `now_ns()`
+                // in the low 64.
+                let poll_tick_id = EventId::mint_v8(event_prefix, now_ns());
                 diff_publish(
                     &mut writer,
                     repo_entity,

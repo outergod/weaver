@@ -109,7 +109,7 @@ proptest! {
                 prev,
                 next,
                 &asserted,
-                EventId::new(1 + i as u64),
+                EventId::for_testing((1 + i as u64) as u128),
             );
             apply_ops(ops, &mut asserted);
             let n = count_state_facts(&asserted);
@@ -141,7 +141,7 @@ proptest! {
             &pair.0,
             &pair.1,
             &tracked,
-            EventId::new(42),
+            EventId::for_testing(42),
         );
 
         let mut state_asserts = 0;

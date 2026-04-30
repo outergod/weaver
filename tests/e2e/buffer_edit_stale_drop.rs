@@ -250,7 +250,7 @@ fn build_buffer_edit_event(entity: EntityRef, version: u64, marker: &str) -> Eve
         new_text,
     };
     Event {
-        id: EventId::new(now),
+        id: EventId::new(uuid::Uuid::from_u128(now as u128)),
         name: "buffer/edit".into(),
         target: Some(entity),
         payload: EventPayload::BufferEdit {

@@ -13,6 +13,7 @@
 //! lands in C14.
 
 use std::collections::{HashMap, HashSet};
+use std::io;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -35,8 +36,9 @@ use weaver_core::types::fact::{Fact, FactKey, FactValue};
 use weaver_core::types::ids::EventId;
 use weaver_core::types::message::{BusMessage, EventSubscribePattern, LifecycleSignal};
 
+use crate::atomic_write::WriteStep;
 use crate::model::{
-    ApplyError, BufferState, ObserverError, buffer_bootstrap_facts, buffer_entity_ref,
+    ApplyError, BufferState, ObserverError, SaveOutcome, buffer_bootstrap_facts, buffer_entity_ref,
     watcher_instance_entity_ref,
 };
 use crate::observer;
@@ -261,6 +263,149 @@ pub(crate) fn dispatch_buffer_edit(
     }
 }
 
+/// Outcome of dispatching a single `BufferSave` event for a given
+/// `(entity, version)` tuple. Mirrors slice-004's [`BufferEditOutcome`]
+/// shape: pure-ish dispatch returns one variant per receipt; the
+/// reader-loop arm decides what to publish + which `WEAVER-SAVE-NNN`
+/// diagnostic level to emit.
+///
+/// Per `data-model.md §BufferSaveOutcome`. Maps 1:1 onto the
+/// `WEAVER-SAVE-NNN` diagnostic taxonomy via the table in
+/// `research.md §9`.
+#[derive(Debug)]
+pub(crate) enum BufferSaveOutcome {
+    /// R5/R6 success: target was dirty, atomic write succeeded, parent
+    /// directory `fsync`ed. Reader-loop emits `tracing::info!` +
+    /// publishes `buffer/dirty = false` with `causal_parent = Some(event.id)`.
+    Saved {
+        entity: EntityRef,
+        path: PathBuf,
+        version: u64,
+    },
+    /// R3 clean-save no-op: target was already clean (`buffer/dirty = false`).
+    /// No disk I/O, no inode check; reader-loop emits `WEAVER-SAVE-007`
+    /// at info + idempotent re-emission of `buffer/dirty = false`.
+    CleanSaveNoOp { entity: EntityRef, version: u64 },
+    /// R2 version-handshake mismatch (`event.version != current buffer/version`).
+    /// `WEAVER-SAVE-002` at debug; no publish.
+    StaleVersion {
+        event_version: u64,
+        current_version: u64,
+    },
+    /// R1 ownership gate failed — this service does not own the
+    /// target entity. Silent debug; no publish; no diagnostic code.
+    NotOwned { entity: EntityRef },
+    /// R4 refusal: path exists and is a regular file but its inode
+    /// no longer matches the buffer's open-time captured inode.
+    /// `WEAVER-SAVE-005` at warn; no publish.
+    InodeMismatch {
+        entity: EntityRef,
+        path: PathBuf,
+        expected: u64,
+        actual: u64,
+    },
+    /// R4 refusal: path is missing, replaced by a non-regular file,
+    /// or unstatable. `WEAVER-SAVE-006` at warn; no publish.
+    PathMissing { entity: EntityRef, path: PathBuf },
+    /// R5 failure in the tempfile open / write / fsync-tempfile
+    /// steps. `WEAVER-SAVE-003` at error; no publish.
+    TempfileIo {
+        entity: EntityRef,
+        path: PathBuf,
+        error: io::Error,
+    },
+    /// R5 failure in the rename / fsync-parent steps.
+    /// `WEAVER-SAVE-004` at error; no publish.
+    RenameIo {
+        entity: EntityRef,
+        path: PathBuf,
+        error: io::Error,
+    },
+}
+
+/// Handler for a single `BufferSave` event: implements R1 through R5
+/// of the `data-model.md §Validation rules` pipeline.
+///
+/// Ordering is significant:
+///
+/// 1. **R1 ownership** — non-owned entities short-circuit before
+///    touching version state.
+/// 2. **R2 version handshake** — exact equality required (save is
+///    non-mutating w.r.t. version, so there is no future-version
+///    branch; both stale and future map to a single `StaleVersion`).
+/// 3. **R3 clean-save branch** — if `state.last_dirty == false`, no
+///    disk I/O is performed; the reader-loop arm idempotently
+///    re-emits `buffer/dirty = false` for late subscribers.
+/// 4. **R4 + R5** — delegated to [`BufferState::save_to_disk`] (path
+///    + inode + atomic write).
+///
+/// Pure-ish (no bus writes, no tracing) so unit tests can exercise
+/// every outcome without a mock writer; FR-018 categorisation lives
+/// in the reader-loop arm that consumes the outcome.
+pub(crate) fn dispatch_buffer_save(
+    registry: &mut BufferRegistry,
+    entity: EntityRef,
+    version: u64,
+) -> BufferSaveOutcome {
+    dispatch_buffer_save_with_hooks(registry, entity, version, |_| Ok(()))
+}
+
+/// Same as [`dispatch_buffer_save`] but threads an injection hook
+/// through to [`BufferState::save_to_disk_with_hooks`]. Used by unit
+/// tests + `tests/e2e/buffer_save_atomic_invariant.rs` (SC-504).
+pub(crate) fn dispatch_buffer_save_with_hooks<F>(
+    registry: &mut BufferRegistry,
+    entity: EntityRef,
+    version: u64,
+    before: F,
+) -> BufferSaveOutcome
+where
+    F: FnMut(WriteStep) -> Result<(), io::Error>,
+{
+    if !registry.is_owned(entity) {
+        return BufferSaveOutcome::NotOwned { entity };
+    }
+    let current_version = registry.versions.get(&entity).copied().unwrap_or(0);
+    if version != current_version {
+        return BufferSaveOutcome::StaleVersion {
+            event_version: version,
+            current_version,
+        };
+    }
+    let state = registry
+        .buffers
+        .get_mut(&entity)
+        .expect("is_owned implies buffers contains key");
+    let path = state.path().to_path_buf();
+    if !state.last_dirty() {
+        return BufferSaveOutcome::CleanSaveNoOp { entity, version };
+    }
+    match state.save_to_disk_with_hooks(&path, before) {
+        SaveOutcome::Saved { path } => BufferSaveOutcome::Saved {
+            entity,
+            path,
+            version,
+        },
+        SaveOutcome::InodeMismatch { expected, actual } => BufferSaveOutcome::InodeMismatch {
+            entity,
+            path,
+            expected,
+            actual,
+        },
+        SaveOutcome::PathMissing => BufferSaveOutcome::PathMissing { entity, path },
+        SaveOutcome::TempfileIo { error } => BufferSaveOutcome::TempfileIo {
+            entity,
+            path,
+            error,
+        },
+        SaveOutcome::RenameIo { error } => BufferSaveOutcome::RenameIo {
+            entity,
+            path,
+            error,
+        },
+    }
+}
+
 #[derive(Debug, Error)]
 pub enum PublisherError {
     /// Bus not reachable: connect failed, handshake failed, or the
@@ -332,6 +477,11 @@ pub async fn run(
         _ => unreachable!("ActorIdentity::service returns a Service variant"),
     };
     let watcher_entity = watcher_instance_entity_ref(&instance_id);
+    // Slice-005 §28(a) re-derivation: hash the per-process Service
+    // `instance_id` to 58 bits via SipHash; this becomes the high
+    // payload bits of every UUIDv8 EventId this publisher mints. Per
+    // `specs/005-buffer-save/research.md` §5 + §12.
+    let event_prefix = weaver_core::types::ids::hash_to_58(&instance_id);
 
     info!(
         socket = %socket.display(),
@@ -354,11 +504,21 @@ pub async fn run(
     // `dispatch_buffer_edit`'s NotOwned outcome (the registry is the
     // ownership source of truth; subscribing per-entity here would
     // duplicate that gate without payoff).
+    // The listener is last-wins per connection on event subscriptions
+    // (`core/src/bus/event_subscriptions.rs`'s subscribe contract). To
+    // receive both `buffer-edit` (slice 004) and `buffer-save`
+    // (slice 005) on a single handle, we issue ONE
+    // `SubscribeEvents(PayloadTypes(...))` rather than two consecutive
+    // `PayloadType(...)` subscriptions — the second of which would
+    // silently drop the first.
     client
-        .subscribe_events(EventSubscribePattern::PayloadType("buffer-edit".into()))
+        .subscribe_events(EventSubscribePattern::PayloadTypes(vec![
+            "buffer-edit".into(),
+            "buffer-save".into(),
+        ]))
         .await
         .map_err(|source| PublisherError::BusUnavailable { source })?;
-    debug!("subscribed to buffer-edit events");
+    debug!("subscribed to buffer-edit + buffer-save events");
 
     let (reader, writer_half) = client.stream.into_split();
     let mut writer = BusWriter {
@@ -387,22 +547,28 @@ pub async fn run(
     // T030 + T032: per-buffer open + bootstrap in CLI order, fail-fast
     // with partial-retract on any open error.
     let mut registry = BufferRegistry::default();
-    let bootstrap_anchors: Vec<(EntityRef, EventId)> =
-        match open_and_bootstrap_all(&mut writer, &identity, &paths, &mut tracked, &mut registry)
-            .await
-        {
-            Ok(anchors) => anchors,
-            Err(e) => {
-                // Retract any facts the partial-bootstrap published so
-                // subscribers see retract-before-disconnect. Core's
-                // release_connection would eventually cover it, but the
-                // explicit order is a cleaner operator-observation contract
-                // per T032.
-                shutdown_retract(&mut writer, &identity, &mut tracked).await;
-                reader_task.abort();
-                return Err(e);
-            }
-        };
+    let bootstrap_anchors: Vec<(EntityRef, EventId)> = match open_and_bootstrap_all(
+        &mut writer,
+        &identity,
+        event_prefix,
+        &paths,
+        &mut tracked,
+        &mut registry,
+    )
+    .await
+    {
+        Ok(anchors) => anchors,
+        Err(e) => {
+            // Retract any facts the partial-bootstrap published so
+            // subscribers see retract-before-disconnect. Core's
+            // release_connection would eventually cover it, but the
+            // explicit order is a cleaner operator-observation contract
+            // per T032.
+            shutdown_retract(&mut writer, &identity, &mut tracked).await;
+            reader_task.abort();
+            return Err(e);
+        }
+    };
 
     // Bootstrap-write sides returned Ok (wire writes succeeded), but
     // authority-conflict rejections come back asynchronously on
@@ -519,8 +685,10 @@ pub async fn run(
         // Per-tick event id: one synthesised EventId shared across
         // every transition this tick emits — per data-model.md,
         // retract/assert of `buffer/observable` and re-assert of
-        // `buffer/dirty` correlate to the same poll tick.
-        let poll_tick_id = EventId::new(now_ns());
+        // `buffer/dirty` correlate to the same poll tick. Slice 005
+        // §28(a) re-derivation: UUIDv8 with the Service-instance-id
+        // prefix in the high 58 bits and `now_ns()` in the low 64.
+        let poll_tick_id = EventId::mint_v8(event_prefix, now_ns());
 
         for state in registry.buffers.values_mut() {
             if let Err(e) =
@@ -611,7 +779,7 @@ async fn handle_event(
                 } => {
                     info!(
                         entity = entity.as_u64(),
-                        event_id = event_id.as_u64(),
+                        event_id = %event_id,
                         new_version,
                         new_byte_size,
                         edits = edits.len(),
@@ -689,7 +857,7 @@ async fn handle_event(
                 BufferEditOutcome::NotOwned => {
                     debug!(
                         entity = entity.as_u64(),
-                        event_id = event_id.as_u64(),
+                        event_id = %event_id,
                         reason = "unowned-entity",
                         "buffer edit dropped",
                     );
@@ -697,7 +865,7 @@ async fn handle_event(
                 BufferEditOutcome::StaleVersion { current, emitted } => {
                     debug!(
                         entity = entity.as_u64(),
-                        event_id = event_id.as_u64(),
+                        event_id = %event_id,
                         reason = "stale-version",
                         emitted_version = emitted,
                         current_version = current,
@@ -707,7 +875,7 @@ async fn handle_event(
                 BufferEditOutcome::FutureVersion { current, emitted } => {
                     debug!(
                         entity = entity.as_u64(),
-                        event_id = event_id.as_u64(),
+                        event_id = %event_id,
                         reason = "future-version",
                         emitted_version = emitted,
                         current_version = current,
@@ -717,7 +885,7 @@ async fn handle_event(
                 BufferEditOutcome::EmptyBatch => {
                     debug!(
                         entity = entity.as_u64(),
-                        event_id = event_id.as_u64(),
+                        event_id = %event_id,
                         reason = "empty-batch",
                         "buffer edit dropped",
                     );
@@ -736,7 +904,7 @@ async fn handle_event(
                         } => {
                             debug!(
                                 entity = entity.as_u64(),
-                                event_id = event_id.as_u64(),
+                                event_id = %event_id,
                                 reason = err.reason(),
                                 first_index,
                                 second_index,
@@ -750,7 +918,7 @@ async fn handle_event(
                             );
                             debug!(
                                 entity = entity.as_u64(),
-                                event_id = event_id.as_u64(),
+                                event_id = %event_id,
                                 reason = err.reason(),
                                 edit_index,
                                 error = %err,
@@ -766,9 +934,150 @@ async fn handle_event(
             // to "buffer-open" events. If one arrives anyway (a
             // future producer subscribes us to it), ignore.
             debug!(
-                event_id = event_id.as_u64(),
+                event_id = %event_id,
                 "ignoring BufferOpen event on the publisher subscription path",
             );
+        }
+        EventPayload::BufferSave { entity, version } => {
+            let outcome = dispatch_buffer_save(registry, entity, version);
+            match outcome {
+                BufferSaveOutcome::Saved {
+                    entity,
+                    path,
+                    version,
+                } => {
+                    info!(
+                        entity = entity.as_u64(),
+                        event_id = %event_id,
+                        path = %path.display(),
+                        version,
+                        "buffer save applied",
+                    );
+                    let causal = Some(event_id);
+                    publish_fact(
+                        writer,
+                        FactKey::new(entity, "buffer/dirty"),
+                        FactValue::Bool(false),
+                        identity,
+                        causal,
+                        tracked,
+                    )
+                    .await?;
+                    let state = registry
+                        .buffers
+                        .get_mut(&entity)
+                        .expect("Saved implies the entity is in the registry");
+                    state.set_last_dirty(false);
+                }
+                BufferSaveOutcome::CleanSaveNoOp { entity, version } => {
+                    // R3 path: idempotent re-emission of buffer/dirty=false
+                    // for late subscribers. No disk I/O; mtime preserved.
+                    // Per FR-005 + SC-507. The path field comes from the
+                    // registry (we never accessed disk).
+                    let path = registry
+                        .buffers
+                        .get(&entity)
+                        .expect("CleanSaveNoOp implies the entity is in the registry")
+                        .path()
+                        .to_path_buf();
+                    info!(
+                        code = "WEAVER-SAVE-007",
+                        entity = entity.as_u64(),
+                        event_id = %event_id,
+                        path = %path.display(),
+                        version,
+                        "WEAVER-SAVE-007 nothing to save: buffer was already clean",
+                    );
+                    let causal = Some(event_id);
+                    publish_fact(
+                        writer,
+                        FactKey::new(entity, "buffer/dirty"),
+                        FactValue::Bool(false),
+                        identity,
+                        causal,
+                        tracked,
+                    )
+                    .await?;
+                    // last_dirty already false; no state update needed.
+                }
+                BufferSaveOutcome::StaleVersion {
+                    event_version,
+                    current_version,
+                } => {
+                    debug!(
+                        code = "WEAVER-SAVE-002",
+                        entity = entity.as_u64(),
+                        event_id = %event_id,
+                        reason = "stale-version",
+                        event_version,
+                        current_version,
+                        "buffer save dropped",
+                    );
+                }
+                BufferSaveOutcome::NotOwned { entity } => {
+                    debug!(
+                        entity = entity.as_u64(),
+                        event_id = %event_id,
+                        reason = "unowned-entity",
+                        "buffer save dropped",
+                    );
+                }
+                BufferSaveOutcome::InodeMismatch {
+                    entity,
+                    path,
+                    expected,
+                    actual,
+                } => {
+                    warn!(
+                        code = "WEAVER-SAVE-005",
+                        entity = entity.as_u64(),
+                        event_id = %event_id,
+                        path = %path.display(),
+                        expected_inode = expected,
+                        actual_inode = actual,
+                        "WEAVER-SAVE-005 path/inode mismatch on save",
+                    );
+                }
+                BufferSaveOutcome::PathMissing { entity, path } => {
+                    warn!(
+                        code = "WEAVER-SAVE-006",
+                        entity = entity.as_u64(),
+                        event_id = %event_id,
+                        path = %path.display(),
+                        "WEAVER-SAVE-006 path missing on save",
+                    );
+                }
+                BufferSaveOutcome::TempfileIo {
+                    entity,
+                    path,
+                    error,
+                } => {
+                    tracing::error!(
+                        code = "WEAVER-SAVE-003",
+                        entity = entity.as_u64(),
+                        event_id = %event_id,
+                        path = %path.display(),
+                        errno = error.raw_os_error().unwrap_or(-1),
+                        os_error = %error,
+                        "WEAVER-SAVE-003 tempfile I/O failure on save",
+                    );
+                }
+                BufferSaveOutcome::RenameIo {
+                    entity,
+                    path,
+                    error,
+                } => {
+                    tracing::error!(
+                        code = "WEAVER-SAVE-004",
+                        entity = entity.as_u64(),
+                        event_id = %event_id,
+                        path = %path.display(),
+                        errno = error.raw_os_error().unwrap_or(-1),
+                        os_error = %error,
+                        "WEAVER-SAVE-004 rename I/O failure on save",
+                    );
+                }
+            }
         }
     }
     Ok(())
@@ -874,6 +1183,7 @@ async fn poll_tick_per_buffer(
 async fn open_and_bootstrap_all(
     writer: &mut BusWriter,
     identity: &ActorIdentity,
+    event_prefix: u64,
     paths: &[PathBuf],
     tracked: &mut HashSet<FactKey>,
     registry: &mut BufferRegistry,
@@ -926,7 +1236,8 @@ async fn open_and_bootstrap_all(
         // (events are lossy-class, no retract), so the caller owns
         // the "event emission only once ownership is confirmed"
         // ordering.
-        let bootstrap_tick = EventId::new(bootstrap_base.wrapping_add(idx as u64));
+        let bootstrap_tick =
+            EventId::mint_v8(event_prefix, bootstrap_base.wrapping_add(idx as u64));
         let entity = state.entity();
         publish_buffer_bootstrap(writer, identity, &state, tracked, bootstrap_tick).await?;
         registry.insert(state);
@@ -1654,5 +1965,222 @@ mod tests {
         // Version stays at 0; content untouched.
         assert_eq!(reg.versions.get(&entity).copied(), Some(0));
         assert_eq!(reg.buffers.get(&entity).unwrap().content(), b"hello");
+    }
+
+    // ───────────────────────────────────────────────────────────────────
+    // Slice-005: dispatch_buffer_save + BufferSaveOutcome (T017).
+    // ───────────────────────────────────────────────────────────────────
+
+    /// Build a single-buffer registry on a real on-disk path (held
+    /// alive by the returned `TempDir`) with `last_dirty` flipped to
+    /// `true` so the dispatcher takes the disk-write branch (R4 + R5).
+    /// Returns the registry, derived entity, the TempDir guard, and
+    /// the canonical target path.
+    fn dirty_registry_on_disk(
+        content: &[u8],
+    ) -> (BufferRegistry, EntityRef, tempfile::TempDir, PathBuf) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let target = dir.path().join("file.txt");
+        std::fs::write(&target, content).expect("seed target");
+        let canonical = std::fs::canonicalize(&target).expect("canonicalize");
+        let mut state = BufferState::open(canonical.clone()).expect("open");
+        state.set_last_dirty(true);
+        let entity = state.entity();
+        let mut reg = BufferRegistry::default();
+        reg.insert(state);
+        (reg, entity, dir, canonical)
+    }
+
+    #[test]
+    fn dispatch_buffer_save_returns_not_owned_for_unknown_entity() {
+        let mut reg = BufferRegistry::default();
+        let entity = EntityRef::new(0xDEAD_BEEF);
+        match dispatch_buffer_save(&mut reg, entity, 0) {
+            BufferSaveOutcome::NotOwned { entity: e } => assert_eq!(e, entity),
+            other => panic!("expected NotOwned, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn dispatch_buffer_save_returns_stale_version_when_versions_disagree() {
+        let (mut reg, entity, _dir, _path) = dirty_registry_on_disk(b"x");
+        // Bump current to 5 to simulate concurrent edits since the
+        // emitter snapshotted v=0.
+        reg.versions.insert(entity, 5);
+        match dispatch_buffer_save(&mut reg, entity, 0) {
+            BufferSaveOutcome::StaleVersion {
+                event_version,
+                current_version,
+            } => {
+                assert_eq!(event_version, 0);
+                assert_eq!(current_version, 5);
+            }
+            other => panic!("expected StaleVersion, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn dispatch_buffer_save_returns_clean_save_no_op_when_buffer_clean() {
+        // After open, last_dirty=false (set by BufferState::open). R3
+        // takes the no-op branch; no disk I/O, no inode check.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let target = dir.path().join("file.txt");
+        std::fs::write(&target, b"clean content").expect("seed");
+        let canonical = std::fs::canonicalize(&target).expect("canonicalize");
+        let state = BufferState::open(canonical).expect("open");
+        let entity = state.entity();
+        let mut reg = BufferRegistry::default();
+        reg.insert(state);
+
+        match dispatch_buffer_save(&mut reg, entity, 0) {
+            BufferSaveOutcome::CleanSaveNoOp { entity: e, version } => {
+                assert_eq!(e, entity);
+                assert_eq!(version, 0);
+            }
+            other => panic!("expected CleanSaveNoOp, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn dispatch_buffer_save_returns_saved_for_dirty_buffer_with_clean_disk() {
+        let (mut reg, entity, _dir, canonical) = dirty_registry_on_disk(b"original");
+        match dispatch_buffer_save(&mut reg, entity, 0) {
+            BufferSaveOutcome::Saved {
+                entity: e,
+                path,
+                version,
+            } => {
+                assert_eq!(e, entity);
+                assert_eq!(path, canonical);
+                assert_eq!(version, 0);
+            }
+            other => panic!("expected Saved, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn dispatch_buffer_save_returns_inode_mismatch_after_external_replace() {
+        use std::os::unix::fs::MetadataExt;
+        let (mut reg, entity, dir, canonical) = dirty_registry_on_disk(b"original");
+        let captured_inode = reg.buffers.get(&entity).unwrap().inode();
+
+        // External atomic-replace.
+        let replacement = dir.path().join("replacement.txt");
+        std::fs::write(&replacement, b"different").expect("write replacement");
+        std::fs::rename(&replacement, &canonical).expect("rename swap");
+        let new_inode = std::fs::metadata(&canonical).expect("stat").ino();
+        assert_ne!(captured_inode, new_inode);
+
+        match dispatch_buffer_save(&mut reg, entity, 0) {
+            BufferSaveOutcome::InodeMismatch {
+                entity: e,
+                path,
+                expected,
+                actual,
+            } => {
+                assert_eq!(e, entity);
+                assert_eq!(path, canonical);
+                assert_eq!(expected, captured_inode);
+                assert_eq!(actual, new_inode);
+            }
+            other => panic!("expected InodeMismatch, got {other:?}"),
+        }
+        // Refusal preserves external content byte-for-byte.
+        assert_eq!(std::fs::read(&canonical).expect("read"), b"different");
+    }
+
+    #[test]
+    fn dispatch_buffer_save_returns_path_missing_after_external_delete() {
+        let (mut reg, entity, _dir, canonical) = dirty_registry_on_disk(b"original");
+        std::fs::remove_file(&canonical).expect("delete");
+
+        match dispatch_buffer_save(&mut reg, entity, 0) {
+            BufferSaveOutcome::PathMissing { entity: e, path } => {
+                assert_eq!(e, entity);
+                assert_eq!(path, canonical);
+            }
+            other => panic!("expected PathMissing, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn dispatch_buffer_save_returns_tempfile_io_when_hook_fails_at_write() {
+        use crate::atomic_write::WriteStep;
+        let (mut reg, entity, _dir, canonical) = dirty_registry_on_disk(b"original");
+
+        let outcome = dispatch_buffer_save_with_hooks(&mut reg, entity, 0, |s| {
+            if s == WriteStep::WriteContents {
+                Err(io::Error::other("simulated ENOSPC"))
+            } else {
+                Ok(())
+            }
+        });
+        match outcome {
+            BufferSaveOutcome::TempfileIo {
+                entity: e,
+                path,
+                error,
+            } => {
+                assert_eq!(e, entity);
+                assert_eq!(path, canonical);
+                assert!(error.to_string().contains("simulated ENOSPC"));
+            }
+            other => panic!("expected TempfileIo, got {other:?}"),
+        }
+        // Atomic-rename invariant: pre-rename failure leaves disk
+        // byte-identical.
+        assert_eq!(std::fs::read(&canonical).expect("read"), b"original");
+    }
+
+    #[test]
+    fn dispatch_buffer_save_returns_rename_io_when_hook_fails_at_rename() {
+        use crate::atomic_write::WriteStep;
+        let (mut reg, entity, _dir, canonical) = dirty_registry_on_disk(b"original");
+
+        let outcome = dispatch_buffer_save_with_hooks(&mut reg, entity, 0, |s| {
+            if s == WriteStep::RenameToTarget {
+                Err(io::Error::other("simulated EXDEV"))
+            } else {
+                Ok(())
+            }
+        });
+        match outcome {
+            BufferSaveOutcome::RenameIo {
+                entity: e,
+                path,
+                error,
+            } => {
+                assert_eq!(e, entity);
+                assert_eq!(path, canonical);
+                assert!(error.to_string().contains("simulated EXDEV"));
+            }
+            other => panic!("expected RenameIo, got {other:?}"),
+        }
+        assert_eq!(std::fs::read(&canonical).expect("read"), b"original");
+    }
+
+    #[test]
+    fn dispatch_buffer_save_does_not_bump_version_on_accept() {
+        // Save is non-mutating w.r.t. buffer/version (FR-004). The
+        // version stays at its pre-save value across every outcome —
+        // including Saved.
+        let (mut reg, entity, _dir, _canonical) = dirty_registry_on_disk(b"original");
+        let _ = dispatch_buffer_save(&mut reg, entity, 0);
+        assert_eq!(reg.versions.get(&entity).copied(), Some(0));
+    }
+
+    #[test]
+    fn dispatch_buffer_save_does_not_mutate_buffer_state_on_accept() {
+        // BufferState::content is read-only across save; the
+        // memory_digest invariant from slice-003/004 is preserved.
+        let (mut reg, entity, _dir, _canonical) = dirty_registry_on_disk(b"original");
+        let content_before = reg.buffers.get(&entity).unwrap().content().to_vec();
+        let digest_before = *reg.buffers.get(&entity).unwrap().memory_digest();
+
+        let _ = dispatch_buffer_save(&mut reg, entity, 0);
+
+        let state = reg.buffers.get(&entity).unwrap();
+        assert_eq!(state.content(), content_before.as_slice());
+        assert_eq!(state.memory_digest(), &digest_before);
     }
 }

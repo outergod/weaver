@@ -60,7 +60,7 @@ fn transition_shares_causal_parent(prev: WorkingCopyState, next: WorkingCopyStat
     let repo_entity = EntityRef::new(1);
     let repo_path = Path::new("/tmp/fictional-repo");
     let tracked: HashSet<FactKey> = HashSet::new();
-    let poll_tick = EventId::new(42);
+    let poll_tick = EventId::for_testing(42);
     let ops = transition_ops(
         repo_entity,
         repo_path,
@@ -178,7 +178,7 @@ fn same_variant_payload_change_emits_no_retract() {
             name: "develop".into(),
         }),
         &tracked,
-        EventId::new(42),
+        EventId::for_testing(42),
     );
     let state_retracts = ops
         .iter()

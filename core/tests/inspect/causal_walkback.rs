@@ -86,7 +86,7 @@ async fn behavior_chain_walks_back_to_originating_event_with_structured_identity
     )));
 
     // Hop 1: TUI-sourced Event → dispatcher.
-    let originating_event_id = EventId::new(4242);
+    let originating_event_id = EventId::for_testing(4242);
     dispatcher
         .process_event(Event {
             id: originating_event_id,
@@ -155,7 +155,7 @@ async fn multi_kind_chain_preserves_structured_identity_across_service_hop() {
     // Behavior-authored hop (as above).
     dispatcher
         .process_event(Event {
-            id: EventId::new(11),
+            id: EventId::for_testing(11),
             name: "buffer/open".into(),
             target: Some(buffer),
             payload: EventPayload::BufferOpen {

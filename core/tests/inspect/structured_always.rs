@@ -90,7 +90,7 @@ async fn every_inspection_response_is_structured_across_fact_families() {
     // ------------------------------------------------------------
     dispatcher
         .process_event(Event {
-            id: EventId::new(10),
+            id: EventId::for_testing(10),
             name: "buffer/open".into(),
             target: Some(buffer_entity),
             payload: EventPayload::BufferOpen {

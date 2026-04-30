@@ -38,7 +38,7 @@ async fn weaver_buffers_overwrite_of_behavior_buffer_dirty_attributes_to_service
         FactValue::Bool(true),
     )));
 
-    let event_id = EventId::new(42);
+    let event_id = EventId::for_testing(42);
     dispatcher
         .process_event(Event {
             id: event_id,

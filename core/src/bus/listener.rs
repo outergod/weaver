@@ -294,7 +294,7 @@ async fn handle_client_message(
                 return Ok(HandlerOutcome::None);
             }
             // Slice 004 review: structural envelope checks. Reject
-            // `EventId::ZERO` (reserved sentinel — see §28) and
+            // `EventId::nil()` (reserved sentinel — see §28) and
             // BufferEdit target/payload entity mismatch (corrupts
             // trace + inspect-why attribution — see comment on
             // `validate_event_envelope`). Same rejection shape as the
@@ -543,20 +543,21 @@ async fn handle_client_message(
 /// Slice-004 `EventInspectRequest` lookup. Returns the `Event` envelope
 /// at `event_id` or `EventNotFound`.
 ///
-/// `EventId` is unique per producer, not globally — concurrent producers
-/// minting the same id leave only the latest event in the trace's
-/// `by_event` index, so this walkback may attribute a fact to the wrong
-/// emitter on collision. Class-wide fix tracked at
-/// `docs/07-open-questions.md §28`.
+/// `EventId` is now a 16-byte UUIDv8 producer-minted with a
+/// hashed-producer-instance-id prefix per slice-005 §28(a) re-derivation
+/// (`docs/07-open-questions.md §28`, RESOLVED). Cross-producer collision
+/// is structurally impossible — distinct producers occupy disjoint
+/// 58-bit-prefix namespaces. Listener-side prefix-vs-provenance
+/// verification (catching identity spoofing) is DEFERRED to slice 006
+/// alongside FR-029.
 ///
-/// Short-circuits [`EventId::ZERO`] to `EventNotFound`: the
-/// inspect-handler uses ZERO as a sentinel for "fact has no
-/// causal_parent" (`core/src/inspect/handler.rs:140`), so a walkback
-/// request carrying ZERO must produce a clean miss rather than
-/// resolving to whichever real event happens to sit at id 0 in the
-/// `by_event` index. Slice 004 closed the deterministic-collision case
-/// (`weaver-buffers` bootstrap formerly minted `EventId::new(idx)`
-/// starting at 0; now wall-clock-based via `now_ns().wrapping_add(idx)`).
+/// Short-circuits [`EventId::nil()`] (the all-zero UUID — slice-004's
+/// `EventId::nil()` retargeted at the new wire shape per FR-024) to
+/// `EventNotFound`: the inspect-handler uses `nil()` as a sentinel for
+/// "fact has no causal_parent" (`core/src/inspect/handler.rs`), so a
+/// walkback request carrying `nil()` must produce a clean miss rather
+/// than resolving to whichever event happens to sit at the all-zero
+/// UUID in the `by_event` index.
 ///
 /// **Frame-size headroom asymmetry** (`docs/07-open-questions.md §29`):
 /// the caller's `BusMessage::EventInspectResponse` wrapper around the
@@ -573,7 +574,7 @@ async fn lookup_event_for_inspect(
 ) -> Result<crate::types::event::Event, crate::types::message::EventInspectionError> {
     use crate::types::ids::EventId;
     use crate::types::message::EventInspectionError;
-    if event_id == EventId::ZERO {
+    if event_id == EventId::nil() {
         return Err(EventInspectionError::EventNotFound);
     }
     let trace = dispatcher.trace();
@@ -599,16 +600,18 @@ async fn lookup_event_for_inspect(
 ///
 /// Two structural invariants enforced today:
 ///
-/// * **`EventId::ZERO` is reserved.** The inspect handler uses
-///   [`crate::types::ids::EventId::ZERO`] as a sentinel for "fact has no
-///   `causal_parent`" (`core/src/inspect/handler.rs:140`), and
-///   [`lookup_event_for_inspect`] short-circuits ZERO requests to
-///   `EventNotFound` to keep that sentinel meaning intact. A real event
-///   ingested with ID 0 would therefore become uninspectable; reject
-///   at ingest so non-CLI producers can't silently lose provenance.
-///   Closes one §28 concrete instance at the producer side
-///   (`docs/07-open-questions.md §28`); the lookup short-circuit
-///   becomes belt-and-braces.
+/// * **`EventId::nil()` is reserved.** The inspect handler uses
+///   [`crate::types::ids::EventId::nil`] (the all-zero UUID; slice-004's
+///   `EventId::nil()` retargeted at the slice-005 UUIDv8 wire shape per
+///   FR-024) as a sentinel for "fact has no `causal_parent`"
+///   (`core/src/inspect/handler.rs`), and [`lookup_event_for_inspect`]
+///   short-circuits `nil()` requests to `EventNotFound` to keep that
+///   sentinel meaning intact. A real event ingested with `id == nil()`
+///   would therefore become uninspectable; reject at ingest so
+///   non-CLI producers can't silently lose provenance. Resolution of
+///   the broader §28 collision class lands as the slice-005 UUIDv8
+///   producer-prefix scheme; this rejection stays as defence against
+///   producer bugs.
 /// * **`BufferEdit` envelope/payload entity must agree.** The dispatcher
 ///   forwards `event.target` to the trace unchanged; `weaver-buffers`
 ///   dispatches on `payload.entity`. A producer that sets these to
@@ -616,14 +619,20 @@ async fn lookup_event_for_inspect(
 ///   variable, but non-CLI producers can drift) would apply edits to
 ///   one buffer while attributing the source event to another in
 ///   `weaver inspect --why`. Reject at ingest.
+///
+/// **Deferred to slice 006**: producer-prefix-vs-provenance verification
+/// — catching a producer that mints UUIDv8s under another producer's
+/// hashed-instance-id prefix. Joins FR-029 (unauthenticated edit/save
+/// channel) close-out; both share the hazard class of unauthenticated
+/// identity claims at the wire.
 fn validate_event_envelope(event: &crate::types::event::Event) -> Result<(), String> {
     use crate::types::event::EventPayload;
     use crate::types::ids::EventId;
 
-    if event.id == EventId::ZERO {
+    if event.id == EventId::nil() {
         return Err(
-            "EventId::ZERO is reserved as the 'no causal_parent' sentinel; \
-             producers must mint a non-zero id (per docs/07-open-questions.md §28)"
+            "EventId::nil() is reserved as the 'no causal_parent' sentinel; \
+             producers must mint a non-nil UUIDv8 id (per docs/07-open-questions.md §28)"
                 .to_string(),
         );
     }
@@ -633,6 +642,16 @@ fn validate_event_envelope(event: &crate::types::event::Event) -> Result<(), Str
             other => {
                 return Err(format!(
                     "BufferEdit envelope/payload mismatch: target={} payload.entity={}",
+                    other.map_or("None".to_string(), |e| e.as_u64().to_string()),
+                    entity.as_u64()
+                ));
+            }
+        },
+        EventPayload::BufferSave { entity, .. } => match event.target {
+            Some(target) if target == *entity => {}
+            other => {
+                return Err(format!(
+                    "BufferSave envelope/payload mismatch: target={} payload.entity={}",
                     other.map_or("None".to_string(), |e| e.as_u64().to_string()),
                     entity.as_u64()
                 ));
@@ -767,16 +786,30 @@ mod handshake_tests {
 
     #[tokio::test]
     async fn mismatched_hello_is_rejected_with_contract_detail() {
+        // Client announces the immediate-prior protocol version. The
+        // contract (specs/005-buffer-save/contracts/bus-messages.md
+        // §Connection lifecycle) pins the exact `detail` wording the
+        // core must emit so operators see a consistent diagnostic.
+        assert_version_rejected_with_contract_detail(0x04).await;
+    }
+
+    #[tokio::test]
+    async fn forward_incompatible_hellos_are_rejected_with_contract_detail() {
+        // Forward-incompatibility check: every protocol version older
+        // than the immediate-prior must also reject with the same
+        // category and detail-string template, so a long-tail v0.1/v0.2
+        // client gets the same diagnostic shape as a v0.4 one.
+        for stale_version in [0x01u8, 0x02, 0x03] {
+            assert_version_rejected_with_contract_detail(stale_version).await;
+        }
+    }
+
+    async fn assert_version_rejected_with_contract_detail(stale_version: u8) {
         let (server, mut client) = UnixStream::pair().expect("pair");
         let dispatcher = Arc::new(Dispatcher::new());
 
         let server_task = tokio::spawn(handle_connection(server, dispatcher));
 
-        // Client announces the prior protocol version. The contract
-        // (specs/004-buffer-edit/contracts/bus-messages.md §Connection
-        // lifecycle) pins the exact `detail` wording the core must
-        // emit so operators see a consistent diagnostic.
-        let stale_version: u8 = 0x03;
         write_message(
             &mut client,
             &BusMessage::Hello(HelloMsg {
@@ -836,7 +869,7 @@ mod event_inspect_lookup_tests {
 
     /// Regression for the slice-004 finding: even when a real event
     /// with `EventId(0)` is in the trace, an `EventInspectRequest`
-    /// carrying `EventId::ZERO` must short-circuit to `EventNotFound`.
+    /// carrying `EventId::nil()` must short-circuit to `EventNotFound`.
     /// The inspect-handler treats ZERO as the "no causal_parent"
     /// sentinel; resolving it to a real event would mis-attribute facts
     /// that have no source event.
@@ -851,11 +884,11 @@ mod event_inspect_lookup_tests {
             trace.append(
                 0,
                 TracePayload::Event {
-                    event: fixture_event(EventId::ZERO),
+                    event: fixture_event(EventId::nil()),
                 },
             );
         }
-        let result = lookup_event_for_inspect(&dispatcher, EventId::ZERO).await;
+        let result = lookup_event_for_inspect(&dispatcher, EventId::nil()).await;
         assert_eq!(
             result,
             Err(EventInspectionError::EventNotFound),
@@ -866,7 +899,7 @@ mod event_inspect_lookup_tests {
     #[tokio::test]
     async fn lookup_event_for_inspect_returns_event_for_real_id() {
         let dispatcher = Dispatcher::new();
-        let id = EventId::new(42);
+        let id = EventId::for_testing(42);
         {
             let trace_arc = dispatcher.trace();
             let mut trace = trace_arc.lock().await;
@@ -886,7 +919,7 @@ mod event_inspect_lookup_tests {
     #[tokio::test]
     async fn lookup_event_for_inspect_missing_id_returns_event_not_found() {
         let dispatcher = Dispatcher::new();
-        let result = lookup_event_for_inspect(&dispatcher, EventId::new(123)).await;
+        let result = lookup_event_for_inspect(&dispatcher, EventId::for_testing(123)).await;
         assert_eq!(result, Err(EventInspectionError::EventNotFound));
     }
 }
@@ -939,16 +972,27 @@ mod event_envelope_validation_tests {
     }
 
     #[test]
-    fn rejects_event_id_zero() {
+    fn rejects_event_id_nil() {
+        // Slice 005 §28(a) re-derivation: slice-004's `EventId::ZERO`
+        // sentinel is retargeted at `EventId::nil()` (the all-zero UUID)
+        // under the new UUIDv8 wire shape; the rejection contract is
+        // semantically unchanged per FR-024.
         let entity = EntityRef::new(7);
-        let event = buffer_edit(EventId::ZERO, Some(entity), entity);
-        let err = validate_event_envelope(&event).expect_err("ZERO must be rejected");
-        assert!(err.contains("ZERO"), "error must name ZERO sentinel: {err}");
+        let event = buffer_edit(EventId::nil(), Some(entity), entity);
+        let err = validate_event_envelope(&event).expect_err("nil() must be rejected");
+        assert!(
+            err.contains("nil()"),
+            "error must name nil() sentinel: {err}"
+        );
     }
 
     #[test]
     fn rejects_buffer_edit_with_target_payload_mismatch() {
-        let event = buffer_edit(EventId::new(1), Some(EntityRef::new(1)), EntityRef::new(2));
+        let event = buffer_edit(
+            EventId::for_testing(1),
+            Some(EntityRef::new(1)),
+            EntityRef::new(2),
+        );
         let err = validate_event_envelope(&event).expect_err("mismatch must be rejected");
         assert!(
             err.contains("BufferEdit envelope/payload mismatch"),
@@ -963,7 +1007,7 @@ mod event_envelope_validation_tests {
 
     #[test]
     fn rejects_buffer_edit_with_none_target() {
-        let event = buffer_edit(EventId::new(1), None, EntityRef::new(2));
+        let event = buffer_edit(EventId::for_testing(1), None, EntityRef::new(2));
         let err = validate_event_envelope(&event).expect_err("None target must be rejected");
         assert!(
             err.contains("target=None"),
@@ -974,7 +1018,7 @@ mod event_envelope_validation_tests {
     #[test]
     fn accepts_buffer_edit_with_consistent_target_and_entity() {
         let entity = EntityRef::new(42);
-        let event = buffer_edit(EventId::new(1), Some(entity), entity);
+        let event = buffer_edit(EventId::for_testing(1), Some(entity), entity);
         validate_event_envelope(&event).expect("consistent envelope must pass");
     }
 
@@ -982,9 +1026,12 @@ mod event_envelope_validation_tests {
     fn accepts_buffer_open_regardless_of_target() {
         // BufferOpen has no payload entity to compare; weaver-buffers
         // re-derives from the path. Any target should pass (or absent).
-        validate_event_envelope(&buffer_open(EventId::new(1), Some(EntityRef::new(99))))
-            .expect("BufferOpen with target must pass");
-        validate_event_envelope(&buffer_open(EventId::new(1), None))
+        validate_event_envelope(&buffer_open(
+            EventId::for_testing(1),
+            Some(EntityRef::new(99)),
+        ))
+        .expect("BufferOpen with target must pass");
+        validate_event_envelope(&buffer_open(EventId::for_testing(1), None))
             .expect("BufferOpen without target must pass");
     }
 }
