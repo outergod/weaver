@@ -126,6 +126,18 @@ where
     // successful rename the path no longer exists; ENOENT from the
     // cleanup attempt is silently absorbed.
 
+    // open(2) applies `mode & ~umask`, so a restrictive umask (e.g.
+    // 0o077) would silently narrow our captured target_mode (e.g.
+    // 0o755 → 0o700, dropping group + other rwx). Explicit
+    // set_permissions bypasses umask filtering and enforces the
+    // captured mode exactly. Codex P1 follow-up review on PR #12.
+    if let Err(e) =
+        std::fs::set_permissions(&tempfile_path, std::fs::Permissions::from_mode(target_mode))
+    {
+        let _ = std::fs::remove_file(&tempfile_path);
+        return Err((WriteStep::OpenTempfile, e));
+    }
+
     // --- Step 2 --- WriteContents.
     if let Err(e) = before(WriteStep::WriteContents) {
         let _ = std::fs::remove_file(&tempfile_path);
@@ -345,6 +357,43 @@ mod tests {
             std::fs::read(&target).expect("read content"),
             b"#!/bin/sh\necho new\n",
             "content must reflect the new bytes",
+        );
+    }
+
+    #[test]
+    fn save_preserves_target_mode_under_restrictive_umask() {
+        // Codex P1 follow-up (PR #12): a restrictive process umask
+        // (e.g. 0o077) would silently narrow OpenOptions::mode's
+        // intent; the kernel applies `mode & ~umask` at open(2). The
+        // explicit set_permissions after open bypasses this and
+        // enforces the captured target_mode exactly.
+        //
+        // Test sets umask=0o077, opens a 0o755 target, then runs
+        // atomic_write_with_hooks; the post-save mode must be 0o755
+        // (NOT 0o700 which is what umask-filtered open would yield).
+        // umask is process-wide; restore it after the test to avoid
+        // cross-test interference.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let target = dir.path().join("script.sh");
+        std::fs::write(&target, b"#!/bin/sh\necho old\n").expect("seed target");
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o755))
+            .expect("chmod 0o755");
+
+        let prior_umask = unsafe { libc::umask(0o077) };
+        let result = atomic_write_with_hooks(&target, b"#!/bin/sh\necho new\n", no_hook);
+        // Restore umask BEFORE assertions so a panic doesn't leak it.
+        unsafe { libc::umask(prior_umask) };
+        result.expect("save");
+
+        let post_mode = std::fs::metadata(&target)
+            .expect("stat post-save")
+            .permissions()
+            .mode()
+            & 0o7777;
+        assert_eq!(
+            post_mode, 0o755,
+            "0o755 must survive `weaver save` even under restrictive umask 0o077 \
+             (got 0o{post_mode:o}); set_permissions bypass is the load-bearing piece",
         );
     }
 
