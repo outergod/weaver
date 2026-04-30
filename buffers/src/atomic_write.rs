@@ -128,12 +128,17 @@ where
 
     // open(2) applies `mode & ~umask`, so a restrictive umask (e.g.
     // 0o077) would silently narrow our captured target_mode (e.g.
-    // 0o755 → 0o700, dropping group + other rwx). Explicit
-    // set_permissions bypasses umask filtering and enforces the
-    // captured mode exactly. Codex P1 follow-up review on PR #12.
-    if let Err(e) =
-        std::fs::set_permissions(&tempfile_path, std::fs::Permissions::from_mode(target_mode))
-    {
+    // 0o755 → 0o700, dropping group + other rwx). Bypass umask
+    // filtering by setting permissions through the file descriptor
+    // (`File::set_permissions`, which calls `fchmod(2)` under the
+    // hood) rather than the path. The FD-based call is also immune
+    // to symlink races on the tempfile path: a writable parent
+    // directory could let an attacker swap the tempfile path
+    // between our `open` and our chmod, causing a path-based
+    // `set_permissions` to operate on an unintended file. The FD
+    // points at the inode our `open` returned regardless of any
+    // path-level games. Codex P1 follow-up reviews on PR #12.
+    if let Err(e) = tempfile.set_permissions(std::fs::Permissions::from_mode(target_mode)) {
         let _ = std::fs::remove_file(&tempfile_path);
         return Err((WriteStep::OpenTempfile, e));
     }
