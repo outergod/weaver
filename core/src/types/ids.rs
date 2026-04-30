@@ -115,13 +115,32 @@ impl EventId {
     /// to look up `prefix → friendly_name` bindings via passive cache
     /// (slice-005 tasks T-A3 + T-A4).
     ///
-    /// Returns `0` for non-UUIDv8 inputs (e.g., [`EventId::nil`] or
-    /// IDs minted as the slice-005 T-A1 transitional placeholder
-    /// `Uuid::from_u128(now_ns() as u128)` whose version/variant bits
-    /// are zero). Such IDs occupy the all-zero "unknown" prefix bucket
-    /// in the display cache — a clean miss rather than a misattribution.
+    /// Returns `0` for any non-UUIDv8 input — IDs whose RFC 9562
+    /// version nibble is not `0x8` OR whose variant bits are not
+    /// `0b10` (RFC 4122). This includes [`EventId::nil`] (all-zero,
+    /// version=0/variant=0) AND any structurally-valid UUIDv4 / v7 /
+    /// etc. that a misbehaving producer might emit. Such IDs occupy
+    /// the all-zero "unknown" prefix bucket in the display cache —
+    /// a clean miss rather than a misattribution to whatever
+    /// producer's prefix the high bits happen to alias.
+    ///
+    /// **Why the explicit gate**: listener-side envelope validation
+    /// (`core/src/bus/listener.rs::validate_event_envelope`) only
+    /// rejects [`EventId::nil`]. Listener-side prefix-vs-provenance
+    /// verification (catching identity spoofing under another
+    /// producer's prefix, including via non-v8 UUIDs that happen to
+    /// alias a real prefix) is DEFERRED to slice 006 alongside
+    /// FR-029. Until then, this getter is the local guard that keeps
+    /// the display cache from misattributing.
     pub const fn extract_prefix(&self) -> u64 {
         let value = self.0.as_u128();
+        // RFC 9562 §4: version nibble in byte 6 high; variant bits in
+        // byte 8 high two. UUIDv8 = version 0x8, variant 0b10.
+        let version = (value >> 76) & 0xf;
+        let variant = (value >> 62) & 0b11;
+        if version != 0x8 || variant != 0b10 {
+            return 0;
+        }
         let custom_a: u64 = ((value >> 80) & ((1u128 << 48) - 1)) as u64;
         let custom_b: u64 = ((value >> 64) & ((1u128 << 12) - 1)) as u64;
         let prefix_low_10: u64 = (custom_b >> 2) & ((1u64 << 10) - 1);
@@ -270,15 +289,41 @@ mod tests {
         assert_ne!(b, c);
     }
 
-    /// `extract_prefix` returns 0 for `EventId::nil()` and for
-    /// `for_testing` IDs whose u128 value has zero bits in the
-    /// payload positions occupied by the producer-prefix.
+    /// `extract_prefix` returns 0 for ANY non-UUIDv8 input — not
+    /// just nil / all-zero. The function-level gate keeps the
+    /// display cache from misattributing when a producer ships a
+    /// version-not-8 UUID (UUIDv4, v7, malformed mint, etc.) whose
+    /// high bits would otherwise alias a real producer's prefix.
     #[test]
     fn extract_prefix_returns_zero_for_non_uuidv8() {
+        use uuid::Uuid;
         assert_eq!(EventId::nil().extract_prefix(), 0);
         // for_testing(N) wraps Uuid::from_u128(N); for small N the
         // high-bit positions where the producer-prefix lives are zero.
         assert_eq!(EventId::for_testing(42).extract_prefix(), 0);
+        // A UUIDv4 with high bits that LOOK like a non-zero prefix —
+        // but the version nibble is 0x4, not 0x8. The gate must
+        // collapse this to 0 rather than returning whatever
+        // bit-extraction would yield.
+        let uuidv4_with_high_bits =
+            Uuid::parse_str("deadbeef-cafe-4abc-8def-1234567890ab").expect("hand-crafted uuidv4");
+        let id = EventId::new(uuidv4_with_high_bits);
+        assert_eq!(
+            id.extract_prefix(),
+            0,
+            "non-v8 UUID must collapse to prefix=0 (got {} for {})",
+            id.extract_prefix(),
+            uuidv4_with_high_bits,
+        );
+        // A UUID with v8 nibble but wrong variant bits must also
+        // collapse — both gate halves are load-bearing.
+        let v8_wrong_variant = Uuid::parse_str("deadbeef-cafe-8abc-3def-1234567890ab")
+            .expect("v8 nibble + non-RFC4122 variant 0b00 in '3' high bits");
+        assert_eq!(
+            EventId::new(v8_wrong_variant).extract_prefix(),
+            0,
+            "v8 nibble + non-RFC4122 variant must also collapse to 0",
+        );
     }
 
     /// `hash_to_58` is deterministic per-process and stays inside the
