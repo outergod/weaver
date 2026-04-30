@@ -24,6 +24,7 @@
 //! See `specs/005-buffer-save/research.md §3, §6, §7`.
 
 use std::io::{self, Write};
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::Path;
 
 #[cfg(test)]
@@ -87,6 +88,26 @@ where
     );
     let tempfile_path = parent.join(&tempfile_name);
 
+    // Capture the target's mode bits so the rename preserves them.
+    // Without this, an executable file (e.g., 0o755) would silently
+    // drop its +x after `weaver save` because the tempfile was opened
+    // with the process default (0o666 & umask). Codex P1 review on
+    // PR #12. Mask `0o7777` retains permission + setuid/setgid/sticky
+    // bits and drops the file-type / non-permission `mode_t` bits.
+    //
+    // Ownership (uid/gid) is NOT preserved — matches the convention
+    // most editors follow (vim, emacs save-via-rename pattern); only
+    // root could honour ownership preservation cross-uid, and most
+    // workflows save under the current uid anyway.
+    //
+    // If the target does not yet exist, fall back to `0o666` (the
+    // OpenOptions default; the kernel applies the process umask on
+    // `open(2)`).
+    let target_mode: u32 = match std::fs::metadata(path) {
+        Ok(m) => m.permissions().mode() & 0o7777,
+        Err(_) => 0o666,
+    };
+
     // --- Step 1 --- OpenTempfile.
     if let Err(e) = before(WriteStep::OpenTempfile) {
         return Err((WriteStep::OpenTempfile, e));
@@ -94,6 +115,7 @@ where
     let mut tempfile = match std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
+        .mode(target_mode)
         .open(&tempfile_path)
     {
         Ok(f) => f,
@@ -294,6 +316,47 @@ mod tests {
             .expect_err("open hook injection failure");
         assert_eq!(read_dir_count_orphans(dir.path()), 0);
     }
+
+    #[test]
+    fn save_preserves_target_mode_including_executable_bit() {
+        // Codex P1 (PR #12): saving an executable must NOT silently
+        // drop its +x after rename. The tempfile is opened with the
+        // target's existing mode; rename preserves the source-inode's
+        // metadata — including mode — so the post-save file matches
+        // the pre-save permissions byte-for-byte.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let target = dir.path().join("script.sh");
+        std::fs::write(&target, b"#!/bin/sh\necho old\n").expect("seed target");
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o755))
+            .expect("chmod 0o755");
+
+        atomic_write_with_hooks(&target, b"#!/bin/sh\necho new\n", no_hook).expect("save");
+
+        let post_mode = std::fs::metadata(&target)
+            .expect("stat post-save")
+            .permissions()
+            .mode()
+            & 0o7777;
+        assert_eq!(
+            post_mode, 0o755,
+            "executable mode 0o755 must survive `weaver save` (got 0o{post_mode:o})",
+        );
+        assert_eq!(
+            std::fs::read(&target).expect("read content"),
+            b"#!/bin/sh\necho new\n",
+            "content must reflect the new bytes",
+        );
+    }
+
+    // Note on setuid/setgid/sticky preservation: the production code's
+    // 0o7777 bitmask captures the high mode bits, and `OpenOptions::mode`
+    // forwards them to `open(2)`. Verifying the round-trip in a unit
+    // test is not portable — many distributions (and most container
+    // runtimes) mount `/tmp` with `nosuid`, which strips the setuid /
+    // setgid bits regardless of process behavior. The executable
+    // (`0o755`) test above covers the operator-relevant rwx surface;
+    // the high bits ride the same `target_mode` flow with no
+    // additional code path.
 
     #[test]
     fn fsync_parent_failure_leaves_target_with_new_content() {
